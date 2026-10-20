@@ -1,0 +1,83 @@
+/* ===== 基础样式 ===== */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans SC', system-ui, sans-serif;
+  font-size: var(--font-size);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+}
+
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+
+::selection { background: rgba(180, 83, 9, 0.18); }
+
+/* 细滚动条 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(120, 128, 140, 0.35); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(120, 128, 140, 0.55); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 键盘焦点可见性 */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+
+/* 长内容不撑破 */
+.txt-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.word-break { overflow-wrap: break-word; word-break: break-word; }
+
+.screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 演示模式标识徽章 */
+.demo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 1px solid rgba(180, 83, 9, 0.25);
+  user-select: none;
+}
+
+/* 卡片进入动画（轻微淡入，无闪烁） */
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.card-enter { animation: card-in var(--t-base) var(--ease) both; }
+
+/* 流式光标 */
+@keyframes caret-blink { 50% { opacity: 0.2; } }
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--text-2);
+  border-radius: 1px;
+  animation: caret-blink 900ms steps(1) infinite;
+}

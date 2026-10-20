@@ -1,0 +1,174 @@
+/* ===== 开屏 / 欢迎页 / 品牌首页 ===== */
+
+/* ---- 开屏与欢迎（同一连续场景，阶段由 data-stage 驱动；后续阶段累积继承前序状态） ---- */
+.splash {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-ink);
+  transition: background 700ms var(--ease);
+  overflow: hidden;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) { background: var(--brand-cream); }
+
+.splash-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* Logo 初始居中；进入 cream 阶段后上移到上半屏 */
+  transform: translateY(0);
+  transition: transform 700ms var(--ease);
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-inner { transform: translateY(-28vh); }
+
+.splash-logo {
+  width: clamp(72px, 16vh, 128px);
+  height: clamp(72px, 16vh, 128px);
+  opacity: 0;
+  transform: scale(0.94);
+  transition: opacity 500ms var(--ease), transform 500ms var(--ease);
+}
+.splash:is([data-stage='logo'], [data-stage='word'], [data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-logo {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.splash-word {
+  margin-top: 18px;
+  font-size: 20px;
+  letter-spacing: 0.35em;
+  color: var(--brand-cream);
+  font-weight: 300;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 400ms var(--ease), transform 400ms var(--ease), color 700ms var(--ease);
+  padding-left: 0.35em; /* 抵消 letter-spacing 造成的视觉偏移 */
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word { color: var(--brand-ink); }
+.splash:is([data-stage='word'], [data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 开始按钮：cream 阶段后出现在下方中央 */
+.splash-start-wrap {
+  position: absolute;
+  bottom: 18vh;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 500ms var(--ease), transform 500ms var(--ease);
+  pointer-events: none;
+}
+.splash[data-stage='ready'] .splash-start-wrap,
+.splash[data-stage='stable'] .splash-start-wrap { opacity: 1; transform: translateY(0); pointer-events: auto; }
+
+.btn-start {
+  min-width: 148px;
+  height: 46px;
+  border-radius: var(--r-md);
+  border: none;
+  background: var(--brand-yellow);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.25em;
+  padding-left: calc(16px + 0.25em);
+  box-shadow: var(--shadow-1);
+  transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.btn-start:hover { background: var(--brand-yellow-hover); box-shadow: var(--shadow-2); }
+.btn-start:active { transform: scale(0.98); background: var(--brand-yellow-active); }
+.btn-start:focus-visible { outline: 2px solid var(--brand-yellow-ring); outline-offset: 3px; }
+
+/* 跳过提示 */
+.splash-skip {
+  position: absolute;
+  bottom: 22px;
+  right: 26px;
+  border: none;
+  background: none;
+  color: var(--brand-cream);
+  opacity: 0.55;
+  font-size: 12px;
+  transition: opacity var(--t-fast);
+}
+.splash-skip:hover { opacity: 0.9; }
+.splash[data-stage='cream'] .splash-skip,
+.splash[data-stage='ready'] .splash-skip,
+.splash[data-stage='stable'] .splash-skip { display: none; }
+
+/* ---- 品牌首页（点击开始后） ---- */
+.brand-home {
+  position: absolute;
+  inset: 0;
+  background: var(--brand-cream);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: bg-in 300ms var(--ease) both;
+}
+@keyframes bg-in { from { opacity: 0.4; } }
+
+.home-logo-wrap {
+  margin-top: 14vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.home-logo-wrap .word {
+  font-size: 18px;
+  letter-spacing: 0.35em;
+  padding-left: 0.35em;
+  color: var(--brand-ink);
+  font-weight: 300;
+}
+.home-logo { width: clamp(64px, 13vh, 104px); height: clamp(64px, 13vh, 104px); }
+
+.home-ask {
+  margin-top: 5vh;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--brand-ink);
+  opacity: 0;
+  animation: rise-in 420ms var(--ease) 120ms both;
+}
+@keyframes rise-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+
+.home-composer-wrap {
+  width: min(680px, 86vw);
+  margin-top: 22px;
+  opacity: 0;
+  animation: rise-in 380ms var(--ease) 220ms both;
+}
+
+/* 右上角模式选择 */
+.mode-pill {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  display: inline-flex;
+  border-radius: var(--r-pill);
+  border: 1px solid rgba(11, 11, 12, 0.16);
+  background: rgba(255, 255, 255, 0.55);
+  overflow: hidden;
+  opacity: 0;
+  animation: rise-in 380ms var(--ease) 320ms both;
+}
+.mode-pill button {
+  padding: 7px 16px;
+  border: none;
+  background: none;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: rgba(11, 11, 12, 0.62);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.mode-pill button:hover { color: var(--brand-ink); }
+.mode-pill button.active { background: var(--brand-ink); color: var(--brand-cream); }

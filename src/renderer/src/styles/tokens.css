@@ -1,0 +1,100 @@
+/* ===== AgentHub 设计系统 tokens =====
+   欢迎阶段：黑 / 奶白 / 暖黄；工作阶段：安静浅灰（暗色主题对等映射） */
+
+:root {
+  /* 品牌色 */
+  --brand-ink: #0b0b0c;        /* 开屏黑 */
+  --brand-cream: #f7f2e8;      /* 奶白 */
+  --brand-cream-2: #fbf8f1;    /* 奶白表面层 */
+  --brand-yellow: #b45309;     /* 主行动黄（深琥珀，白字对比度 4.0:1，达大字 AA） */
+  --brand-yellow-hover: #9a4207;
+  --brand-yellow-active: #82360a;
+  --brand-yellow-soft: #e8a33d; /* 点缀亮黄（仅用于深色背景上的标识） */
+  --brand-yellow-ring: rgba(180, 83, 9, 0.32);
+
+  /* 工作阶段 - 浅色 */
+  --bg: #f3f4f6;
+  --surface: #ffffff;
+  --surface-2: #f8f9fb;
+  --border: #e3e5ea;
+  --border-strong: #cfd3da;
+  --text: #1b1d22;
+  --text-2: #575d68;
+  --text-3: #8b93a0;
+
+  /* 状态色 */
+  --ok: #15803d;
+  --ok-bg: #e8f6ec;
+  --warn: #b45309;
+  --warn-bg: #fdf1e3;
+  --danger: #d23b3b;
+  --danger-bg: #fdecec;
+  --danger-strong: #b91c1c;
+  --info: #2563eb;
+  --info-bg: #e9f0fe;
+  --running: #2563eb;
+
+  /* 角色色（克制） */
+  --role-planner: #5b6cd9;
+  --role-executor: #1f9d6d;
+  --role-reviewer: #b4820b;
+
+  /* 阴影（轻量双层，不做夸张投影） */
+  --shadow-1: 0 1px 2px rgba(16, 18, 22, 0.05), 0 1px 3px rgba(16, 18, 22, 0.04);
+  --shadow-2: 0 2px 6px rgba(16, 18, 22, 0.06), 0 8px 24px rgba(16, 18, 22, 0.07);
+  --shadow-pop: 0 4px 12px rgba(16, 18, 22, 0.1), 0 12px 40px rgba(16, 18, 22, 0.12);
+
+  /* 圆角 */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  /* 动效 */
+  --t-fast: 140ms;
+  --t-base: 240ms;
+  --t-page: 420ms;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* 布局 */
+  --sidebar-w: 264px;
+  --sidebar-w-collapsed: 56px;
+  --font-size: 14px;
+}
+
+/* 暗色主题 */
+:root[data-theme='dark'] {
+  --bg: #141519;
+  --surface: #1c1e24;
+  --surface-2: #22252c;
+  --border: #2a2d36;
+  --border-strong: #3a3f4a;
+  --text: #e7e9ee;
+  --text-2: #9aa1ae;
+  --text-3: #6b7280;
+  --ok-bg: #14261a;
+  --warn-bg: #2a1f0e;
+  --danger-bg: #2b1416;
+  --info-bg: #12203a;
+  --brand-cream: #f7f2e8;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.45), 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* 动画总开关 / 减少动态效果：所有过渡压到 1ms */
+:root[data-anim='off'] *,
+:root[data-motion='reduced'] * {
+  transition-duration: 1ms !important;
+  animation-duration: 1ms !important;
+  animation-delay: 0ms !important;
+}
+
+/* 系统级减少动态偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+  }
+}

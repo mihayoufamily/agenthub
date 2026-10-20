@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "types": [],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "outDir": ".tmp/renderer",
+    "rootDir": "src",
+    "sourceMap": false
+  },
+  "include": ["src/renderer/src", "src/shared"]
+}

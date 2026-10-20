@@ -1,0 +1,23 @@
+appId: com.agenthub.app
+productName: AgentHub
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - dist/**/*
+  - "!node_modules/**/*"
+  - package.json
+asar: true
+win:
+  target:
+    - nsis
+  icon: build/icon.ico
+  # 未配置签名证书：构建为未签名安装包，安装时系统可能提示"未知发布者"，属预期行为
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  artifactName: AgentHub-Setup-${version}.${ext}
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/

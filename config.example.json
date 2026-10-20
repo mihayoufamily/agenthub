@@ -1,0 +1,56 @@
+{
+  "_说明": "AgentHub 配置导出示例（npm 导出的真实文件结构与此一致；API Key 永不出现在导出中）",
+  "schemaVersion": 1,
+  "prefs": {
+    "theme": "system",
+    "animations": true,
+    "reducedMotion": false,
+    "replayWelcome": false,
+    "fontSize": 14,
+    "sidebarCollapsed": false,
+    "enterToSend": true,
+    "shiftWheelSwitch": true,
+    "firstRunDone": true,
+    "lastMode": "workflow"
+  },
+  "agents": [
+    {
+      "id": "agent_demo_1",
+      "name": "演示 · 助手",
+      "kind": "demo",
+      "desc": "演示模式 · 脚本化回复",
+      "model": "demo-scripted",
+      "status": "available",
+      "isDemo": true,
+      "addedAt": 1761000000000
+    },
+    {
+      "id": "agent_model_1",
+      "name": "OpenAI 兼容服务",
+      "kind": "model",
+      "desc": "https://api.example.com/v1",
+      "model": "gpt-4o-mini",
+      "status": "available",
+      "modelConfig": {
+        "provider": "OpenAI 兼容服务",
+        "baseUrl": "https://api.example.com/v1",
+        "modelId": "gpt-4o-mini",
+        "keyId": "key_说明：密钥本体在系统凭据存储，不在此文件",
+        "hasKey": true,
+        "temperature": 0.7
+      },
+      "addedAt": 1761000000000
+    }
+  ],
+  "workflowDefaults": {
+    "plannerAgentId": "agent_demo_1",
+    "executorAgentId": "agent_demo_1",
+    "reviewerAgentId": "agent_demo_1",
+    "reviewMode": "human",
+    "maxRounds": 3,
+    "timeoutMin": 30,
+    "confirmEveryRound": false
+  },
+  "exportedAt": "2026-10-20T16:00:00.000Z",
+  "note": "API Key 不会被导出，导入后需重新填写"
+}

@@ -1,0 +1,141 @@
+// 工作流首页：标题 + 中央大输入框 + 配置条（悬停 200ms 预览浮层 / 点击打开固定面板）+ 开始
+import React, { useEffect, useRef, useState } from 'react'
+import { useWorkflow } from '../stores/workflow'
+import { useAgents } from '../stores/agents'
+import { useSettings } from '../stores/settings'
+import { useUi } from '../stores/ui'
+import { Composer } from '../components/Composer'
+import { Icon } from '../components/Icons'
+import { ConfigPanel } from './ConfigPanel'
+
+type PreviewKey = 'planner' | 'executor' | 'reviewer' | null
+
+export function WorkflowHome() {
+  const draft = useWorkflow((s) => s.draft)
+  const setDraft = useWorkflow((s) => s.setDraft)
+  const config = useWorkflow((s) => s.config)
+  const start = useWorkflow((s) => s.start)
+  const isDemoRun = useWorkflow((s) => s.isDemoRun)
+  const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
+  const agents = useAgents((s) => s.agents)
+
+  const [preview, setPreview] = useState<PreviewKey>(null)
+  const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const [panelOpen, setPanelOpen] = useState(false)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPreview(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const hoverOpen = (k: PreviewKey) => {
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+    if (openTimer.current) clearTimeout(openTimer.current)
+    openTimer.current = setTimeout(() => setPreview(k), 200)
+  }
+  const hoverClose = () => {
+    if (openTimer.current) clearTimeout(openTimer.current)
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+    closeTimer.current = setTimeout(() => setPreview(null), 250)
+  }
+
+  const roleInfo = (k: 'planner' | 'executor' | 'reviewer') => {
+    const r = config[k]
+    const a = agents.find((x) => x.id === r.agentId)
+    return { name: a?.name ?? '未配置', model: a?.model ?? '—', connected: a?.status === 'available' || a?.isDemo === true }
+  }
+
+  const onBegin = () => {
+    if (!draft.trim()) {
+      useUi.getState().toast('请先描述任务目标', 'warn')
+      return
+    }
+    void start()
+  }
+
+  const demo = isDemoRun() && !!config.planner.agentId
+
+  return (
+    <div className="screen workflow">
+      <div className="wf-home">
+        <div className="wf-title">工作流模式</div>
+        <div className="wf-desc">规划、执行与审核协作完成任务。</div>
+
+        <div className="wf-composer-wrap">
+          <Composer
+            value={draft}
+            onChange={setDraft}
+            onSend={onBegin}
+            enterToSend={enterToSend}
+            placeholder="描述要完成的任务、约束与期望产物…"
+            autoFocusOnMount
+          />
+          <div className="wf-supplement-tip">Enter 开始（可在设置中改为 Ctrl+Enter）</div>
+        </div>
+
+        {/* 配置条：悬停预览 + 点击固定面板 */}
+        <div className="wf-configbar">
+          {(['planner', 'executor', 'reviewer'] as const).map((k) => {
+            const info = roleInfo(k)
+            return (
+              <div
+                key={k}
+                style={{ position: 'relative' }}
+                onMouseEnter={() => hoverOpen(k)}
+                onMouseLeave={hoverClose}
+              >
+                <button className="cfg-chip" onClick={() => { setPreview(null); setPanelOpen(true) }}>
+                  <span className={`role-tag ${k}`}>
+                    {k === 'planner' ? '规划' : k === 'executor' ? '执行' : '审核'}
+                  </span>
+                  <b>{info.name}</b>
+                  <span>{info.model}</span>
+                </button>
+                {preview === k && (
+                  <div className="cfg-preview" onMouseEnter={() => { if (closeTimer.current) clearTimeout(closeTimer.current) }} onMouseLeave={() => setPreview(null)}>
+                    <div className="pv-row"><span>Agent</span><b>{info.name}</b></div>
+                    <div className="pv-row"><span>模型</span><b>{info.model}</b></div>
+                    <div className="pv-row"><span>状态</span><b style={{ color: info.connected ? 'var(--ok)' : 'var(--warn)' }}>{info.connected ? '可用' : '待配置'}</b></div>
+                    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6, fontSize: 11.5 }}>
+                      点击打开固定设置面板
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+
+          <button
+            className="cfg-chip"
+            onClick={() => useWorkflow.getState().patchConfig({ reviewMode: config.reviewMode === 'human' ? 'auto' : 'human' })}
+            title="审核方式始终可见；运行中修改将在下一检查点生效"
+          >
+            <Icon name="check" size={13} />
+            审核：<b>{config.reviewMode === 'human' ? '人工确认' : '自动审核'}</b>
+          </button>
+
+          <button className="cfg-chip" onClick={() => setPanelOpen(true)}>
+            <Icon name="settings" size={13} /> 更多设置
+          </button>
+        </div>
+
+        <button className="btn btn-primary wf-start" style={{ height: 40, minWidth: 120 }} onClick={onBegin}>
+          开始任务
+        </button>
+
+        {demo && (
+          <div style={{ marginTop: 18 }}>
+            <span className="demo-badge">当前配置为演示模式 · 无真实 Agent 也能跑通全流程</span>
+          </div>
+        )}
+      </div>
+
+      <ConfigPanel open={panelOpen} onClose={() => setPanelOpen(false)} />
+    </div>
+  )
+}
