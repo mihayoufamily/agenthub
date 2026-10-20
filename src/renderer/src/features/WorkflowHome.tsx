@@ -62,6 +62,18 @@ export function WorkflowHome() {
 
   return (
     <div className="screen workflow">
+      {/* 顶部入口：模式切换 + 设置（工作流界面常驻可达） */}
+      <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', gap: 6, zIndex: 20 }}>
+        <button className="icon-btn" title="切换模式（工作台 / 工作流）" aria-label="切换模式"
+          onClick={() => useUi.getState().setSwitchHud('__switch_ask')}>
+          <Icon name="swap" size={16} />
+        </button>
+        <button className="icon-btn" title="设置" aria-label="设置"
+          onClick={() => useUi.getState().openSettings()}>
+          <Icon name="settings" size={16} />
+        </button>
+      </div>
+
       <div className="wf-home">
         <div className="wf-title">工作流模式</div>
         <div className="wf-desc">规划、执行与审核协作完成任务。</div>

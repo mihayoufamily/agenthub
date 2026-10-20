@@ -1,7 +1,6 @@
 // 开发验证钩子：由截图驱动脚本（main 的 --shots 模式）经 executeJavaScript 调用
 // 仅暴露显式界面动作与状态读取，不含任何敏感操作
 import { useUi } from '../stores/ui'
-import { useSettings } from '../stores/settings'
 import { useWorkflow } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
 import type { AgentConfig } from '@shared/types'
@@ -9,14 +8,12 @@ import type { AgentConfig } from '@shared/types'
 export function installDebugHooks() {
   const w = window as unknown as Record<string, unknown>
   w.__ahub_debug = {
-    // 场景跳转
+    // 场景跳转（验证专用：不写 lastMode，避免污染用户"恢复上次工作区"的偏好）
     brand: () => useUi.getState().setScreen('brand'),
     workbench: () => {
-      useSettings.getState().patchPrefs({ lastMode: 'workbench' })
       useUi.getState().setScreen('workbench')
     },
     workflow: () => {
-      useSettings.getState().patchPrefs({ lastMode: 'workflow' })
       useUi.getState().setScreen('workflow')
     },
     settings: () => useUi.getState().openSettings(),

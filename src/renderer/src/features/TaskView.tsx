@@ -76,6 +76,9 @@ export function TaskView() {
           </div>
         </div>
         <div className="spacer" />
+        <Button variant="ghost" onClick={() => useUi.getState().setSwitchHud('__switch_ask')} title="切换到工作台或其他模式">
+          <Icon name="swap" size={14} /> 切换模式
+        </Button>
         <Button variant="ghost" onClick={() => setDetailOpen((d) => !d)}>
           <Icon name="info" size={14} /> 详情
         </Button>
