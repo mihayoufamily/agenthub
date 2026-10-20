@@ -91,11 +91,7 @@ function AppearanceSection() {
       <Row label="减少动态效果" desc="同时尊重系统级偏好">
         <Switch label="减少动态" on={prefs.reducedMotion} onChange={(v) => patch({ reducedMotion: v })} />
       </Row>
-      <Row label="重播欢迎动画" desc="下次启动播放完整开屏与欢迎流程">
-        <Button variant="secondary" style={{ height: 30 }} onClick={() => patch({ replayWelcome: true, firstRunDone: false })}>
-          下次启动重播
-        </Button>
-      </Row>
+      <Row label="启动动画" desc="每次启动均播放完整开屏与欢迎动画（Esc 可跳过过渡）" />
       <Row label="字体大小" desc={`当前 ${prefs.fontSize}px`}>
         <input
           type="range"

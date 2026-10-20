@@ -169,7 +169,7 @@ function createWindow() {
     void runShotSequence(win)
   }
 
-  // 居中诊断模式：--diag 输出欢迎页关键元素的边界矩形（像素级核对）
+  // 居中诊断模式：--diag 输出欢迎页关键元素的边界矩形（像素级核对），结果写入临时目录 agenthub-diag.json
   if (process.argv.includes('--diag')) {
     win.webContents.on('did-finish-load', () => {
       setTimeout(() => {
@@ -178,6 +178,9 @@ function createWindow() {
             `JSON.stringify((()=>{const r=(s)=>{const el=document.querySelector(s);if(!el)return null;const b=el.getBoundingClientRect();return {l:+b.left.toFixed(1),r:+b.right.toFixed(1),t:+b.top.toFixed(1),b:+b.bottom.toFixed(1),cx:+((b.left+b.right)/2).toFixed(1),cy:+((b.top+b.bottom)/2).toFixed(1)}};return {vw:innerWidth,vh:innerHeight,dpr:devicePixelRatio,inner:r('.splash-inner'),logo:r('.splash-logo'),word:r('.splash-word'),wrap:r('.splash-start-wrap'),btn:r('.btn-start')}})())`
           )
           .then((r) => {
+            try {
+              writeFileSync(join(app.getPath('temp'), 'agenthub-diag.json'), String(r))
+            } catch { /* 写失败不阻塞 */ }
             console.log('[diag]', r)
             app.quit()
           })
