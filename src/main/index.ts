@@ -25,19 +25,25 @@ if (process.env.AGENTHUB_NO_SANDBOX === '1') {
 
 function loadWindowState(): WindowState {
   const fallback: WindowState = { width: 1280, height: 800 }
+  // 运行时防御：window-state.json 可能被截断/手改，缺失或非法数值一律回退
+  const num = (v: unknown, fb: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fb)
   try {
     const p = join(app.getPath('userData'), 'window-state.json')
     if (!existsSync(p)) return fallback
     const s = JSON.parse(readFileSync(p, 'utf-8')) as WindowState
+    const x = num(s.x, NaN)
+    const y = num(s.y, NaN)
     // 屏幕边界校验：位置超出可视屏幕时回退默认
     const screen = require('electron').screen
     const displays = screen.getAllDisplays()
     const visible = displays.some((d: { workArea: { x: number; y: number; width: number; height: number } }) => {
-      const { x, y, width, height } = d.workArea
-      return (s.x ?? 0) >= x - 50 && (s.x ?? 0) < x + width && (s.y ?? 0) >= y - 50 && (s.y ?? 0) < y + height
+      const { x: dx, y: dy, width, height } = d.workArea
+      return x >= dx - 50 && x < dx + width && y >= dy - 50 && y < dy + height
     })
-    if (!visible) return { ...fallback, maximized: s.maximized }
-    return { ...s, width: Math.max(s.width, 960), height: Math.max(s.height, 640) }
+    const width = Math.max(num(s.width, 1280), 960)
+    const height = Math.max(num(s.height, 800), 640)
+    if (!visible) return { width: 1280, height: 800, maximized: s.maximized === true }
+    return { x: Number.isFinite(x) ? x : undefined, y: Number.isFinite(y) ? y : undefined, width, height, maximized: s.maximized === true }
   } catch {
     return fallback
   }
@@ -150,7 +156,10 @@ function createWindow() {
       console.log('[main] 自动切换兼容模式重启（AGENTHUB_NO_SANDBOX=1）')
       delete process.env.ELECTRON_RUN_AS_NODE
       process.env.AGENTHUB_NO_SANDBOX = '1'
-      app.relaunch({ args: process.argv.slice(1).filter((a) => !a.startsWith('--shots=')) })
+      // 标记重启来源：新实例在拿不到单实例锁时短暂等待（旧实例退出与锁释放存在竞态）
+      process.env.AGENTHUB_RELAUNCH = '1'
+      // 保留全部启动参数（含 --shots 验证模式），重启后行为一致
+      app.relaunch({ args: process.argv.slice(1) })
       app.quit()
     }
   })
@@ -213,10 +222,7 @@ function createWindow() {
   return win
 }
 
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
-  app.quit()
-} else {
+function startApp() {
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
@@ -239,6 +245,30 @@ if (!gotLock) {
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()
   })
+}
+
+const gotLock = app.requestSingleInstanceLock()
+if (gotLock) {
+  startApp()
+} else if (process.env.AGENTHUB_RELAUNCH === '1') {
+  // 兼容模式重启与旧实例退出存在竞态：旧实例可能尚未释放单实例锁，
+  // 短暂重试等待（最多约 5 秒），避免重启实例拿不到锁直接退出导致"双击后无窗口"
+  console.log('[main] 单实例锁暂被占用（重启竞态），等待释放…')
+  let lockTries = 0
+  const lockTimer = setInterval(() => {
+    lockTries += 1
+    if (app.requestSingleInstanceLock()) {
+      clearInterval(lockTimer)
+      console.log('[main] 已获得单实例锁，继续启动')
+      startApp()
+    } else if (lockTries >= 20) {
+      clearInterval(lockTimer)
+      console.log('[main] 单实例锁等待超时，退出')
+      app.quit()
+    }
+  }, 250)
+} else {
+  app.quit()
 }
 
 // 主题 IPC（在 ipc.ts 中注册其余通道）

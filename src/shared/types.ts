@@ -74,6 +74,8 @@ export type TaskStatus =
   | 'cancelled'
   | 'rework_limit'
   | 'interrupted'
+  /** 超时被看门狗停止（非失败：成果与记录保留） */
+  | 'timeout'
 
 export type Stage = 'planning' | 'executing' | 'reviewing' | 'delivering'
 

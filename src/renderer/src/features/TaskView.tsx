@@ -26,7 +26,8 @@ const STATUS_TEXT: Record<string, string> = {
   failed: '失败',
   cancelled: '已取消',
   rework_limit: '返工达到上限',
-  interrupted: '状态未知（应用重启）'
+  interrupted: '状态未知（应用重启）',
+  timeout: '超时已停止'
 }
 
 export function TaskView() {
@@ -65,7 +66,7 @@ export function TaskView() {
           <div className="goal txt-ellipsis" title={run.goal}>{run.goal}</div>
           <div className="stage-info">
             {live && <span className="spinner" style={{ width: 11, height: 11 }} />}
-            <b>{STAGE_TEXT[run.stage ?? 'planning']}</b>
+            <b>{run.stage ? STAGE_TEXT[run.stage] : (STATUS_TEXT[run.status] ?? '已结束')}</b>
             <span>第 {run.round}/{run.maxRounds} 轮</span>
             <span className="elapsed">{elapsed}</span>
             <Badge tone={run.reviewMode === 'human' ? 'warn' : 'info'}>
@@ -174,7 +175,8 @@ const STATUS_BADGE: Record<string, 'ok' | 'info' | 'warn' | 'danger' | 'default'
   cancelled: 'default',
   rework_limit: 'warn',
   waiting_user: 'warn',
-  interrupted: 'info'
+  interrupted: 'info',
+  timeout: 'warn'
 }
 
 function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {

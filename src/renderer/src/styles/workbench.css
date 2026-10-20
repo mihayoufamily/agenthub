@@ -13,7 +13,8 @@
 .wb-mode-title {
   position: absolute;
   left: 0; right: 0;
-  top: 34%;
+  top: 30%;
+  z-index: 60; /* 必须在侧栏/顶栏/聊天气泡之上，否则进入动画被遮挡 */
   text-align: center;
   font-size: 34px;
   font-weight: 700;
@@ -50,7 +51,10 @@
 }
 .sidebar-head .brand-mini { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13.5px; color: var(--text); }
 .sidebar-head .icon-btn { margin-left: auto; }
-.sidebar.collapsed .sidebar-head .brand-mini span, .sidebar.collapsed .sidebar-head .icon-btn { display: none; }
+/* 折叠时只隐藏品牌区，保留折叠/展开按钮（此前连按钮一起隐藏导致无法再展开） */
+.sidebar.collapsed .sidebar-head { justify-content: center; padding: 12px 6px 10px; }
+.sidebar.collapsed .sidebar-head .brand-mini { display: none; }
+.sidebar.collapsed .sidebar-head .icon-btn { margin-left: 0; }
 
 .agent-list { flex: 1; overflow-y: auto; padding: 4px 8px 8px; display: flex; flex-direction: column; gap: 2px; }
 

@@ -60,14 +60,17 @@ export function App() {
         }
         const wd = cfg.workflowDefaults
         const byId = (id: string) => agents.find((a) => a.id === id)
+        // 工作流默认配置可能引用已删除的 Agent（历史配置残留）：失效时回退到现有 Agent，不静默留空
+        const pick = (savedId: string | undefined, fb: string | undefined) =>
+          (savedId && byId(savedId) ? savedId : fb) || ''
         const mk = (id: string) => {
           const a = byId(id)
-          return { agentId: id, agentName: a?.name ?? '', model: a?.model ?? '—' }
+          return { agentId: id, agentName: a?.name ?? '未配置', model: a?.model ?? '—' }
         }
         useWorkflow.getState().patchConfig({
-          planner: mk(wd?.plannerAgentId || agents[0]?.id || ''),
-          executor: mk(wd?.executorAgentId || agents[1 % Math.max(agents.length, 1)]?.id || agents[0]?.id || ''),
-          reviewer: mk(wd?.reviewerAgentId || agents[agents.length - 1]?.id || ''),
+          planner: mk(pick(wd?.plannerAgentId, agents[0]?.id)),
+          executor: mk(pick(wd?.executorAgentId, agents[1 % Math.max(agents.length, 1)]?.id ?? agents[0]?.id)),
+          reviewer: mk(pick(wd?.reviewerAgentId, agents[agents.length - 1]?.id)),
           reviewMode: wd?.reviewMode ?? 'human',
           maxRounds: wd?.maxRounds ?? 3,
           timeoutMin: wd?.timeoutMin ?? 30,
@@ -81,16 +84,10 @@ export function App() {
   }, [])
 
   const onRestore = () => {
-    const prefs = useSettings.getState().prefs
-    // 后续启动：恢复上次工作区；恢复不了则回品牌首页
-    if (prefs?.lastMode === 'workbench') {
-      useUi.getState().setScreen('workbench')
-    } else if (prefs?.lastMode === 'workflow') {
-      void useWorkflow.getState().restore() // 运行中任务重启后标记"状态未知"，不盲目重放
-      useUi.getState().setScreen('workflow')
-    } else {
-      useUi.getState().setScreen('brand')
-    }
+    // 规格：点击"开始"固定进入品牌首页（"今天要构建什么"），工作模式由用户自选；
+    // 后台仍恢复运行中任务状态（标记"状态未知"），进入工作流时可见，不盲目重放
+    void useWorkflow.getState().restore()
+    useUi.getState().setScreen('brand')
   }
 
   if (fatal) {

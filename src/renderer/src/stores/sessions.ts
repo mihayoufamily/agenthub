@@ -136,9 +136,11 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       })
       set((s) => ({ activeStreams: { ...s.activeStreams, [streamKey]: agentId } }))
 
+      // 携带最近的历史作为上下文（过长截断；真实工作流任务的完整上下文由 workflow 角色注入）
+      const HISTORY_WINDOW = 24
       const history = get().sessions[agentId].messages
         .filter((m) => m.role === 'user' || m.role === 'assistant')
-        .slice(-12)
+        .slice(-HISTORY_WINDOW)
         .map((m) => ({ role: m.role, content: m.text }))
 
       let off = bridge.models.onEvent((ev) => {

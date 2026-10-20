@@ -1,7 +1,7 @@
 // 开屏与欢迎页（同一连续场景）：
 // 黑底 -> Logo 淡入 -> "agenthub" 上移淡入 -> 背景过渡奶白 + Logo 上移 -> "开始"按钮浮现
 // 每次启动均播放完整动画（用户要求，2026-10-21 定稿）；
-// 点"开始"后进入上次工作区（无记录则进品牌首页）；支持 Esc 跳过动画、减少动态效果
+// 点"开始"后固定进入品牌首页（"今天要构建什么"，模式用户自选）；支持 Esc 跳过动画、减少动态效果
 import React, { useEffect } from 'react'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
@@ -46,7 +46,7 @@ export function Splash({ onRestore }: { onRestore: () => void }) {
     // 点击后立即响应，防重复触发由 CSS pointer-events 保证
     patchPrefs({ firstRunDone: true })
     toast('欢迎使用 AgentHub', 'ok')
-    // 进入上次工作区；无记录时由 onRestore 落到品牌首页（用户自选模式）
+    // 进入品牌首页（"今天要构建什么"）；运行中任务由 onRestore 后台恢复
     onRestore()
   }
 
