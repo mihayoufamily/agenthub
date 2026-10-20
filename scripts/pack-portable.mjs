@@ -16,7 +16,12 @@ if (!existsSync(join(cwd, 'out', 'main', 'index.js')) || !existsSync(join(cwd, '
   process.exit(1)
 }
 
-rmSync(outDir, { recursive: true, force: true })
+// 目录被其他程序占用（如资源管理器打开中）时删除会失败，改为原地覆盖
+try {
+  rmSync(outDir, { recursive: true, force: true })
+} catch {
+  console.log('[pack] 旧目录被占用，改为原地覆盖')
+}
 mkdirSync(join(outDir, 'resources', 'app'), { recursive: true })
 
 // 1) electron 运行时（整目录复制，主程序改名 AgentHub.exe）
@@ -31,7 +36,15 @@ cpSync(join(cwd, 'package.json'), join(appDir, 'package.json'))
 cpSync(join(cwd, 'out'), join(appDir, 'out'), { recursive: true })
 cpSync(join(cwd, 'dist'), join(appDir, 'dist'), { recursive: true })
 
-// 3) 说明
+// 3) 兼容模式一键启动器（安全软件拦截沙箱导致双击无反应时使用）
+writeFileSync(join(outDir, 'start-compat-mode.cmd'), [
+  '@echo off',
+  'set AGENTHUB_NO_SANDBOX=1',
+  'start "" "%~dp0AgentHub.exe"',
+  ''
+].join('\r\n'))
+
+// 4) 说明
 writeFileSync(join(outDir, '使用说明.txt'), [
   'AgentHub 便携版',
   '',

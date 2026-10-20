@@ -134,7 +134,26 @@ function createWindow() {
     }
   })
   if (ws.maximized) win.maximize()
-  win.once('ready-to-show', () => win.show())
+  let shown = false
+  win.once('ready-to-show', () => {
+    shown = true
+    win.show()
+  })
+  // 窗口显示前渲染进程连续崩溃（典型表现：双击后无任何反应）时，
+  // 自动以兼容模式重启一次（禁用 Chromium 沙箱）。正常机器不触发、沙箱保持开启。
+  let preShowCrashes = 0
+  win.webContents.on('render-process-gone', (_e, details) => {
+    if (shown || preShowCrashes >= 99) return
+    preShowCrashes += 1
+    console.log(`[main] 窗口显示前渲染进程异常（${details.reason}），计数 ${preShowCrashes}`)
+    if (preShowCrashes >= 2 && process.env.AGENTHUB_NO_SANDBOX !== '1') {
+      console.log('[main] 自动切换兼容模式重启（AGENTHUB_NO_SANDBOX=1）')
+      delete process.env.ELECTRON_RUN_AS_NODE
+      process.env.AGENTHUB_NO_SANDBOX = '1'
+      app.relaunch({ args: process.argv.slice(1).filter((a) => !a.startsWith('--shots=')) })
+      app.quit()
+    }
+  })
   win.on('close', () => saveWindowState(win))
 
   // 诊断：渲染层 console 与加载状态转发到主进程 stdout
