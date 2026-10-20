@@ -39,12 +39,13 @@
   margin-top: 18px;
   font-size: 20px;
   letter-spacing: 0.35em;
+  /* 字符尾随字距会使字形视觉中心偏左半个字距，用半字距 text-indent 精确补偿 */
+  text-indent: 0.175em;
   color: var(--brand-cream);
   font-weight: 300;
   opacity: 0;
   transform: translateY(6px);
   transition: opacity 400ms var(--ease), transform 400ms var(--ease), color 700ms var(--ease);
-  padding-left: 0.35em; /* 抵消 letter-spacing 造成的视觉偏移 */
 }
 .splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word { color: var(--brand-ink); }
 .splash:is([data-stage='word'], [data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word {
@@ -78,7 +79,8 @@
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.25em;
-  padding-left: calc(16px + 0.25em);
+  /* 半字距补偿 letter-spacing 尾随空隙，保证文字视觉居中 */
+  text-indent: 0.125em;
   box-shadow: var(--shadow-1);
   transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
 }
@@ -125,7 +127,7 @@
 .home-logo-wrap .word {
   font-size: 18px;
   letter-spacing: 0.35em;
-  padding-left: 0.35em;
+  text-indent: 0.175em; /* 半字距补偿尾随字距 */
   color: var(--brand-ink);
   font-weight: 300;
 }

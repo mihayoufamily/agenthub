@@ -150,6 +150,26 @@ function createWindow() {
     void runShotSequence(win)
   }
 
+  // 居中诊断模式：--diag 输出欢迎页关键元素的边界矩形（像素级核对）
+  if (process.argv.includes('--diag')) {
+    win.webContents.on('did-finish-load', () => {
+      setTimeout(() => {
+        win.webContents
+          .executeJavaScript(
+            `JSON.stringify((()=>{const r=(s)=>{const el=document.querySelector(s);if(!el)return null;const b=el.getBoundingClientRect();return {l:+b.left.toFixed(1),r:+b.right.toFixed(1),t:+b.top.toFixed(1),b:+b.bottom.toFixed(1),cx:+((b.left+b.right)/2).toFixed(1),cy:+((b.top+b.bottom)/2).toFixed(1)}};return {vw:innerWidth,vh:innerHeight,dpr:devicePixelRatio,inner:r('.splash-inner'),logo:r('.splash-logo'),word:r('.splash-word'),wrap:r('.splash-start-wrap'),btn:r('.btn-start')}})())`
+          )
+          .then((r) => {
+            console.log('[diag]', r)
+            app.quit()
+          })
+          .catch((e) => {
+            console.log('[diag] error', String(e))
+            app.quit()
+          })
+      }, 5200)
+    })
+  }
+
   // 加载失败时提供可重试的错误页，而不是一直卡住
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMain) => {
     if (!isMain) return

@@ -19,6 +19,7 @@
   font-weight: 700;
   color: var(--text);
   letter-spacing: 0.12em;
+  text-indent: 0.06em; /* 半字距补偿尾随字距，大字居中更准 */
   opacity: 0;
   pointer-events: none;
   animation: mode-title-in 300ms var(--ease) 160ms both, mode-title-out 300ms var(--ease) 1750ms both;
