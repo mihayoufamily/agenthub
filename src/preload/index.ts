@@ -72,7 +72,7 @@ const api = {
     }
   },
   dialogs: {
-    pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<string[]>,
+    pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<Array<{ name: string; path: string; size: number; content?: string; error?: boolean }>>,
     saveFile: (defaultName: string, content: string) =>
       ipcRenderer.invoke('dialog:saveFile', defaultName, content) as Promise<{ ok: boolean; message: string }>
   },

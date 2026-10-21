@@ -67,15 +67,17 @@ export function Composer({
 
   const pickFiles = async () => {
     if (!onAttachmentsChange) return
-    const paths = await bridge.dialogs.pickFiles()
-    if (!paths.length) return
-    // 只登记本地文件引用；演示模式与未接入工具的 Agent 不会读取内容
-    const next: Attachment[] = paths.map((p) => ({
+    const files = await bridge.dialogs.pickFiles()
+    if (!files.length) return
+    // 文本附件内容由主进程读取；真实模型/CLI 调用会收到内容，演示 Agent 仅展示引用
+    const next: Attachment[] = files.map((f) => ({
       id: uid('att'),
-      name: p.split(/[\\/]/).pop() ?? p,
-      path: p,
-      size: 0,
-      status: 'ok'
+      name: f.name,
+      path: f.path,
+      size: f.size,
+      kind: f.content !== undefined ? 'text' : 'binary',
+      status: f.error ? 'error' : 'ok',
+      ...(f.content !== undefined ? { content: f.content } : {})
     }))
     onAttachmentsChange([...attachments, ...next])
   }
@@ -89,7 +91,7 @@ export function Composer({
       {attachments.length > 0 && (
         <div className="attach-row">
           {attachments.map((a) => (
-            <span key={a.id} className={cls('attach-chip', a.status === 'error' && 'error')} title={a.path}>
+            <span key={a.id} className={cls('attach-chip', a.status === 'error' && 'error')} title={a.status === 'error' ? `${a.path}\n读取失败或超过大小上限，内容不会发送` : a.path}>
               <Icon name="file" size={12} />
               <span className="name">{a.name}</span>
               {a.size > 0 && <span>{fmtSize(a.size)}</span>}

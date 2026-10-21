@@ -64,6 +64,12 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M4 8V6a2 2 0 012-2h2M16 4h2a2 2 0 012 2v2m0 8v2a2 2 0 01-2 2h-2M8 20H6a2 2 0 01-2-2v-2" />
       <path d="M4 12h16" />
     </>
+  ),
+  download: (
+    <>
+      <path d="M12 4v10m0 0l-4-4m4 4l4-4" />
+      <path d="M5 19h14" />
+    </>
   )
 }
 

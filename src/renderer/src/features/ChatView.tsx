@@ -18,6 +18,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const draftOf = useSessions((s) => s.draftOf)
   const setDraft = useSessions((s) => s.setDraft)
   const sendMessage = useSessions((s) => s.sendMessage)
+  const exportSession = useSessions((s) => s.exportSession)
   const ensure = useSessions((s) => s.ensure)
   const homeDraft = useUi((s) => s.homeDraft)
   const setHomeDraft = useUi((s) => s.setHomeDraft)
@@ -85,6 +86,9 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           </div>
         </div>
         <div className="spacer" />
+        <Button variant="ghost" onClick={() => void exportSession(agent.id)} title="导出当前 Agent 的聊天记录为 Markdown">
+          <Icon name="download" size={14} /> 导出会话
+        </Button>
         <Button variant="ghost" onClick={onHandoff} title="把当前对话上下文交接给另一个 Agent">
           <Icon name="handoff" size={14} /> 交给其他 Agent
         </Button>

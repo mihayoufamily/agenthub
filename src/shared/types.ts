@@ -50,6 +50,10 @@ export interface Attachment {
   size: number
   path: string
   status: 'ok' | 'error'
+  /** text = 文本附件（内容随真实调用发送给模型/CLI）；binary = 仅记录引用，不发送内容 */
+  kind: 'text' | 'binary'
+  /** 文本附件的内容（主进程选取时读取；超过上限或读取失败则无此字段并标记 error） */
+  content?: string
 }
 
 /** 工作台单 Agent 会话消息 */

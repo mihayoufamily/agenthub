@@ -391,6 +391,11 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     const demo = get().isDemoRun()
     const cfg = { ...get().config }
     const carryOver = get()._carryOver
+    // 文本附件内容（真实调用首轮注入规划角色；读取失败/超限的附件不发送）
+    const attachmentText = get().attachments
+      .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
+      .map((a) => `\n[附件：${a.name}]\n${a.content}`)
+      .join('')
     const run: WorkflowRun = {
       id: uid('run'),
       goal,
@@ -429,6 +434,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
           goal,
           round,
           maxRounds: cfg.maxRounds,
+          ...(round === 1 && attachmentText ? { attachmentText } : {}),
           ...(supplements.length ? { supplements } : {}),
           ...(carryOver ? { carryOver } : {}),
           ...(round > 1 && prevReviewIssues.length ? { prevReviewIssues } : {})

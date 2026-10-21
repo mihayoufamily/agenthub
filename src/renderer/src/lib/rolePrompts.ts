@@ -16,6 +16,8 @@ export interface RunContext {
   supplements?: string[]
   /** "继续修改"携带的上一任务上下文 */
   carryOver?: string
+  /** 首轮注入的用户文本附件内容（拼接后的原文） */
+  attachmentText?: string
   /** 本轮规划结论（执行/审核角色使用） */
   planConclusion?: string
   /** 本轮验收清单（执行/审核角色使用） */
@@ -47,6 +49,9 @@ const SYSTEM_PROMPTS: Record<WorkflowRole, string> = {
 
 export function buildRoleMessages(role: WorkflowRole, ctx: RunContext): { system: string; user: string } {
   const lines: string[] = [`任务目标：${ctx.goal}`]
+  if (ctx.attachmentText) {
+    lines.push(`\n用户提供的文本附件（真实文件内容，规划时请据此拆解）：${ctx.attachmentText}`)
+  }
   if (ctx.carryOver) {
     lines.push(`\n上一任务上下文（本次为继续修改）：\n${sliceCtx(ctx.carryOver)}`)
   }

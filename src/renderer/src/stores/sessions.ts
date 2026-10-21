@@ -2,7 +2,7 @@
 import { create } from 'zustand'
 import type { AgentSession, ChatMessage, Attachment } from '@shared/types'
 import { bridge } from '../lib/ipc'
-import { uid, chunkText, sleep } from '../lib/utils'
+import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
 import { useAgents, saveSessionPayload } from './agents'
 import { useUi } from './ui'
 import { demoChatReply, demoHandoffNote } from '../lib/demo'
@@ -17,6 +17,8 @@ interface SessionsState {
   draftOf: (agentId: string) => string
   setDraft: (agentId: string, text: string) => void
   sendMessage: (agentId: string, text: string, attachments: Attachment[]) => Promise<void>
+  /** 导出单个 Agent 的聊天会话为 Markdown 文件 */
+  exportSession: (agentId: string) => Promise<void>
   handoff: (fromId: string, toId: string) => void
 }
 
@@ -138,10 +140,15 @@ export const useSessions = create<SessionsState>()((set, get) => ({
 
       // 携带最近的历史作为上下文（过长截断；真实工作流任务的完整上下文由 workflow 角色注入）
       const HISTORY_WINDOW = 24
+      // 文本附件内容拼入本次 user 消息（真实模型/CLI 均可收到；binary 附件只保留引用不发送）
+      const attachmentText = attachments
+        .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
+        .map((a) => `\n\n[附件：${a.name}]\n${a.content}`)
+        .join('')
       const history = get().sessions[agentId].messages
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .slice(-HISTORY_WINDOW)
-        .map((m) => ({ role: m.role, content: m.text }))
+        .map((m) => ({ role: m.role, content: m.id === userMsg.id ? m.text + attachmentText : m.text }))
 
       let off = bridge.models.onEvent((ev) => {
         if (ev.reqId !== reqId) return
@@ -224,6 +231,33 @@ export const useSessions = create<SessionsState>()((set, get) => ({
     }
     set((s) => ({ sessions: { ...s.sessions, [agentId]: { ...cur, messages: [...cur.messages, sysMsg] } } }))
     agents.setStatus(agentId, 'awaiting')
+  },
+
+  exportSession: async (agentId) => {
+    const agent = useAgents.getState().agents.find((a) => a.id === agentId)
+    const ses = get().sessions[agentId]
+    if (!ses || ses.messages.length === 0) {
+      useUi.getState().toast('该 Agent 暂无会话记录可导出', 'info')
+      return
+    }
+    const lines: string[] = [`# AgentHub 会话导出：${agent?.name ?? agentId}`, '']
+    if (agent?.isDemo) lines.push('> 此会话包含演示 Agent 的脚本化回复（非真实模型输出）', '')
+    for (const m of ses.messages) {
+      const t = new Date(m.ts).toLocaleString()
+      if (m.role === 'user') {
+        lines.push(`## 我 · ${t}`, '', m.text, '')
+        if (m.attachments?.length) {
+          lines.push(`附件：${m.attachments.map((a) => `${a.name}（${a.status === 'error' ? '读取失败' : fmtSize(a.size)}）`).join('、')}`, '')
+        }
+      } else if (m.role === 'assistant') {
+        lines.push(`## ${agent?.name ?? 'Agent'} · ${t}${m.demo ? '（演示）' : ''}${m.error ? '（发送失败）' : ''}`, '', m.text, '')
+      } else if (m.role === 'system') {
+        lines.push(`> 系统 · ${t}：${m.text}`, '')
+      }
+    }
+    const name = safeName(`agenthub-chat-${agent?.name ?? agentId}-${Date.now()}`) + '.md'
+    const r = await bridge.dialogs.saveFile(name, lines.join('\n'))
+    useUi.getState().toast(r.ok ? `已导出到 ${r.message}` : '已取消导出', r.ok ? 'ok' : 'info')
   },
 
   handoff: (fromId, toId) => {

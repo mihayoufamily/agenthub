@@ -1,5 +1,6 @@
 import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { join } from 'node:path'
+import { readFile, stat } from 'node:fs/promises'
 import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
@@ -157,11 +158,31 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   ipcMain.handle('dialog:pickFiles', async () => {
     const win = getWin()
     if (!win) return []
+    // 只开放真实支持的附件类型：文本类白名单（内容会随真实调用发送给模型/CLI）
+    const TEXT_EXT = ['txt', 'md', 'markdown', 'json', 'csv', 'log', 'yml', 'yaml', 'toml', 'ini', 'xml', 'html', 'css', 'js', 'jsx', 'ts', 'tsx', 'py', 'go', 'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'rs', 'rb', 'php', 'sh', 'bat', 'ps1', 'sql']
+    const MAX_BYTES = 64 * 1024
     const r = await dialog.showOpenDialog(win, {
-      title: '添加附件',
-      properties: ['openFile', 'multiSelections']
+      title: '添加文本附件',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: `支持的文本文件（≤${Math.round(MAX_BYTES / 1024)}KB，内容将发送给 Agent）`, extensions: TEXT_EXT }]
     })
-    return r.canceled ? [] : r.filePaths
+    if (r.canceled) return []
+    const out: Array<{ name: string; path: string; size: number; content?: string; error?: boolean }> = []
+    for (const p of r.filePaths) {
+      const name = p.split(/[\\/]/).pop() ?? p
+      try {
+        const st = await stat(p)
+        if (st.size > MAX_BYTES) {
+          out.push({ name, path: p, size: st.size, error: true })
+          continue
+        }
+        const content = await readFile(p, 'utf8')
+        out.push({ name, path: p, size: st.size, content })
+      } catch {
+        out.push({ name, path: p, size: 0, error: true })
+      }
+    }
+    return out
   })
 
   ipcMain.handle('dialog:saveFile', async (_e, defaultName: string, content: string) => {
