@@ -39,7 +39,7 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
               </option>
             )
           })}
-          {agents.length === 0 && <option value="" disabled>尚无 Agent，请先在"工作台 → 添加 Agent"中添加</option>}
+          {agents.length === 0 && <option value="" disabled>尚无 Agent，请先在"工作站 → 添加 Agent"中添加</option>}
         </select>
         <span className="help">
           {cur.agentId

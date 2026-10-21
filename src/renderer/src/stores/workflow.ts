@@ -114,7 +114,7 @@ function agentChatToCard(
   user: string,
   cardId: string,
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
-  opts?: { maxTokens?: number }
+  opts?: { maxTokens?: number; modelOverride?: string }
 ): Promise<{ ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }> {
   const reqId = uid('req')
   activeModelReqId = reqId
@@ -186,9 +186,14 @@ function agentChatToCard(
     ]
     const launched =
       agent.kind === 'cli' && agent.cliConfig
-        ? bridge.cli.chat(agent.cliConfig.cli, { model: agent.cliConfig.model, exePath: agent.cliConfig.exePath, workDir: agent.cliConfig.workDir }, reqId, messages)
+        ? bridge.cli.chat(agent.cliConfig.cli, { model: opts?.modelOverride ?? agent.cliConfig.model, exePath: agent.cliConfig.exePath, workDir: agent.cliConfig.workDir }, reqId, messages)
         : agent.modelConfig
-          ? bridge.models.chat(agent.modelConfig, reqId, messages, agent.tools ? { tools: agent.tools } : undefined)
+          ? bridge.models.chat(
+              opts?.modelOverride ? { ...agent.modelConfig, modelId: opts.modelOverride } : agent.modelConfig,
+              reqId,
+              messages,
+              agent.tools ? { tools: agent.tools } : undefined
+            )
           : Promise.resolve({ ok: false })
     void launched.then((r: { ok: boolean }) => {
       // 主进程会通过 model:event 发送错误；此处兜底通道异常（无事件到达）的场景
@@ -258,7 +263,7 @@ async function runStage(
     return null
   }
   const { system, user } = buildRoleMessages(role, ctx, agent.tools)
-  const res = await agentChatToCard(agent, system, user, card.id, setRun, { maxTokens: cfg.maxTokens })
+  const res = await agentChatToCard(agent, system, user, card.id, setRun, { maxTokens: cfg.maxTokens, modelOverride: roleCfg.modelOverride })
   if (isCancelled()) return null
   if (!res.ok) {
     if (res.tokenLimit) {

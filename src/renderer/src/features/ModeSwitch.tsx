@@ -84,7 +84,7 @@ export function ModeSwitchWarning() {
               style={{ justifyContent: 'flex-start', padding: '12px 14px' }}
               onClick={() => { setHud(null); requestModeSwitch('workbench') }}
             >
-              工作台模式 — 自由切换 Agent
+              工作站模式 — 自由切换 Agent
             </button>
             <button
               className="btn btn-secondary"

@@ -71,6 +71,12 @@ export function installDebugHooks() {
       wf.setDraft(goal)
       void wf.start()
     },
+    // 批量添加演示 Agent（布局压力验证用：1/5/20 个 Agent 场景）
+    addDemoAgents: (n: number) => {
+      const store = useAgents.getState()
+      for (let i = 0; i < Math.max(0, Math.min(n, 50)); i++) store.addDemoAgent()
+      return useAgents.getState().agents.length
+    },
     // 添加 arkcli Agent 并改名（CLI 工作目录 E2E 验证用；真实测试连接）
     addArkcliAgent: async () => {
       const store = useAgents.getState()

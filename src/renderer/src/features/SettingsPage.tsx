@@ -102,7 +102,7 @@ function AppearanceSection() {
           onChange={(e) => patch({ fontSize: Number(e.target.value) })}
         />
       </Row>
-      <Row label="侧栏折叠" desc="工作台左侧栏保持折叠状态">
+      <Row label="侧栏折叠" desc="工作站左侧栏保持折叠状态">
         <Switch label="侧栏" on={prefs.sidebarCollapsed} onChange={(v) => patch({ sidebarCollapsed: v })} />
       </Row>
     </div>
@@ -126,7 +126,7 @@ function AgentsSection() {
           </Button>
         </span>
       </div>
-      {agents.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', padding: '6px 0 12px' }}>尚无 Agent。到工作台 → 添加 Agent 中添加。</div>}
+      {agents.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', padding: '6px 0 12px' }}>尚无 Agent。到工作站 → 添加 Agent 中添加。</div>}
       {agents.map((a) => (
         <div key={a.id} className="agent-manage-row">
           <span className="avatar" style={{ background: colorOf(a.id), width: 26, height: 26, fontSize: 12 }}>
@@ -200,7 +200,7 @@ function ShortcutsSection() {
       <Row label="Enter 发送" desc="关闭后 Enter 换行、Ctrl+Enter 发送（两种模式均受影响）">
         <Switch label="Enter 发送" on={prefs.enterToSend} onChange={(v) => patch({ enterToSend: v })} />
       </Row>
-      <Row label="Shift + 滚轮切换 Agent" desc="工作台内使用；带节流、到列表边界停止、显示当前 Agent">
+      <Row label="Shift + 滚轮切换 Agent" desc="工作站内使用；带节流、到列表边界停止、显示当前 Agent">
         <Switch label="Shift+滚轮" on={prefs.shiftWheelSwitch} onChange={(v) => patch({ shiftWheelSwitch: v })} />
       </Row>
       <div className="desc" style={{ lineHeight: 1.8 }}>

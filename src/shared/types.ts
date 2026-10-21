@@ -204,6 +204,9 @@ export interface WorkflowRoleConfig {
   agentId: string
   agentName: string
   model: string
+  /** 角色级模型覆盖（真实生效，不影响该 Agent 在工作站的默认模型）：
+   *  model Agent = 覆盖 modelId；CLI Agent = 覆盖 --model 参数。切换 Agent 时清除。 */
+  modelOverride?: string
 }
 
 export interface WorkflowConfig {

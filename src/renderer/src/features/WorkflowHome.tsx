@@ -1,4 +1,4 @@
-// 工作流首页：标题 + 中央大输入框 + 配置条（悬停 200ms 预览浮层 / 点击打开固定面板）+ 开始
+// 工作流首页：标题 + 中央大输入框 + 配置条（悬停 200ms 打开可选浮层 / 点击固定）+ 开始
 import React, { useEffect, useRef, useState } from 'react'
 import { useWorkflow } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
@@ -7,8 +7,8 @@ import { useUi } from '../stores/ui'
 import { Composer } from '../components/Composer'
 import { Icon } from '../components/Icons'
 import { ConfigPanel } from './ConfigPanel'
-
-type PreviewKey = 'planner' | 'executor' | 'reviewer' | null
+import { RolePicker, type RoleKey } from './RolePicker'
+import { cls } from '../lib/utils'
 
 export function WorkflowHome() {
   const draft = useWorkflow((s) => s.draft)
@@ -19,35 +19,58 @@ export function WorkflowHome() {
   const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
   const agents = useAgents((s) => s.agents)
 
-  const [preview, setPreview] = useState<PreviewKey>(null)
+  const [popKey, setPopKey] = useState<RoleKey | null>(null)
+  const [pinned, setPinned] = useState(false)
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [panelOpen, setPanelOpen] = useState(false)
 
+  const closePop = () => {
+    if (openTimer.current) clearTimeout(openTimer.current)
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+    setPopKey(null)
+    setPinned(false)
+  }
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPreview(null)
+      if (e.key === 'Escape') closePop()
+    }
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement
+      // 点击浮层与配置入口外部时关闭；不进入输入框等无关区域误关面板（点击即意图明确）
+      if (!t.closest('.cfg-pop') && !t.closest('.cfg-chip')) closePop()
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('mousedown', onDown)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('mousedown', onDown)
+    }
   }, [])
 
-  const hoverOpen = (k: PreviewKey) => {
+  const hoverOpen = (k: RoleKey) => {
+    if (pinned) return // 固定打开时悬停不抢占，需点击切换
     if (closeTimer.current) clearTimeout(closeTimer.current)
     if (openTimer.current) clearTimeout(openTimer.current)
-    openTimer.current = setTimeout(() => setPreview(k), 200)
+    if (popKey === k) return
+    openTimer.current = setTimeout(() => setPopKey(k), 200)
   }
   const hoverClose = () => {
+    if (pinned) return // 固定面板不因鼠标离开关闭
     if (openTimer.current) clearTimeout(openTimer.current)
     if (closeTimer.current) clearTimeout(closeTimer.current)
-    closeTimer.current = setTimeout(() => setPreview(null), 250)
+    closeTimer.current = setTimeout(() => setPopKey(null), 250)
+  }
+  const popEnter = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current)
   }
 
-  const roleInfo = (k: 'planner' | 'executor' | 'reviewer') => {
+  const roleInfo = (k: RoleKey) => {
     const r = config[k]
     const a = agents.find((x) => x.id === r.agentId)
-    return { name: a?.name ?? '未配置', model: a?.model ?? '—', connected: a?.status === 'available' || a?.isDemo === true }
+    return { name: a?.name ?? '未配置', model: r.modelOverride ?? a?.model ?? '—', connected: a?.status === 'available' || a?.isDemo === true }
   }
 
   const onBegin = () => {
@@ -64,7 +87,7 @@ export function WorkflowHome() {
     <div className="screen workflow">
       {/* 顶部入口：模式切换 + 设置（工作流界面常驻可达） */}
       <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', gap: 6, zIndex: 20 }}>
-        <button className="icon-btn" title="切换模式（工作台 / 工作流）" aria-label="切换模式"
+        <button className="icon-btn" title="切换模式（工作站 / 工作流）" aria-label="切换模式"
           onClick={() => useUi.getState().setSwitchHud('__switch_ask')}>
           <Icon name="swap" size={16} />
         </button>
@@ -90,7 +113,7 @@ export function WorkflowHome() {
           <div className="wf-supplement-tip">Enter 开始（可在设置中改为 Ctrl+Enter）</div>
         </div>
 
-        {/* 配置条：悬停预览 + 点击固定面板 */}
+        {/* 配置条：悬停 200ms 打开可选浮层；点击固定（Escape / 外部点击关闭）；互斥不叠加 */}
         <div className="wf-configbar">
           {(['planner', 'executor', 'reviewer'] as const).map((k) => {
             const info = roleInfo(k)
@@ -101,22 +124,26 @@ export function WorkflowHome() {
                 onMouseEnter={() => hoverOpen(k)}
                 onMouseLeave={hoverClose}
               >
-                <button className="cfg-chip" onClick={() => { setPreview(null); setPanelOpen(true) }}>
+                <button
+                  className={cls('cfg-chip', popKey === k && 'open')}
+                  onClick={() => {
+                    if (popKey === k && pinned) closePop()
+                    else {
+                      if (openTimer.current) clearTimeout(openTimer.current)
+                      if (closeTimer.current) clearTimeout(closeTimer.current)
+                      setPopKey(k)
+                      setPinned(true)
+                    }
+                  }}
+                >
                   <span className={`role-tag ${k}`}>
                     {k === 'planner' ? '规划' : k === 'executor' ? '执行' : '审核'}
                   </span>
                   <b>{info.name}</b>
                   <span>{info.model}</span>
                 </button>
-                {preview === k && (
-                  <div className="cfg-preview" onMouseEnter={() => { if (closeTimer.current) clearTimeout(closeTimer.current) }} onMouseLeave={() => setPreview(null)}>
-                    <div className="pv-row"><span>Agent</span><b>{info.name}</b></div>
-                    <div className="pv-row"><span>模型</span><b>{info.model}</b></div>
-                    <div className="pv-row"><span>状态</span><b style={{ color: info.connected ? 'var(--ok)' : 'var(--warn)' }}>{info.connected ? '可用' : '待配置'}</b></div>
-                    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6, fontSize: 11.5 }}>
-                      点击打开固定设置面板
-                    </div>
-                  </div>
+                {popKey === k && (
+                  <RolePicker role={k} onEnter={popEnter} onLeave={hoverClose} />
                 )}
               </div>
             )

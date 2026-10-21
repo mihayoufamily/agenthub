@@ -64,7 +64,7 @@ export function Workbench() {
   return (
     <div className="workbench screen">
       {/* 模式进入大字：短暂停留后收束（CSS 动画自动完成） */}
-      <div className="wb-mode-title">工作台模式</div>
+      <div className="wb-mode-title">工作站模式</div>
 
       <Sidebar onOrder={() => setModal('order')} onAdd={() => setModal('add')} />
 
@@ -73,7 +73,7 @@ export function Workbench() {
           <div className="wb-topbar">
             <LogoMark size={22} />
             <div>
-              <div className="title">工作台模式</div>
+              <div className="title">工作站模式</div>
               <div className="sub">在同一个应用中自由切换 Agent</div>
             </div>
           </div>

@@ -156,16 +156,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 
       <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="chat-list">
-          {messages.length === 0 && (
-            <div className="empty-state" style={{ padding: '8vh 20px' }}>
-              <div className="title">和 {agent.name} 开始对话</div>
-              <div className="desc">
-                {agent.isDemo
-                  ? '当前为演示模式：回复为脚本化内容，用于体验界面与交互。'
-                  : '输入消息开始。发送内容将通过已连接的接口真实送达。'}
-              </div>
-            </div>
-          )}
+          {messages.length === 0 && <WelcomePanel agent={agent} />}
           {messages.map((m) => (
             <MessageRow key={m.id} msg={m} agentName={agent.name} agentColor={colorOf(agent.id)} />
           ))}
@@ -265,6 +256,77 @@ export function MessageBody({ text }: { text: string }) {
         )
       )}
     </>
+  )
+}
+
+/** 空会话欢迎面板（文档一.2）：当前执行环境 + 可点击任务示例（仅填草稿）+ 最近真实任务 */
+function WelcomePanel({ agent }: { agent: AgentConfig }) {
+  const setDraft = useSessions((s) => s.setDraft)
+  const [runs, setRuns] = useState<{ goal: string; status: string; startedAt: number }[] | null>(null)
+
+  useEffect(() => {
+    let off = false
+    void bridge.runs.list()
+      .then((rs) => {
+        if (off) return
+        setRuns(
+          [...rs]
+            .sort((a, b) => b.startedAt - a.startedAt)
+            .slice(0, 3)
+            .map((r) => ({ goal: r.goal, status: r.status, startedAt: r.startedAt }))
+        )
+      })
+      .catch(() => { if (!off) setRuns([]) })
+    return () => { off = true }
+  }, [])
+
+  const EXAMPLES: Record<string, string[]> = {
+    demo: ['介绍一下你自己和这个应用', '演示一次多轮对话', '展示你能做什么'],
+    model: ['帮我总结一份文档的要点', '把一段代码翻译成 Python 并解释差异', '帮我起草一封简洁的邮件'],
+    cli: ['在当前工作目录里写一个脚本并运行', '解释一段报错日志的原因', '查看工作目录并整理文件清单']
+  }
+  const examples = EXAMPLES[agent.kind] ?? EXAMPLES.demo
+
+  const envLine: string[] = []
+  if (agent.isDemo) envLine.push('演示模式（脚本化回复）')
+  else {
+    envLine.push(agent.model || '未设置模型')
+    if (agent.kind === 'cli' && agent.cliConfig?.workDir) envLine.push(`工作目录：${agent.cliConfig.workDir}`)
+    if (agent.kind === 'model' && agent.tools) envLine.push(`文件工具：${agent.tools.dir}${agent.tools.allowCommands ? '（含命令）' : ''}`)
+    if (agent.kind === 'cli' && !agent.cliConfig?.workDir) envLine.push('工作目录：未设置（顶栏可配置）')
+    if (agent.kind === 'model' && !agent.tools) envLine.push('文件工具：未启用（顶栏可配置）')
+  }
+
+  return (
+    <div className="empty-state card-enter" style={{ padding: '6vh 20px', maxWidth: 620, margin: '0 auto' }}>
+      <div className="title">和 {agent.name} 开始对话</div>
+      <div className="desc">{agent.isDemo ? '回复为脚本化内容，用于体验界面与交互。' : '发送内容将通过已连接的接口真实送达。'}</div>
+      <div className="wp-env">
+        {envLine.map((e, i) => (
+          <span key={i} className="wp-env-chip" title={e}>{e}</span>
+        ))}
+        <span className="wp-env-hint">模型 / 目录 / 工具可在顶栏调整</span>
+      </div>
+      <div className="wp-examples">
+        {examples.map((ex) => (
+          <button key={ex} className="wp-example" onClick={() => setDraft(agent.id, ex)} title="点击填入输入框，确认后再发送">
+            {ex}
+          </button>
+        ))}
+      </div>
+      {runs !== null && (
+        <div className="wp-runs">
+          <div className="wp-runs-title">最近任务</div>
+          {runs.length === 0 && <div className="wp-runs-empty">暂无历史任务</div>}
+          {runs.map((r) => (
+            <button key={r.startedAt} className="wp-run" onClick={() => setDraft(agent.id, r.goal)} title="点击把该目标填入输入框">
+              <span className="wp-run-status">{r.status === 'completed' ? '✓' : r.status === 'failed' ? '✗' : '·'}</span>
+              <span className="wp-run-goal">{r.goal.length > 40 ? r.goal.slice(0, 40) + '…' : r.goal}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

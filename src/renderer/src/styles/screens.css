@@ -17,6 +17,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+  position: relative; /* z-index 生效前提（光斑之上） */
   /* Logo 初始居中；进入 cream 阶段后上移到上半屏 */
   transform: translateY(0);
   transition: transform 700ms var(--ease);
@@ -68,6 +69,60 @@
 }
 .splash[data-stage='ready'] .splash-start-wrap,
 .splash[data-stage='stable'] .splash-start-wrap { opacity: 1; transform: translateY(0); pointer-events: auto; }
+
+/* 引导文案：Logo 与"开始"按钮之间（文档二.1）；cream 阶段奶白背景形成后上移淡入 */
+.splash-guide {
+  position: absolute;
+  bottom: 26vh;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 14.5px;
+  letter-spacing: 0.14em;
+  text-indent: 0.07em;
+  color: rgba(11, 11, 12, 0.56);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 600ms var(--ease), transform 600ms var(--ease);
+  pointer-events: none;
+}
+.splash[data-stage='cream'] .splash-guide,
+.splash[data-stage='ready'] .splash-guide,
+.splash[data-stage='stable'] .splash-guide { opacity: 1; transform: translateY(0); }
+
+/* 简约背景动态（文档二.2）：奶白背景上两个暖色光斑缓慢漂移；单一主效果、位于内容后方、不拦截点击；
+   reduced motion / 动画关闭时由全局规则压到 1ms 等效静止；退出开始页后随组件卸载停止 */
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::before,
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(2px);
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::before {
+  width: 46vmin; height: 46vmin;
+  left: -10vmin; top: 8vh;
+  background: radial-gradient(circle, rgba(217, 119, 87, 0.10), transparent 68%);
+  animation: splash-drift-a 26s ease-in-out infinite alternate;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::after {
+  width: 40vmin; height: 40vmin;
+  right: -8vmin; bottom: 6vh;
+  background: radial-gradient(circle, rgba(191, 155, 61, 0.08), transparent 68%);
+  animation: splash-drift-b 33s ease-in-out infinite alternate;
+}
+@keyframes splash-drift-a {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(9vmin, 5vh) scale(1.12); }
+}
+@keyframes splash-drift-b {
+  from { transform: translate(0, 0) scale(1.06); }
+  to { transform: translate(-8vmin, -6vh) scale(0.94); }
+}
+/* 光斑不盖住内容：内容层级抬到光斑之上（position 各自定义于上方规则） */
+.splash-inner, .splash-guide, .splash-start-wrap, .splash-skip { z-index: 1; }
 
 .btn-start {
   min-width: 148px;
@@ -173,4 +228,28 @@
   transition: background var(--t-fast), color var(--t-fast);
 }
 .mode-pill button:hover { color: var(--brand-ink); }
+.mode-pill button:focus-visible { outline: 2px solid var(--brand-ink); outline-offset: -2px; }
+.mode-pill button:active { transform: translateY(0.5px); }
 .mode-pill button.active { background: var(--brand-ink); color: var(--brand-cream); }
+
+/* 模式说明卡片（点击入口弹出；文档三.1） */
+.mode-pill-wrap { position: absolute; top: 20px; right: 24px; opacity: 0; animation: rise-in 380ms var(--ease) 320ms both; z-index: 30; }
+.mode-pill-wrap .mode-pill { position: static; }
+.mode-info {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 300px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mode-info .mi-title { font-weight: 700; font-size: 14px; color: var(--text); }
+.mode-info .mi-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.65; }
+.mode-info .mi-actions { display: flex; gap: 8px; }
+.mode-info .mi-note { font-size: 11px; color: var(--text-3); }

@@ -4,6 +4,7 @@
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: row; /* 覆盖 .screen 的 column：侧栏与主区左右分栏（文档一.1：Agent 数量不得决定聊天区高度） */
   background: var(--bg);
   animation: wb-bg-in 480ms var(--ease) both;
 }
@@ -254,3 +255,18 @@
 .order-row .nm { font-size: 13px; font-weight: 600; }
 .order-row .md { font-size: 11.5px; color: var(--text-3); }
 .order-row .mv { display: flex; gap: 2px; }
+
+/* ---- 空会话欢迎面板（文档一.2） ---- */
+.wp-env { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 14px; }
+.wp-env-chip { font-size: 11.5px; color: var(--text-2); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wp-env-hint { font-size: 11px; color: var(--text-3); align-self: center; }
+.wp-examples { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+.wp-example { text-align: left; font-size: 12.5px; color: var(--text-2); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 8px 12px; cursor: pointer; transition: border-color var(--t-fast), color var(--t-fast); }
+.wp-example:hover { border-color: var(--brand-yellow); color: var(--text); }
+.wp-runs { margin-top: 18px; border-top: 1px dashed var(--border); padding-top: 12px; }
+.wp-runs-title { font-size: 11.5px; color: var(--text-3); margin-bottom: 6px; }
+.wp-runs-empty { font-size: 12px; color: var(--text-3); }
+.wp-run { display: flex; gap: 8px; align-items: center; width: 100%; text-align: left; font-size: 12px; color: var(--text-2); background: none; border: none; padding: 5px 6px; border-radius: var(--r-sm); cursor: pointer; }
+.wp-run:hover { background: var(--surface); color: var(--text); }
+.wp-run-status { flex: none; width: 14px; text-align: center; color: var(--text-3); }
+.wp-run-goal { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

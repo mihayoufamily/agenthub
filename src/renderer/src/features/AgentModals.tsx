@@ -8,6 +8,7 @@ import { Modal } from '../components/Modal'
 import { Button, Avatar, Spinner } from '../components/primitives'
 import { Icon } from '../components/Icons'
 import { bridge } from '../lib/ipc'
+import { CliCandidatesTab } from './CliCandidates'
 
 export type AgentModalKind = null | 'add' | 'order' | 'handoff'
 
@@ -20,11 +21,14 @@ export function AgentModals({ kind, onClose }: { kind: AgentModalKind; onClose: 
 
 /* ---------------- 添加 Agent ---------------- */
 function AddAgentModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<'scan' | 'demo' | 'model' | 'cli'>('demo')
+  const [tab, setTab] = useState<'cand' | 'demo' | 'cli' | 'model' | 'scan'>('cand')
+  /** 候选列表 → 自定义模型预填（provider/baseUrl） */
+  const [modelPrefill, setModelPrefill] = useState<{ provider: string; baseUrl: string } | null>(null)
   return (
     <Modal open onClose={onClose} title="添加 Agent" width={520}>
-      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
         {([
+          ['cand', '候选列表'],
           ['demo', '演示 Agent'],
           ['cli', '本机 CLI'],
           ['model', '自定义模型'],
@@ -40,9 +44,18 @@ function AddAgentModal({ onClose }: { onClose: () => void }) {
           </button>
         ))}
       </div>
+      {tab === 'cand' && (
+        <CliCandidatesTab
+          onClose={onClose}
+          onUseApi={(p) => {
+            setModelPrefill(p)
+            setTab('model')
+          }}
+        />
+      )}
       {tab === 'demo' && <DemoTab onClose={onClose} />}
       {tab === 'cli' && <CliTab onClose={onClose} />}
-      {tab === 'model' && <ModelTab onClose={onClose} />}
+      {tab === 'model' && <ModelTab key={modelPrefill?.baseUrl ?? 'blank'} prefill={modelPrefill ?? undefined} onClose={onClose} />}
       {tab === 'scan' && <ScanTab onClose={onClose} />}
     </Modal>
   )
@@ -149,10 +162,10 @@ function CliTab({ onClose }: { onClose: () => void }) {
   )
 }
 
-function ModelTab({ onClose }: { onClose: () => void }) {
+function ModelTab({ onClose, prefill }: { onClose: () => void; prefill?: { provider: string; baseUrl: string } }) {
   const addCustom = useAgents((s) => s.addCustomModelAgent)
-  const [provider, setProvider] = useState('OpenAI 兼容服务')
-  const [baseUrl, setBaseUrl] = useState('')
+  const [provider, setProvider] = useState(prefill?.provider ?? 'OpenAI 兼容服务')
+  const [baseUrl, setBaseUrl] = useState(prefill?.baseUrl ?? '')
   const [modelId, setModelId] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [testing, setTesting] = useState(false)

@@ -62,6 +62,8 @@ export function Splash({ onRestore }: { onRestore: () => void }) {
         </div>
         <div className="splash-word">agenthub</div>
       </div>
+      {/* 引导文案：Logo 与"开始"按钮之间，奶白背景形成后上移淡入（reduced motion 直接显示） */}
+      <div className="splash-guide" aria-hidden={false}>在这里开始你的工作</div>
       <div className="splash-start-wrap">
         <button className="btn-start" onClick={onStart}>
           开始

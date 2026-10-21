@@ -1,6 +1,7 @@
-// 品牌首页：Logo 上半屏 + "今天要构建什么" + 输入区 + 右上角模式选择
-// 规则：先写需求后选模式允许；直接发送未选模式时先弹模式选择；选模式不自动提交需求
-import React, { useState } from 'react'
+// 品牌首页：Logo 上半屏 + "今天要构建什么" + 输入区 + 右上角模式入口（点击弹说明卡片）
+// 规则：先写需求后选模式允许；直接发送未选模式时先弹模式选择；选模式不自动提交需求；
+//       说明卡片关闭不切模式、不提交输入，草稿与附件保持不变
+import React, { useEffect, useState } from 'react'
 import type { WorkMode } from '@shared/types'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
@@ -10,7 +11,24 @@ import { Logo } from '../components/Logo'
 import { Composer } from '../components/Composer'
 import { Modal } from '../components/Modal'
 import { Button } from '../components/primitives'
+import { Icon } from '../components/Icons'
 import { enterMode } from './ModeSwitch'
+
+/** 模式说明文案（文档三.1 建议文案） */
+const MODE_INFO: Record<WorkMode, { title: string; pill: string; desc: string; enter: string }> = {
+  workbench: {
+    title: '工作站模式',
+    pill: '工作站',
+    desc: '在一个界面中自由切换不同 Agent。每个 Agent 保留自己的会话和工作状态，适合由你直接安排任务、查看结果和决定下一步。',
+    enter: '进入工作站模式'
+  },
+  workflow: {
+    title: '工作流模式',
+    pill: '工作流',
+    desc: '让规划、执行、审核三个角色协作完成任务。系统按流程交接任务、检查结果并在必要时返工，支持自动审核与人工确认。',
+    enter: '进入工作流模式'
+  }
+}
 
 export function BrandHome() {
   const draft = useUi((s) => s.homeDraft)
@@ -21,11 +39,26 @@ export function BrandHome() {
   const setPendingMode = useUi((s) => s.setPendingMode)
   const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
   const [showModePrompt, setShowModePrompt] = useState(false)
+  /** 说明卡片：点击入口打开；null = 关闭 */
+  const [infoKey, setInfoKey] = useState<WorkMode | null>(null)
 
-  const MODES: { key: WorkMode; title: string; desc: string }[] = [
-    { key: 'workbench', title: '工作台模式', desc: '在同一个界面自由切换 Agent，每个 Agent 保留自己的会话与草稿。' },
-    { key: 'workflow', title: '工作流模式', desc: '规划、执行、审核三个角色协作完成任务，支持返工与人工确认。' }
-  ]
+  // Escape 关闭说明卡片（不切换模式、不影响草稿）
+  useEffect(() => {
+    if (!infoKey) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setInfoKey(null)
+    }
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement
+      if (!t.closest('.mode-pill') && !t.closest('.mode-info')) setInfoKey(null)
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('mousedown', onDown)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('mousedown', onDown)
+    }
+  }, [infoKey])
 
   const doSend = () => {
     if (!draft.trim()) return
@@ -45,23 +78,46 @@ export function BrandHome() {
 
   return (
     <div className="brand-home">
-      <div className="mode-pill" role="radiogroup" aria-label="工作模式选择">
-        <button
-          className={pendingMode === 'workbench' ? 'active' : ''}
-          onClick={() => setPendingMode('workbench')}
-          aria-checked={pendingMode === 'workbench'}
-          role="radio"
-        >
-          工作台
-        </button>
-        <button
-          className={pendingMode === 'workflow' ? 'active' : ''}
-          onClick={() => setPendingMode('workflow')}
-          aria-checked={pendingMode === 'workflow'}
-          role="radio"
-        >
-          工作流
-        </button>
+      <div className="mode-pill-wrap">
+        <div className="mode-pill" role="radiogroup" aria-label="工作模式选择">
+          {(['workbench', 'workflow'] as const).map((m) => (
+            <button
+              key={m}
+              className={pendingMode === m ? 'active' : ''}
+              onClick={() => {
+                setPendingMode(m)
+                setInfoKey((k) => (k === m ? null : m)) // 再次点击同一入口：关闭说明
+              }}
+              aria-checked={pendingMode === m}
+              role="radio"
+              title={`查看${MODE_INFO[m].title}说明`}
+            >
+              {MODE_INFO[m].pill}
+            </button>
+          ))}
+        </div>
+
+        {/* 模式说明卡片：互斥不叠加；关闭不切模式、不提交输入 */}
+        {infoKey && (
+          <div className="mode-info card-enter">
+            <div className="mi-title">{MODE_INFO[infoKey].title}</div>
+            <div className="mi-desc">{MODE_INFO[infoKey].desc}</div>
+            <div className="mi-actions">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  const m = infoKey
+                  setInfoKey(null)
+                  enterMode(m)
+                }}
+              >
+                <Icon name="chevron" size={13} /> {MODE_INFO[infoKey].enter}
+              </Button>
+              <Button variant="ghost" onClick={() => setInfoKey(null)}>关闭</Button>
+            </div>
+            <div className="mi-note">关闭说明不会切换模式，草稿与附件保持不变。</div>
+          </div>
+        )}
       </div>
 
       <div className="home-logo-wrap">
@@ -92,10 +148,10 @@ export function BrandHome() {
         width={420}
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: '4px 0 12px' }}>
-          {MODES.map((m) => (
+          {(['workbench', 'workflow'] as const).map((m) => (
             <button
-              key={m.key}
-              onClick={() => chooseMode(m.key)}
+              key={m}
+              onClick={() => chooseMode(m)}
               style={{
                 textAlign: 'left',
                 border: '1px solid var(--border-strong)',
@@ -105,8 +161,8 @@ export function BrandHome() {
                 cursor: 'pointer'
               }}
             >
-              <div style={{ fontWeight: 700, fontSize: 14 }}>{m.title}</div>
-              <div style={{ fontSize: 12.5, color: 'var(--text-2)', marginTop: 4, lineHeight: 1.5 }}>{m.desc}</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{MODE_INFO[m].title}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--text-2)', marginTop: 4, lineHeight: 1.5 }}>{MODE_INFO[m].desc}</div>
             </button>
           ))}
           <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>选择后你的草稿与附件会一起带过去，进入后再确认发送。</div>

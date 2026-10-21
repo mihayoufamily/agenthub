@@ -56,29 +56,58 @@
 .cfg-chip .role-tag.executor { background: var(--role-executor); }
 .cfg-chip .role-tag.reviewer { background: var(--role-reviewer); }
 .cfg-chip b { color: var(--text); font-weight: 600; }
+.cfg-chip.open { border-color: var(--brand-yellow); background: var(--surface-2); }
 
-/* 悬停预览浮层 */
-.cfg-preview {
+/* 配置条层叠修复：configbar 与 wf-start 均带动画形成 stacking context，
+   后出现的"开始任务"会盖住配置条内浮层——给配置条更高层级（文档四.1） */
+.wf-configbar { position: relative; z-index: 2; }
+
+/* 角色选择浮层（悬停 200ms 打开 / 点击固定；长列表内部滚动；空间不足向上翻转） */
+.cfg-pop {
   position: absolute;
   top: calc(100% + 8px);
   left: 0;
-  min-width: 230px;
+  width: 300px;
+  max-height: min(60vh, 430px);
+  overflow-y: auto;
   z-index: 50;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-pop);
-  padding: 12px 14px;
+  padding: 10px;
   font-size: 12.5px;
   color: var(--text-2);
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 8px;
   animation: pop-in 160ms var(--ease) both;
 }
+.cp-head { display: flex; align-items: center; gap: 8px; padding: 0 2px; }
+.cp-hint { font-size: 11.5px; color: var(--text-3); }
+.cp-agents { display: flex; flex-direction: column; gap: 2px; }
+.cp-agent {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--r-sm);
+  background: none; border: none; cursor: pointer; color: var(--text-2); text-align: left; width: 100%;
+}
+.cp-agent:hover { background: var(--surface-2); }
+.cp-agent.cur { background: var(--surface-2); color: var(--text); }
+.cp-agent .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text); }
+.cp-agent .kind { font-size: 10.5px; padding: 1px 6px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); }
+.cp-empty { padding: 6px 4px; color: var(--text-3); line-height: 1.6; }
+.cp-models { border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.cp-m-title { font-size: 11.5px; color: var(--text-3); padding: 0 2px; }
+.cp-model-list { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
+.cp-model {
+  text-align: left; padding: 6px 8px; border-radius: var(--r-sm); border: 1px solid var(--border);
+  background: var(--surface); cursor: pointer; color: var(--text-2); font-size: 12px;
+}
+.cp-model:hover:not(:disabled) { border-color: var(--brand-yellow); }
+.cp-model.cur { border-color: var(--brand-yellow); color: var(--text-2); background: var(--surface-2); cursor: default; }
+.cp-input { flex: 1; height: 30px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 0 8px; background: var(--surface); color: var(--text); font-size: 12px; }
+.cp-note { font-size: 11px; color: var(--text-3); line-height: 1.5; }
+.cp-err { color: var(--danger); font-size: 12px; display: flex; align-items: center; gap: 8px; }
 @keyframes pop-in { from { opacity: 0; transform: translateY(-4px); } }
-.cfg-preview .pv-row { display: flex; justify-content: space-between; gap: 16px; }
-.cfg-preview .pv-row b { color: var(--text); }
 
 /* 开始按钮 */
 .wf-start { margin-top: 22px; animation: rise-in 420ms var(--ease) 260ms both; }
