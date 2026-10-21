@@ -104,10 +104,10 @@ interface StageOutcome {
 }
 
 /**
- * 真实模型调用：流式写入指定卡片，返回完整文本。
+ * 真实 Agent 调用（自定义模型 / 本机 CLI）：流式写入指定卡片，返回完整文本。
  * 错误：置卡片 error + 任务 failed；取消：返回已收到的部分文本，由调用方检查 isCancelled。
  */
-function modelChatToCard(
+function agentChatToCard(
   agent: AgentConfig,
   system: string,
   user: string,
@@ -139,10 +139,17 @@ function modelChatToCard(
         finish({ ok: true, text })
       }
     })
-    void bridge.models.chat(agent.modelConfig!, reqId, [
+    const messages = [
       { role: 'system', content: system },
       { role: 'user', content: user }
-    ]).then((r: { ok: boolean }) => {
+    ]
+    const launched =
+      agent.kind === 'cli' && agent.cliConfig
+        ? bridge.cli.chat(agent.cliConfig.cli, { model: agent.cliConfig.model, exePath: agent.cliConfig.exePath }, reqId, messages)
+        : agent.modelConfig
+          ? bridge.models.chat(agent.modelConfig, reqId, messages)
+          : Promise.resolve({ ok: false })
+    void launched.then((r: { ok: boolean }) => {
       // 主进程会通过 model:event 发送错误；此处兜底通道异常（无事件到达）的场景
       if (!r.ok) setTimeout(() => finish({ ok: false, message: '请求未能发起（详见主进程日志）' }), 400)
     }).catch(() => finish({ ok: false, message: 'IPC 调用失败' }))
@@ -202,15 +209,15 @@ async function runStage(
     return { conclusion: text, checklist }
   }
 
-  // ---- 真实模型 Agent：流式调用 + 结构化解析 ----
-  if (!agent?.modelConfig) {
+  // ---- 真实 Agent（自定义模型 / 本机 CLI）：流式调用 + 结构化解析 ----
+  if (!(agent?.modelConfig || agent?.cliConfig)) {
     setRun((r) => ({ ...r, status: 'failed', stage: null, endedAt: Date.now() }))
     get().saveRun()
-    useUi.getState().toast(`Agent「${roleCfg.agentName}」缺少模型配置，无法执行`, 'error')
+    useUi.getState().toast(`Agent「${roleCfg.agentName}」缺少接入配置（模型或 CLI），无法执行`, 'error')
     return null
   }
   const { system, user } = buildRoleMessages(role, ctx)
-  const res = await modelChatToCard(agent, system, user, card.id, setRun)
+  const res = await agentChatToCard(agent, system, user, card.id, setRun)
   if (isCancelled()) return null
   if (!res.ok) {
     setRun((r) => ({
@@ -349,6 +356,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       if (!a) return '配置引用了不存在的 Agent，请重新选择'
       if (a.kind === 'demo' && !a.isDemo) return `Agent「${a.name}」尚未完成连接（仅发现未接入），不能参与执行`
       if (a.kind === 'model' && a.status !== 'available') return `模型 Agent「${a.name}」连接不可用，请先完成连接测试`
+      if (a.kind === 'cli' && a.status !== 'available') return `CLI Agent「${a.name}」不可用（可能已卸载），请重新添加`
     }
     return null
   },
@@ -523,6 +531,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     set({ _cancelled: true })
     if (activeModelReqId) {
       bridge.models.cancel(activeModelReqId)
+      bridge.cli.cancel(activeModelReqId) // 两类通道对未知 reqId 均为无操作，双发无害
       activeModelReqId = null
     }
     const status = reason === 'timeout' ? 'timeout' : 'cancelled'

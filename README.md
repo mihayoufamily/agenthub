@@ -45,7 +45,9 @@ npm run dist            # 生成 NSIS 安装包（需要环境能运行 electron
 - 项目长期记忆（与任务记录分离，可查看/修改/删除）
 - 数据持久化：配置带版本号 + 迁移、会话与任务记录独立 JSON、API Key 用系统安全凭据存储（safeStorage 加密）、配置导出不含任何秘密
 - Agent 扫描：仅查 PATH 上的常见 CLI，不读任何软件配置/密钥；发现 ≠ 接入（如实标注）
-- 自定义模型（OpenAI 兼容）：真实连接测试 + 流式对话 + 取消；无 Key 时如实报错
+- 模型 API（OpenAI 兼容）：真实连接测试 + 流式对话 + 取消；无 Key 时如实报错
+- 本机 CLI Agent 执行适配器：**arkcli 已内置并本机实测**（`+chat` 流式 NDJSON 解析、真实推理、取消、用量统计；凭据由 arkcli 自行管理，本应用不读取任何密钥）；claude / codex 按官方 CLI 规范实现（stream-json / exec --json），**未在本机实测**，未安装时如实报错
+- 应用图标与打包资源：Logo 同源 ico（256/48/32/16），NSIS 与便携版均已接入
 - 演示模式：无任何真实 Agent/Key 可跑通全流程（含一次返工与人工确认），全程清晰标注"演示"
 
 ### 演示模式边界 ⚠️
@@ -54,7 +56,7 @@ npm run dist            # 生成 NSIS 安装包（需要环境能运行 electron
 
 ### 未实现 / 已知限制 ❌
 
-- **本机 Agent CLI 执行适配器未内置**：扫描可发现 claude/codex 等 CLI，但本版本没有它们的执行适配层（架构已预留，见 docs/AGENT_ADAPTERS.md）
+- **claude / codex CLI 适配器未实测**：适配层已按官方 CLI 规范实现（见 docs/AGENT_ADAPTERS.md），但本机未安装这两个 CLI，无法端到端验证；arkcli 适配器已本机实测
 - **electron-builder 打包**：依赖其内置的 Go 二进制（app-builder）；在本项目开发机上 Go 二进制被系统安全策略拦截，故本机验证走 `pack:portable`（纯 JS）。在正常机器上 `npm run dist` 可用，但**未在其他机器实测**
 - **Chromium 沙箱兼容开关**：部分装有大数字类安全软件的机器上，Electron 的 GPU/渲染沙箱子进程会被拦截崩溃（0xC0000005）。本应用提供 `AGENTHUB_NO_SANDBOX=1` 环境变量作为兼容模式（降低渲染进程隔离；本应用只加载本地页面，无远程内容）。正常机器无需开启
 - 自动更新：未实现，不声明支持
@@ -68,4 +70,4 @@ npm run dist            # 生成 NSIS 安装包（需要环境能运行 electron
 
 ## 许可证
 
-**待项目所有者确认**（建议 MIT 或 Apache-2.0）。在确认前，本仓库按"保留所有权利"处理；package.json 中 license 字段为占位说明。依赖清单见 package.json，均为 MIT/ BSD 类许可（详见 node_modules 内各包 LICENSE）。
+MIT（见 [LICENSE](LICENSE)）。依赖清单见 package.json，均为 MIT/BSD 类许可（详见 node_modules 内各包 LICENSE）。

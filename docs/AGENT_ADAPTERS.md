@@ -15,6 +15,10 @@
 主进程适配器位于 `src/main/adapters/`。现有实现：
 
 - `openai.ts` — OpenAI 兼容接口（`/models` 连接测试、`/chat/completions` SSE 流式、取消、用量尽力解析）。能力声明：仅文本对话，无工具执行、无审批。
+- `cli.ts` — 本机 CLI Agent 执行适配器（统一 `CliSpec` 结构：exe 解析 / `--version` 本地测试 / 参数构造 / NDJSON 行解析）：
+  - **arkcli**（本机实测）：`+chat --stream --include-events`，消费 `response_output_text_delta`（增量正文）与 `response_completed`（用量）；exe 解析顺序为 npm 包内原生 exe → PATH 上的 `.exe` → `.cmd` 推导（npm `.cmd` shim 无法安全 spawn，数组参数形态下拒绝执行）。凭据由 arkcli 自身管理（profile），本应用不读取不保存任何密钥。
+  - **claude / codex**（按官方 CLI 规范实现，未在本机实测）：`-p --output-format stream-json` / `exec --json`；未安装时连接测试如实报错。
+  - 能力声明：stream / cancel / usage 真实；tools / approval 不声明（界面不显示对应控件）。
 
 每个适配器需要实现（建议抽取为统一接口，v2 工作）：
 

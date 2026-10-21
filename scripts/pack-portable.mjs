@@ -35,6 +35,10 @@ const appDir = join(outDir, 'resources', 'app')
 cpSync(join(cwd, 'package.json'), join(appDir, 'package.json'))
 cpSync(join(cwd, 'out'), join(appDir, 'out'), { recursive: true })
 cpSync(join(cwd, 'dist'), join(appDir, 'dist'), { recursive: true })
+// build/：应用图标（主进程 BrowserWindow 引用 resources/app/build/icon.ico）
+if (existsSync(join(cwd, 'build', 'icon.ico'))) {
+  cpSync(join(cwd, 'build'), join(appDir, 'build'), { recursive: true })
+}
 
 // 3) 兼容模式一键启动器（安全软件拦截沙箱导致双击无反应时使用）
 writeFileSync(join(outDir, 'start-compat-mode.cmd'), [

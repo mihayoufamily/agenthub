@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
+import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig } from '../shared/types'
 
 /** 注册全部 IPC 通道。getStore/getWin 为延迟引用，避免初始化顺序问题。 */
@@ -127,6 +128,28 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   ipcMain.handle('model:cancel', (_e, reqId: string) => {
     openai.cancelStream(reqId)
+    return { ok: true }
+  })
+
+  // ---------- 本机 CLI Agent（真实执行，凭据由 CLI 自身管理） ----------
+  ipcMain.handle('cli:test', (_e, name: string) => {
+    if (!cli.isKnownCli(name)) return { ok: false, message: `未知 CLI：${name}` }
+    return cli.testConnection(name)
+  })
+
+  ipcMain.handle('cli:chat', async (_e, name: string, opts: cli.CliChatOptions, reqId: string, messages: { role: string; content: string }[]) => {
+    if (!cli.isKnownCli(name)) {
+      getWin()?.webContents.send('model:event', { reqId, type: 'error', message: `未知 CLI：${name}` })
+      return { ok: false }
+    }
+    // 事件复用 model:event 通道（reqId 路由），渲染层无需区分来源
+    return cli.cliChatStream(name, opts ?? {}, reqId, messages, (ev) => {
+      getWin()?.webContents.send('model:event', ev)
+    })
+  })
+
+  ipcMain.handle('cli:cancel', (_e, reqId: string) => {
+    cli.cancelChat(reqId)
     return { ok: true }
   })
 

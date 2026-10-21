@@ -125,8 +125,8 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       return
     }
 
-    if (agent.kind === 'model' && agent.modelConfig) {
-      // ---- 真实模型流式接入（OpenAI 兼容）----
+    if ((agent.kind === 'model' && agent.modelConfig) || (agent.kind === 'cli' && agent.cliConfig)) {
+      // ---- 真实流式接入：自定义模型（OpenAI 兼容）或本机 CLI Agent ----
       const reqId = uid('req')
       const msgId = uid('msg')
       const replyMsg: ChatMessage = { id: msgId, role: 'assistant', text: '', ts: Date.now(), streaming: true }
@@ -191,7 +191,9 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         }
       })
 
-      const r = await bridge.models.chat(agent.modelConfig, reqId, history)
+      const r = agent.kind === 'cli'
+        ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath }, reqId, history)
+        : await bridge.models.chat(agent.modelConfig!, reqId, history)
       if (!r.ok) {
         set((s) => {
           const cur = s.sessions[agentId]
@@ -202,7 +204,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
               [agentId]: {
                 ...cur,
                 messages: cur.messages.map((m) =>
-                  m.id === msgId ? { ...m, streaming: false, error: '请求未发出（缺少 API Key 或配置）' } : m
+                  m.id === msgId ? { ...m, streaming: false, error: agent.kind === 'cli' ? '请求未发出（CLI 不可用或已卸载）' : '请求未发出（缺少 API Key 或配置）' } : m
                 )
               }
             }

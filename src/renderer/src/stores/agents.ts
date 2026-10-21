@@ -1,11 +1,18 @@
 // Agent 管理：列表、顺序、状态、未读、发现扫描、连接
 import { create } from 'zustand'
-import type { AgentConfig, ScanResultItem, CustomModelConfig, AgentSession } from '@shared/types'
+import type { AgentConfig, ScanResultItem, CustomModelConfig, AgentSession, CliName } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { uid } from '../lib/utils'
 import { useUi } from './ui'
 
 const DEMO_COLORS = ['#5b6cd9', '#1f9d6d', '#b4820b', '#a25b9e']
+
+/** CLI 展示信息（与主进程适配器声明保持一致） */
+export const CLI_META: Record<CliName, { display: string; note: string }> = {
+  arkcli: { display: 'arkcli（火山方舟）', note: '本机实测：真实流式调用；凭据走 arkcli 自身 profile，AgentHub 不保存密钥' },
+  claude: { display: 'Claude Code CLI', note: '按官方 CLI 规范实现，本机未安装、未实测' },
+  codex: { display: 'Codex CLI', note: '按官方 CLI 规范实现，本机未安装、未实测' }
+}
 
 interface AgentsState {
   agents: AgentConfig[]
@@ -20,6 +27,7 @@ interface AgentsState {
   persist: () => void
   addDemoAgent: () => AgentConfig
   addCustomModelAgent: (cfg: Omit<CustomModelConfig, 'keyId' | 'hasKey'>, apiKey: string) => Promise<{ ok: boolean; agent?: AgentConfig; message: string }>
+  addCliAgent: (cli: CliName, model?: string) => Promise<{ ok: boolean; agent?: AgentConfig; message: string }>
   addDiscoveredAgent: (name: string, path: string) => AgentConfig
   updateAgent: (id: string, patch: Partial<AgentConfig>) => void
   removeAgent: (id: string, opts: { deleteHistory: boolean }) => Promise<void>
@@ -93,11 +101,32 @@ export const useAgents = create<AgentsState>()((set, get) => ({
     return { ok: true, agent, message: result.message }
   },
 
+  addCliAgent: async (cli, model) => {
+    // 先真实测试（解析 exe + 版本命令），成功才添加——不伪造连接状态
+    const t = await bridge.cli.test(cli)
+    if (!t.ok) {
+      return { ok: false, message: `连接测试失败：${t.message}` }
+    }
+    const agent: AgentConfig = {
+      id: uid('agent'),
+      name: CLI_META[cli].display,
+      kind: 'cli',
+      desc: t.exePath ?? '',
+      model: model?.trim() || '默认（CLI 自身配置）',
+      status: 'available',
+      cliConfig: { cli, ...(model?.trim() ? { model: model.trim() } : {}), exePath: t.exePath ?? '' },
+      addedAt: Date.now()
+    }
+    set((s) => ({ agents: [...s.agents, agent], colors: { ...s.colors, [agent.id]: '#0e7490' } }))
+    get().persist()
+    return { ok: true, agent, message: `${t.version ?? '可用'}` }
+  },
+
   addDiscoveredAgent: (name, path) => {
     const agent: AgentConfig = {
       id: uid('agent'),
       name,
-      kind: 'demo', // v1 未内置 CLI 执行适配器：加入后仅作为占位（如实在 desc 标注）
+      kind: 'demo', // 未内置适配器的 CLI：加入后仅作为占位（如实在 desc 标注）
       desc: `已发现：${path}（待连接，本版本未内置该 CLI 执行适配器）`,
       model: '—',
       status: 'disconnected',

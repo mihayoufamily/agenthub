@@ -123,6 +123,8 @@ async function runShotSequence(win: BrowserWindow) {
 
 function createWindow() {
   const ws = loadWindowState()
+  // 应用图标（out/main -> ../../build/icon.ico；便携版/asar 内同结构）
+  const iconPath = join(__dirname, '../../build/icon.ico')
   const win = new BrowserWindow({
     ...ws,
     width: ws.width,
@@ -132,6 +134,7 @@ function createWindow() {
     backgroundColor: '#0b0b0c', // 开屏黑底，避免白闪
     autoHideMenuBar: true,
     show: false,
+    icon: existsSync(iconPath) ? iconPath : undefined,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

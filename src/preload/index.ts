@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
-  ModelTestResult, ScanResultItem, AppInfo, AgentConfig
+  ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName
 } from '../shared/types'
 
 /**
@@ -45,6 +45,19 @@ const api = {
   agents: {
     scan: () => ipcRenderer.invoke('agents:scan') as Promise<ScanResultItem[]>,
     checkPath: (p: string) => ipcRenderer.invoke('agents:checkPath', p) as Promise<boolean>
+  },
+  cli: {
+    /** 本地连接测试（解析 exe + 版本命令，不联网） */
+    test: (name: CliName) => ipcRenderer.invoke('cli:test', name) as Promise<{ ok: boolean; message: string; version?: string; exePath?: string }>,
+    chat: (name: CliName, opts: { model?: string; exePath?: string }, reqId: string, messages: { role: string; content: string }[]) =>
+      ipcRenderer.invoke('cli:chat', name, opts, reqId, messages) as Promise<{ ok: boolean; message?: string }>,
+    cancel: (reqId: string) => ipcRenderer.invoke('cli:cancel', reqId),
+    /** 流式事件与 models 共用 model:event 通道（reqId 路由） */
+    onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number } }) => void) => {
+      const handler = (_e: unknown, data: Parameters<typeof cb>[0]) => cb(data)
+      ipcRenderer.on('model:event', handler)
+      return () => ipcRenderer.removeListener('model:event', handler)
+    }
   },
   models: {
     test: (cfg: CustomModelConfig, apiKey: string) => ipcRenderer.invoke('model:test', cfg, apiKey) as Promise<ModelTestResult>,

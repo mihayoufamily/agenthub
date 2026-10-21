@@ -1,7 +1,7 @@
-// Agent 相关弹窗集合：添加（扫描/演示/自定义模型）、管理顺序（拖拽+上下移）、交接
+// Agent 相关弹窗集合：添加（扫描/演示/自定义模型/CLI）、管理顺序（拖拽+上下移）、交接
 import React, { useRef, useState } from 'react'
-import type { ScanResultItem } from '@shared/types'
-import { useAgents } from '../stores/agents'
+import type { ScanResultItem, CliName } from '@shared/types'
+import { useAgents, CLI_META } from '../stores/agents'
 import { useSessions } from '../stores/sessions'
 import { useUi } from '../stores/ui'
 import { Modal } from '../components/Modal'
@@ -20,12 +20,13 @@ export function AgentModals({ kind, onClose }: { kind: AgentModalKind; onClose: 
 
 /* ---------------- 添加 Agent ---------------- */
 function AddAgentModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<'scan' | 'demo' | 'model'>('demo')
+  const [tab, setTab] = useState<'scan' | 'demo' | 'model' | 'cli'>('demo')
   return (
     <Modal open onClose={onClose} title="添加 Agent" width={520}>
       <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
         {([
           ['demo', '演示 Agent'],
+          ['cli', '本机 CLI'],
           ['model', '自定义模型'],
           ['scan', '扫描本机']
         ] as const).map(([k, label]) => (
@@ -40,6 +41,7 @@ function AddAgentModal({ onClose }: { onClose: () => void }) {
         ))}
       </div>
       {tab === 'demo' && <DemoTab onClose={onClose} />}
+      {tab === 'cli' && <CliTab onClose={onClose} />}
       {tab === 'model' && <ModelTab onClose={onClose} />}
       {tab === 'scan' && <ScanTab onClose={onClose} />}
     </Modal>
@@ -65,6 +67,84 @@ function DemoTab({ onClose }: { onClose: () => void }) {
       >
         <Icon name="plus" size={14} /> 添加演示 Agent
       </Button>
+    </div>
+  )
+}
+
+/* ---------------- 本机 CLI Agent ---------------- */
+const SUPPORTED_CLIS: CliName[] = ['arkcli', 'claude', 'codex']
+
+function CliTab({ onClose }: { onClose: () => void }) {
+  const addCliAgent = useAgents((s) => s.addCliAgent)
+  const [model, setModel] = useState('')
+  const [tests, setTests] = useState<Partial<Record<CliName, { ok: boolean; message: string; version?: string; exePath?: string }>>>({})
+  const [testing, setTesting] = useState<CliName | null>(null)
+  const [adding, setAdding] = useState<CliName | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const test = async (cli: CliName) => {
+    setTesting(cli)
+    setErr(null)
+    const r = await bridge.cli.test(cli)
+    setTests((t) => ({ ...t, [cli]: r }))
+    setTesting(null)
+  }
+
+  return (
+    <div style={{ paddingBottom: 8 }}>
+      <div style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.7, marginBottom: 10 }}>
+        接入本机已安装的 Agent CLI（规格 §10"接入现成 Agent"）：执行与凭据完全由 CLI 自身完成，
+        <b>AgentHub 不读取其配置、不保存任何密钥</b>。仅支持原生 .exe 安装形态（npm 的 .cmd shim 无法安全执行）。
+      </div>
+      <div className="form-row">
+        <label>覆盖模型（可选）</label>
+        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="不填则使用 CLI 自身默认模型" />
+        <span className="help">如 arkcli 当前 profile 的默认模型；仅在本次添加的 Agent 上生效</span>
+      </div>
+      {SUPPORTED_CLIS.map((cli) => {
+        const t = tests[cli]
+        return (
+          <div key={cli} className="agent-manage-row">
+            <div className="info">
+              <div className="nm">{CLI_META[cli].display}</div>
+              <div style={{ fontSize: 11, color: t?.ok ? 'var(--ok, #1f9d6d)' : 'var(--text-3)', marginTop: 3, lineHeight: 1.5 }}>
+                {t
+                  ? t.ok
+                    ? `可用 · ${t.version ?? ''} · ${t.exePath ?? ''}`
+                    : t.message
+                  : CLI_META[cli].note}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Button variant="secondary" style={{ height: 28 }} loading={testing === cli} onClick={() => void test(cli)}>
+                测试
+              </Button>
+              <Button
+                variant="primary"
+                style={{ height: 28 }}
+                disabled={!t?.ok || adding !== null}
+                loading={adding === cli}
+                onClick={async () => {
+                  setAdding(cli)
+                  setErr(null)
+                  const r = await addCliAgent(cli, model)
+                  setAdding(null)
+                  if (r.ok && r.agent) {
+                    useAgents.getState().select(r.agent.id)
+                    useUi.getState().toast(`已添加 ${r.agent.name}（${r.message}）`, 'ok')
+                    onClose()
+                  } else {
+                    setErr(r.message)
+                  }
+                }}
+              >
+                添加
+              </Button>
+            </div>
+          </div>
+        )
+      })}
+      {err && <div style={{ color: 'var(--danger)', fontSize: 12.5, marginTop: 8, lineHeight: 1.5 }}>{err}</div>}
     </div>
   )
 }
@@ -138,35 +218,58 @@ function ScanTab({ onClose }: { onClose: () => void }) {
   const scan = useAgents((s) => s.scan)
   const discovered = useAgents((s) => s.discovered)
   const addDiscovered = useAgents((s) => s.addDiscoveredAgent)
+  const addCliAgent = useAgents((s) => s.addCliAgent)
 
   return (
     <div style={{ paddingBottom: 8 }}>
       <div style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.7, marginBottom: 10 }}>
         扫描范围：PATH 上的常见 Agent CLI 命令。不扫描整块磁盘、不读取任何软件的配置或密钥。
-        <b>检测到安装 ≠ 已接入</b>：本版本未内置 CLI 执行适配器，发现项仅加入候选列表并如实标注。
+        <b>检测到安装 ≠ 已接入</b>：arkcli / claude / codex 已内置执行适配器（其中 claude / codex 未在本机实测），其余仅加入候选并如实标注。
       </div>
       <Button variant="secondary" loading={scanning} onClick={() => void scan()} style={{ marginBottom: 12 }}>
         <Icon name="scan" size={14} /> {scanning ? '扫描中…' : '扫描本机 Agent'}
       </Button>
-      {discovered.map((d: ScanResultItem) => (
-        <div key={d.path} className="agent-manage-row">
-          <div className="info">
-            <div className="nm">{d.name}</div>
-            <div className="md txt-ellipsis">{d.path}</div>
-            <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 3 }}>{d.supportNote}</div>
+      {discovered.map((d: ScanResultItem) => {
+        const supported = (['arkcli', 'claude', 'codex'] as const).includes(d.name as 'arkcli')
+        return (
+          <div key={d.path} className="agent-manage-row">
+            <div className="info">
+              <div className="nm">{d.name}</div>
+              <div className="md txt-ellipsis">{d.path}</div>
+              <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 3 }}>{d.supportNote}</div>
+            </div>
+            {supported ? (
+              <Button
+                variant="primary"
+                style={{ height: 28 }}
+                onClick={async () => {
+                  const r = await addCliAgent(d.name as CliName)
+                  if (r.ok && r.agent) {
+                    useAgents.getState().select(r.agent.id)
+                    useUi.getState().toast(`已添加 ${r.agent.name}（${r.message}）`, 'ok')
+                    onClose()
+                  } else {
+                    useUi.getState().toast(`添加失败：${r.message}`, 'error')
+                  }
+                }}
+              >
+                连接并添加
+              </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                style={{ height: 28 }}
+                onClick={() => {
+                  const a = addDiscovered(d.name, d.path)
+                  useUi.getState().toast(`已加入候选列表（${a.name}，待连接）`, 'ok')
+                }}
+              >
+                加入候选
+              </Button>
+            )}
           </div>
-          <Button
-            variant="secondary"
-            style={{ height: 28 }}
-            onClick={() => {
-              const a = addDiscovered(d.name, d.path)
-              useUi.getState().toast(`已加入候选列表（${a.name}，待连接）`, 'ok')
-            }}
-          >
-            加入候选
-          </Button>
-        </div>
-      ))}
+        )
+      })}
       {!scanning && discovered.length === 0 && (
         <div style={{ fontSize: 12.5, color: 'var(--text-3)', padding: '8px 0' }}>尚未扫描或未发现已知 CLI。可点上方按钮重新扫描。</div>
       )}

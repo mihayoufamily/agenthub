@@ -23,6 +23,23 @@ export function installDebugHooks() {
       wf.setDraft(goal)
       await wf.start()
     },
+    // 真实 CLI 闭环验证：添加 arkcli Agent 并绑定三角色，启动一个真实工作流任务
+    // reviewMode=human + confirmEveryRound=true：第 1 轮审核后必停人工确认门，便于验证脚本驱动 passGate；
+    // start() fire-and-forget：状态经 state() 轮询（await 会阻塞到整个运行结束）
+    startArkcliTask: async (goal = '用一两句话说明什么是工作流模式，并给一条验收标准') => {
+      const store = useAgents.getState()
+      let agent = store.agents.find((a) => a.kind === 'cli' && a.cliConfig?.cli === 'arkcli')
+      if (!agent) {
+        const r = await store.addCliAgent('arkcli')
+        if (!r.ok || !r.agent) throw new Error(`arkcli Agent 添加失败：${r.message}`)
+        agent = r.agent
+      }
+      const mk = () => ({ agentId: agent!.id, agentName: agent!.name, model: agent!.model })
+      useWorkflow.getState().patchConfig({ planner: mk(), executor: mk(), reviewer: mk(), reviewMode: 'human', confirmEveryRound: true })
+      const wf = useWorkflow.getState()
+      wf.setDraft(goal)
+      void wf.start()
+    },
     // 人工确认门：通过并交付
     passGate: () => void useWorkflow.getState().confirmGate('deliver'),
     stopTask: () => useWorkflow.getState().stop('user'),

@@ -6,6 +6,7 @@ directories:
 files:
   - out/**/*
   - dist/**/*
+  - build/icon.ico
   - "!node_modules/**/*"
   - package.json
 asar: true

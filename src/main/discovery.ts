@@ -6,17 +6,18 @@ import type { ScanResultItem } from '../shared/types'
  * 扫描范围严格限定：
  *  - PATH 上的常见可执行命令（where 查询）
  *  - 只检测存在性，不读取任何软件的配置文件或密钥
- * 发现 ≠ 接入：v1 未内置这些 CLI 的执行适配器，界面如实标注。
+ * 发现 ≠ 接入：仅 arkcli / claude / codex 内置执行适配器（其中 claude/codex 未在本机实测），其余如实标注"仅发现"。
  */
 const KNOWN_CLIS: { name: string; note: string }[] = [
-  { name: 'claude', note: 'Claude Code CLI（未内置执行适配器，仅发现）' },
-  { name: 'gemini', note: 'Gemini CLI（未内置执行适配器，仅发现）' },
-  { name: 'qwen', note: 'Qwen Code CLI（未内置执行适配器，仅发现）' },
-  { name: 'codex', note: 'Codex CLI（未内置执行适配器，仅发现）' },
-  { name: 'aider', note: 'Aider CLI（未内置执行适配器，仅发现）' },
-  { name: 'cursor-agent', note: 'Cursor Agent CLI（未内置执行适配器，仅发现）' },
-  { name: 'goose', note: 'Goose CLI（未内置执行适配器，仅发现）' },
-  { name: 'opencode', note: 'OpenCode CLI（未内置执行适配器，仅发现）' }
+  { name: 'arkcli', note: '已内置执行适配器（本机实测：真实流式调用）' },
+  { name: 'claude', note: '已内置适配器（按官方 CLI 规范实现，未在本机实测）' },
+  { name: 'codex', note: '已内置适配器（按官方 CLI 规范实现，未在本机实测）' },
+  { name: 'gemini', note: '未内置执行适配器，仅发现' },
+  { name: 'qwen', note: '未内置执行适配器，仅发现' },
+  { name: 'aider', note: '未内置执行适配器，仅发现' },
+  { name: 'cursor-agent', note: '未内置执行适配器，仅发现' },
+  { name: 'goose', note: '未内置执行适配器，仅发现' },
+  { name: 'opencode', note: '未内置执行适配器，仅发现' }
 ]
 
 function where(name: string): Promise<string | null> {

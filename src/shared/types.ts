@@ -5,7 +5,8 @@ export type Theme = 'light' | 'dark' | 'system'
 export type ReviewMode = 'auto' | 'human'
 
 /** Agent 接入方式 */
-export type AgentKind = 'demo' | 'model'
+export type AgentKind = 'demo' | 'model' | 'cli'
+export type CliName = 'arkcli' | 'claude' | 'codex'
 export type AgentConnStatus = 'disconnected' | 'available' | 'running' | 'awaiting' | 'failed'
 
 export interface AgentConfig {
@@ -17,9 +18,20 @@ export interface AgentConfig {
   status: AgentConnStatus
   /** 自定义模型配置（kind === 'model' 时有效），apiKey 从不落此处 */
   modelConfig?: CustomModelConfig
+  /** 本机 CLI 配置（kind === 'cli' 时有效）；凭据由 CLI 自身管理，AgentHub 不保存任何密钥 */
+  cliConfig?: CliAgentConfig
   /** 演示模式数据 */
   isDemo?: boolean
   addedAt: number
+}
+
+/** CLI Agent 配置：执行走 CLI 可执行文件，凭据走 CLI 自身（如 arkcli 的 profile） */
+export interface CliAgentConfig {
+  cli: CliName
+  /** 覆盖模型；不填用 CLI 自身默认（如 arkcli 当前 profile 的默认模型） */
+  model?: string
+  /** 添加时解析到的可执行路径（展示与预填；执行时失效会重新解析） */
+  exePath: string
 }
 
 export interface CustomModelConfig {

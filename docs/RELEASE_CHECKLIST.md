@@ -8,7 +8,7 @@
 - [ ] `npm run build` 通过（tsc main + tsc/rollup renderer）
 - [ ] `npm run dev` 实机启动无报错，开屏 → 欢迎页 → 首页正常
 - [ ] `npm run pack:portable` 产物可运行；或 `npm run dist` 安装包在干净机器安装成功
-- [ ] 图标已替换（当前无自定义 icon，electron-builder 会用默认 Electron 图标——发布前必须补 `build/icon.ico`）
+- [x] 图标已就位（`build/icon.ico`，由 `scripts/gen-icon.mjs` 生成，与 Logo 同源；NSIS / 便携版 / BrowserWindow 均已接入）
 
 ## 功能冒烟（参照规格 §23）
 
@@ -38,13 +38,15 @@
 
 - [ ] README 功能状态表与实际一致
 - [ ] 版本号已更新（package.json / electron-builder 产物名）
-- [ ] **许可证已由项目所有者确认并添加 LICENSE 文件**（当前为待定占位——发布公开仓库前必须解决）
+- [x] **许可证已确认：MIT，LICENSE 文件已添加**（package.json license=MIT）
 - [ ] 平台支持声明：仅写已验证的平台
 
-## 本仓库当前已验证记录（2026-10-20，Windows）
+## 本仓库当前已验证记录（2026-10-21，Windows）
 
 - typecheck / build / dev 启动：通过
 - 截图序列（欢迎/首页/工作台/工作流/任务门/交付 + 状态断言）：通过，见 `verify/shots/`
 - 演示全流程含一次返工与人工确认门：通过（状态机日志）
 - 安装包构建：未在本机验证（app-builder 被本机安全策略拦截）；便携目录脚本已提供
 - 自定义模型真实对话：代码就绪，未用真实 Key 验证
+- CLI 适配器（arkcli）：连接测试、真实流式对话、三角色真实工作流闭环：本机实测通过（claude/codex 适配器按官方规范实现，未实测）
+- 应用图标：256/48/32/16 生成并接入 BrowserWindow / NSIS / 便携版，ASCII 采样 + 目视核验通过

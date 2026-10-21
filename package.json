@@ -5,7 +5,7 @@
   "description": "AgentHub — 多 Agent 工作台与工作流协作桌面应用（Windows）",
   "main": "./out/main/index.js",
   "author": "AgentHub",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "private": true,
   "engines": {
     "node": ">=18"
