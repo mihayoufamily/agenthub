@@ -42,6 +42,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const [newCount, setNewCount] = useState(0)
   const [switchOpen, setSwitchOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
+  const [dirOpen, setDirOpen] = useState(false)
 
   const scrollToBottom = (smooth = false) => {
     const el = scrollRef.current
@@ -112,6 +113,15 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
               <Icon name="file" size={11} /> 工具{agent.tools ? '·已启用' : ''}
             </button>
           )}
+          {agent.kind === 'cli' && agent.cliConfig && (
+            <button
+              className="model-chip"
+              onClick={() => setDirOpen(true)}
+              title="CLI 的工作目录（进程 cwd，其文件读写与命令执行都发生在此目录内）"
+            >
+              <Icon name="folder" size={11} /> {agent.cliConfig.workDir ? agent.cliConfig.workDir.split(/[\\/]/).pop() : '目录未设'}
+            </button>
+          )}
         </div>
         </div>
         <div className="spacer" />
@@ -125,6 +135,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 
       {switchOpen && <ModelSwitchModal agent={agent} onClose={() => setSwitchOpen(false)} />}
       {toolsOpen && <ToolsGrantModal agent={agent} onClose={() => setToolsOpen(false)} />}
+      {dirOpen && <WorkDirModal agent={agent} onClose={() => setDirOpen(false)} />}
 
       {homeDraft.trim() && (
         <div style={{
@@ -383,6 +394,64 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
     </Modal>
   )
 }
+/** CLI Agent 工作目录弹窗（方案1 边界）：CLI 进程 cwd，其文件读写与命令执行都发生在此目录内 */
+function WorkDirModal({ agent, onClose }: { agent: AgentConfig; onClose: () => void }) {
+  const updateAgent = useAgents((s) => s.updateAgent)
+  const [dir, setDir] = useState(agent.cliConfig?.workDir ?? '')
+
+  const save = () => {
+    const v = dir.trim()
+    updateAgent(agent.id, {
+      cliConfig: { ...agent.cliConfig!, workDir: v || undefined }
+    })
+    useUi.getState().toast(v ? `工作目录已设置：${v}（CLI 的文件操作将发生在此目录内）` : '已恢复默认（跟随应用进程目录）', 'ok')
+    onClose()
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`${agent.name} · 工作目录`}
+      width={500}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={save}>保存</Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingBottom: 6 }}>
+        <div className="form-row">
+          <label>工作目录（CLI 进程 cwd）</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={dir}
+              onChange={(e) => setDir(e.target.value)}
+              placeholder="留空使用应用默认目录"
+              style={{ flex: 1 }}
+            />
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                const p = await bridge.tools.pickDir()
+                if (p) setDir(p)
+              }}
+            >
+              选择…
+            </Button>
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6 }}>
+          CLI 执行时以其为工作目录：<b>文件读写、命令执行都发生在此目录内</b>（如 claude/codex 产出的代码文件会写到这里）。
+          留空则跟随应用进程目录。注意：这是 CLI 自身能力的边界约定，AgentHub 不额外拦截其操作；目录不存在时执行会如实报错。
+          配置按 Agent 分别保存，重启后保留。
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 /** 模型切换弹窗：模型 Agent 列表来自真实 /models 接口；CLI Agent 手动指定模型参数 */
 function ModelSwitchModal({ agent, onClose }: { agent: AgentConfig; onClose: () => void }) {
   const updateAgent = useAgents((s) => s.updateAgent)

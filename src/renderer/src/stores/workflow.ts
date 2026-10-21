@@ -186,7 +186,7 @@ function agentChatToCard(
     ]
     const launched =
       agent.kind === 'cli' && agent.cliConfig
-        ? bridge.cli.chat(agent.cliConfig.cli, { model: agent.cliConfig.model, exePath: agent.cliConfig.exePath }, reqId, messages)
+        ? bridge.cli.chat(agent.cliConfig.cli, { model: agent.cliConfig.model, exePath: agent.cliConfig.exePath, workDir: agent.cliConfig.workDir }, reqId, messages)
         : agent.modelConfig
           ? bridge.models.chat(agent.modelConfig, reqId, messages, agent.tools ? { tools: agent.tools } : undefined)
           : Promise.resolve({ ok: false })

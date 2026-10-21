@@ -23,6 +23,8 @@ export interface CliChatOptions {
   model?: string
   /** 添加 Agent 时解析到的可执行路径（展示用；执行时失效会重新解析） */
   exePath?: string
+  /** 工作目录（方案1 边界）：CLI 进程 cwd，文件读写/命令执行都发生在此目录内；不填跟随应用进程目录 */
+  workDir?: string
 }
 
 /** Windows 命令行长度硬上限（UTF-16 code units）附近的安全值 */
@@ -269,7 +271,8 @@ export async function cliChatStream(
   }
   const args = spec.buildArgs(prompt, system, opts)
   try {
-    const proc = spawn(exe, args, { windowsHide: true })
+    // workDir（方案1 边界）：CLI 进程的 cwd；目录不存在时 spawn 报错如实上抛（不悄悄创建）
+    const proc = spawn(exe, args, { windowsHide: true, ...(opts.workDir ? { cwd: opts.workDir } : {}) })
     activeChats.set(reqId, proc)
     let stdoutBuf = ''
     let stderrTail = ''

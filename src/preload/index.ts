@@ -49,7 +49,7 @@ const api = {
   cli: {
     /** 本地连接测试（解析 exe + 版本命令，不联网） */
     test: (name: CliName) => ipcRenderer.invoke('cli:test', name) as Promise<{ ok: boolean; message: string; version?: string; exePath?: string }>,
-    chat: (name: CliName, opts: { model?: string; exePath?: string }, reqId: string, messages: { role: string; content: string }[]) =>
+    chat: (name: CliName, opts: { model?: string; exePath?: string; workDir?: string }, reqId: string, messages: { role: string; content: string }[]) =>
       ipcRenderer.invoke('cli:chat', name, opts, reqId, messages) as Promise<{ ok: boolean; message?: string }>,
     cancel: (reqId: string) => ipcRenderer.invoke('cli:cancel', reqId),
     /** 流式事件与 models 共用 model:event 通道（reqId 路由） */

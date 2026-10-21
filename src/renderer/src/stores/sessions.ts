@@ -238,7 +238,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       })
 
       const r = agent.kind === 'cli'
-        ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath }, reqId, history)
+        ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath, workDir: agent.cliConfig!.workDir }, reqId, history)
         : await bridge.models.chat(agent.modelConfig!, reqId, history, agent.tools ? { tools: agent.tools } : undefined)
       if (!r.ok) {
         set((s) => {

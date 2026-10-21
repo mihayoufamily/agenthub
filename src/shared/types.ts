@@ -56,6 +56,11 @@ export interface CliAgentConfig {
   model?: string
   /** 添加时解析到的可执行路径（展示与预填；执行时失效会重新解析） */
   exePath: string
+  /**
+   * 工作目录（方案1 边界）：CLI 进程的 cwd，其文件读写/命令执行都发生在此目录内。
+   * 不填 = 跟随应用进程目录（默认行为）。目录不存在时执行会如实报错，不悄悄创建。
+   */
+  workDir?: string
 }
 
 export interface CustomModelConfig {

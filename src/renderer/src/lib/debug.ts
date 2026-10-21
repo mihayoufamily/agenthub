@@ -71,6 +71,15 @@ export function installDebugHooks() {
       wf.setDraft(goal)
       void wf.start()
     },
+    // 添加 arkcli Agent 并改名（CLI 工作目录 E2E 验证用；真实测试连接）
+    addArkcliAgent: async () => {
+      const store = useAgents.getState()
+      const r = await store.addCliAgent('arkcli')
+      if (!r.ok || !r.agent) throw new Error(`arkcli Agent 添加失败：${r.message}`)
+      store.updateAgent(r.agent.id, { name: 'CLI 目录验证' })
+      store.select(r.agent.id)
+      return r.agent.id
+    },
     // 按名称删除 Agent（验证清理用；等待持久化完成避免进程退出丢失）
     removeAgentByName: async (name: string) => {
       let n = 0
