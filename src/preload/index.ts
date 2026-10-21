@@ -30,6 +30,7 @@ const api = {
     setPrefs: (prefs: AppConfig['prefs']) => ipcRenderer.invoke('prefs:set', prefs),
     setAgents: (agents: AgentConfig[]) => ipcRenderer.invoke('agents:set', agents),
     setWorkflowDefaults: (wd: AppConfig['workflowDefaults']) => ipcRenderer.invoke('workflowDefaults:set', wd),
+    setSavedTasks: (tasks: AppConfig['savedTasks']) => ipcRenderer.invoke('savedTasks:set', tasks),
     exportFile: () => ipcRenderer.invoke('config:export'),
     importFile: () => ipcRenderer.invoke('config:import')
   },

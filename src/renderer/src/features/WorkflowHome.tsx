@@ -16,8 +16,15 @@ export function WorkflowHome() {
   const config = useWorkflow((s) => s.config)
   const start = useWorkflow((s) => s.start)
   const isDemoRun = useWorkflow((s) => s.isDemoRun)
+  const savedTasks = useWorkflow((s) => s.savedTasks)
+  const saveCurrentTask = useWorkflow((s) => s.saveCurrentTask)
+  const deleteSavedTask = useWorkflow((s) => s.deleteSavedTask)
+  const applySavedTask = useWorkflow((s) => s.applySavedTask)
   const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
   const agents = useAgents((s) => s.agents)
+
+  /** 快捷卡片的角色名（按保存的 agentId 反查；Agent 已删除时如实显示） */
+  const agentName = (id: string) => agents.find((a) => a.id === id)?.name ?? '（已移除）'
 
   const [popKey, setPopKey] = useState<RoleKey | null>(null)
   const [pinned, setPinned] = useState(false)
@@ -85,19 +92,41 @@ export function WorkflowHome() {
 
   return (
     <div className="screen workflow">
-      {/* 顶部入口：模式切换 + 设置（工作流界面常驻可达） */}
-      <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', gap: 6, zIndex: 20 }}>
-        <button className="icon-btn" title="切换模式（工作站 / 工作流）" aria-label="切换模式"
-          onClick={() => useUi.getState().setSwitchHud('__switch_ask')}>
-          <Icon name="swap" size={16} />
-        </button>
-        <button className="icon-btn" title="设置" aria-label="设置"
-          onClick={() => useUi.getState().openSettings()}>
-          <Icon name="settings" size={16} />
-        </button>
-      </div>
+        {/* 顶部入口：模式切换 + 设置（工作流界面常驻可达） */}
+        <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', gap: 6, zIndex: 20 }}>
+          <button className="icon-btn" title="切换模式（工作站 / 工作流）" aria-label="切换模式"
+            onClick={() => useUi.getState().setSwitchHud('__switch_ask')}>
+            <Icon name="swap" size={16} />
+          </button>
+          <button className="icon-btn" title="设置" aria-label="设置"
+            onClick={() => useUi.getState().openSettings()}>
+            <Icon name="settings" size={16} />
+          </button>
+        </div>
 
-      <div className="wf-home">
+        {/* 左上角：保存的快捷任务卡片（最多 3 个，点击恢复目标与三角色配置） */}
+        {savedTasks.length > 0 && (
+          <div className="wf-saved">
+            {savedTasks.map((t) => (
+              <div key={t.id} className="wf-saved-card" title={`${t.goal}\n（点击恢复目标与配置后发起）`} onClick={() => applySavedTask(t.id)}>
+                <div className="wf-saved-goal">{t.goal.length > 42 ? t.goal.slice(0, 42) + '…' : t.goal}</div>
+                <div className="wf-saved-meta">
+                  {agentName(t.plannerAgentId)} → {agentName(t.executorAgentId)} · {t.reviewMode === 'human' ? '人工' : '自动'}审核
+                </div>
+                <button
+                  className="wf-saved-rm"
+                  title="删除该快捷任务"
+                  aria-label="删除快捷任务"
+                  onClick={(e) => { e.stopPropagation(); deleteSavedTask(t.id) }}
+                >
+                  <Icon name="close" size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="wf-home">
         <div className="wf-title">工作流模式</div>
         <div className="wf-desc">规划、执行与审核协作完成任务。</div>
 
@@ -110,7 +139,17 @@ export function WorkflowHome() {
             placeholder="描述要完成的任务、约束与期望产物…"
             autoFocusOnMount
           />
-          <div className="wf-supplement-tip">Enter 开始（可在设置中改为 Ctrl+Enter）</div>
+          <div className="wf-supplement-tip" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span>Enter 开始（可在设置中改为 Ctrl+Enter）</span>
+            <button
+              className="cfg-chip"
+              style={{ height: 24, fontSize: 11.5 }}
+              title="保存当前目标 + 三角色配置 + 审核方式为快捷任务（左上角卡片，最多 3 个）"
+              onClick={saveCurrentTask}
+            >
+              <Icon name="check" size={11} /> 保存任务{savedTasks.length > 0 ? `（${savedTasks.length}/3）` : ''}
+            </button>
+          </div>
         </div>
 
         {/* 配置条：悬停 200ms 打开可选浮层；点击固定（Escape / 外部点击关闭）；互斥不叠加 */}

@@ -7,7 +7,7 @@ import { useWorkflow } from '../stores/workflow'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
 import { bridge } from '../lib/ipc'
-import { fmtTime } from '../lib/utils'
+import { fmtTime, fmtTokens } from '../lib/utils'
 
 type Section = 'appearance' | 'agents' | 'workflow' | 'shortcuts' | 'data' | 'about'
 
@@ -134,7 +134,19 @@ function AgentsSection() {
           </span>
           <div className="info">
             <div className="nm">{a.name} {a.isDemo && <Badge tone="warn">演示</Badge>}</div>
-            <div className="md">{a.model} · {statusText(a.status)}{a.modelConfig ? ` · ${a.modelConfig.baseUrl}` : ''}</div>
+            <div className="md">
+              {a.model} · {statusText(a.status)}{a.modelConfig ? ` · ${a.modelConfig.baseUrl}` : ''}
+              {!a.isDemo && (a.totalTokens ?? 0) > 0 && (
+                <span style={{ color: 'var(--text-3)' }}>
+                  {' '}· 累计 {fmtTokens(a.totalTokens!)} tokens
+                  {a.cliConfig?.cli === 'codebuddy' && (
+                    <span title="CodeBuddy 实际按积分（Credits）计费，消耗由模型等级/任务复杂度/上下文共同决定，官方未提供 token→积分换算公式，明细请查看 codebuddy.ai 个人主页 → 用量">
+                      （积分制，明细见官网）
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
           </div>
           {a.modelConfig && (
             <Button

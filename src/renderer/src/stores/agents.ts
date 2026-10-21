@@ -47,6 +47,8 @@ interface AgentsState {
   bumpUnread: (id: string) => void
   clearUnread: (id: string) => void
   colorOf: (id: string) => string
+  /** 累计 Token 用量（usage 事件到达时调用；持久化在 AgentConfig.totalTokens） */
+  addTokens: (id: string, n: number) => void
 }
 
 export const useAgents = create<AgentsState>()((set, get) => ({
@@ -213,5 +215,12 @@ export const useAgents = create<AgentsState>()((set, get) => ({
 
   bumpUnread: (id) => set((s) => ({ unread: { ...s.unread, [id]: (s.unread[id] ?? 0) + 1 } })),
   clearUnread: (id) => set((s) => ({ unread: { ...s.unread, [id]: 0 } })),
-  colorOf: (id) => get().colors[id] ?? '#64748b'
+  colorOf: (id) => get().colors[id] ?? '#64748b',
+  addTokens: (id, n) => {
+    if (!Number.isFinite(n) || n <= 0) return
+    const cur = get().agents.find((a) => a.id === id)
+    if (!cur || cur.isDemo) return
+    set((s) => ({ agents: s.agents.map((a) => (a.id === id ? { ...a, totalTokens: (a.totalTokens ?? 0) + n } : a)) }))
+    get().persist()
+  }
 }))

@@ -6,7 +6,7 @@ import { useSettings } from '../stores/settings'
 import { Icon } from '../components/Icons'
 import { LogoMark } from '../components/Logo'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
-import { cls } from '../lib/utils'
+import { cls, fmtTokens } from '../lib/utils'
 
 const MENU_W = 190
 const MENU_H = 82 // 两个菜单项的实测高度（翻转判定用）
@@ -129,6 +129,11 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
                   <div className="sub">
                     <StatusDot status={a.status} />
                     <span className="txt-ellipsis">{a.model}</span>
+                    {!a.isDemo && (a.totalTokens ?? 0) > 0 && (
+                      <span style={{ color: 'var(--text-3)', flexShrink: 0 }} title={`累计 ${a.totalTokens} tokens${a.cliConfig?.cli === 'codebuddy' ? '（CodeBuddy 实际按积分计费，明细见 codebuddy.ai 个人主页）' : ''}`}>
+                        · {fmtTokens(a.totalTokens!)}tk
+                      </span>
+                    )}
                   </div>
                 </div>
               )}

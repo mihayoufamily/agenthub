@@ -11,9 +11,15 @@ const devServerUrl = process.env.VITE_DEV_SERVER_URL
 let mainWindow: BrowserWindow | null = null
 let store: Store | null = null
 
-// 本应用为界面型应用，无 3D/视频需求；禁用硬件加速提升受限环境兼容性
-// （软件渲染对聊天界面无感知差异；若目标环境 GPU 稳定可删除此行）
-app.disableHardwareAcceleration()
+// 渲染策略：默认启用硬件加速（GPU 合成）——设置界面/工作流卡片/模式切换动画的帧率
+// 依赖 GPU 合成，软件渲染下会明显掉帧。GPU 异常由下方"显示前崩溃自动降级"兜底：
+// 渲染进程启动即崩时自动以 --disable-gpu 重启一次，仍崩再走 Chromium 沙箱兼容模式。
+
+// 兼容性开关（默认关闭）：GPU 异常时手动设置 AGENTHUB_NO_GPU=1 强制软件渲染（等效旧版默认行为）
+if (process.env.AGENTHUB_NO_GPU === '1') {
+  app.disableHardwareAcceleration()
+  console.log('[main] AGENTHUB_NO_GPU=1：已禁用硬件加速（软件渲染兼容模式）')
+}
 
 // 兼容性开关（默认关闭）：部分安全软件会破坏 Chromium 沙箱导致 GPU/渲染子进程
 // 0xC0000005 崩溃。设置 AGENTHUB_NO_SANDBOX=1 可禁用 Chromium 沙箱（降低渲染进程隔离，
@@ -155,6 +161,16 @@ function createWindow() {
     if (shown || preShowCrashes >= 99) return
     preShowCrashes += 1
     console.log(`[main] 窗口显示前渲染进程异常（${details.reason}），计数 ${preShowCrashes}`)
+    // 降级阶梯：第 1 次崩溃先试 --disable-gpu（GPU 驱动异常常见）；仍崩再禁 Chromium 沙箱
+    if (preShowCrashes === 1 && process.env.AGENTHUB_NO_GPU !== '1') {
+      console.log('[main] 自动降级为软件渲染重启（AGENTHUB_NO_GPU=1）')
+      delete process.env.ELECTRON_RUN_AS_NODE
+      process.env.AGENTHUB_NO_GPU = '1'
+      process.env.AGENTHUB_RELAUNCH = '1'
+      app.relaunch({ args: process.argv.slice(1) })
+      app.quit()
+      return
+    }
     if (preShowCrashes >= 2 && process.env.AGENTHUB_NO_SANDBOX !== '1') {
       console.log('[main] 自动切换兼容模式重启（AGENTHUB_NO_SANDBOX=1）')
       delete process.env.ELECTRON_RUN_AS_NODE

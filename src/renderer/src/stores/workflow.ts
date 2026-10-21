@@ -5,7 +5,7 @@
 import { create } from 'zustand'
 import type {
   WorkflowRun, WorkflowConfig, RoleCard, Stage, ReviewGate,
-  Attachment, ChecklistItem, ProcessEvent, AgentConfig
+  Attachment, ChecklistItem, ProcessEvent, AgentConfig, SavedTask
 } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, clamp } from '../lib/utils'
@@ -23,6 +23,8 @@ interface WorkflowState {
   attachments: Attachment[]
   config: WorkflowConfig
   run: WorkflowRun | null
+  /** 保存的快捷任务（左上角卡片，最多 3 个） */
+  savedTasks: SavedTask[]
   /** 引擎内部控制（不参与渲染） */
   _cancelled: boolean
   _started: boolean
@@ -34,6 +36,12 @@ interface WorkflowState {
   patchConfig: (p: Partial<WorkflowConfig>) => void
   resolveRoles: () => void
   validate: () => string | null
+  /** 保存当前目标 + 三角色配置 + 审核方式为快捷任务（最多 3 个，同配置重复保存会刷新时间置顶） */
+  saveCurrentTask: () => void
+  /** 删除一个已保存任务 */
+  deleteSavedTask: (id: string) => void
+  /** 应用已保存任务：恢复三角色/审核方式配置并把目标填入草稿（不自动发起） */
+  applySavedTask: (id: string) => void
 
   start: () => Promise<void>
   stop: (reason: 'user' | 'timeout') => void
@@ -177,6 +185,8 @@ function agentChatToCard(
           if ((opts?.maxTokens ?? 0) > 0 && tokens >= (opts!.maxTokens as number)) exceeded = true
           return { ...r, usage: { ...r.usage, tokens } }
         })
+        // 用量同时累计到该 Agent（侧栏/设置的 Agent 级累计；演示 Agent 不计）
+        useAgents.getState().addTokens(agent.id, ev.usage.tokens ?? 0)
         if (exceeded) {
           // 达到 Token 上限：取消仍在进行的流式请求，交由调用方置 token_limit 状态
           bridge.models.cancel(reqId)
@@ -387,6 +397,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     maxTokens: 0
   },
   run: null,
+  savedTasks: [],
   _cancelled: false,
   _started: false,
   _carryOver: null,
@@ -405,6 +416,62 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       confirmEveryRound: get().config.confirmEveryRound,
       maxTokens: get().config.maxTokens
     })
+  },
+
+  saveCurrentTask: () => {
+    const goal = get().draft.trim()
+    if (!goal) {
+      useUi.getState().toast('请先填写任务目标再保存', 'warn')
+      return
+    }
+    const c = get().config
+    const task: SavedTask = {
+      id: uid('st'),
+      goal,
+      createdAt: Date.now(),
+      plannerAgentId: c.planner.agentId,
+      executorAgentId: c.executor.agentId,
+      reviewerAgentId: c.reviewer.agentId,
+      reviewMode: c.reviewMode,
+      modelOverrides: {
+        planner: c.planner.modelOverride,
+        executor: c.executor.modelOverride,
+        reviewer: c.reviewer.modelOverride
+      }
+    }
+    // 同目标 + 同三角色视为同一任务：刷新时间置顶；最多保留 3 个（超出淘汰最旧）
+    const rest = get().savedTasks.filter(
+      (t) => !(t.goal === goal && t.plannerAgentId === task.plannerAgentId && t.executorAgentId === task.executorAgentId && t.reviewerAgentId === task.reviewerAgentId)
+    )
+    const next = [task, ...rest].slice(0, 3)
+    set({ savedTasks: next })
+    void bridge.config.setSavedTasks(next)
+    useUi.getState().toast(`已保存快捷任务（${next.length}/3）`, 'ok')
+  },
+
+  deleteSavedTask: (id) => {
+    const next = get().savedTasks.filter((t) => t.id !== id)
+    set({ savedTasks: next })
+    void bridge.config.setSavedTasks(next)
+  },
+
+  applySavedTask: (id) => {
+    const t = get().savedTasks.find((x) => x.id === id)
+    if (!t) return
+    const agents = useAgents.getState().agents
+    const byId = (aid: string) => agents.find((a) => a.id === aid)
+    const mk = (aid: string, mo?: string) => {
+      const a = byId(aid)
+      return { agentId: aid, agentName: a?.name ?? '未配置', model: a?.model ?? '—', ...(mo ? { modelOverride: mo } : {}) }
+    }
+    get().patchConfig({
+      planner: mk(t.plannerAgentId, t.modelOverrides?.planner),
+      executor: mk(t.executorAgentId, t.modelOverrides?.executor),
+      reviewer: mk(t.reviewerAgentId, t.modelOverrides?.reviewer),
+      reviewMode: t.reviewMode
+    })
+    set({ draft: t.goal })
+    useUi.getState().toast('已恢复该任务的目标与配置，点击开始任务即可发起', 'ok')
   },
 
   resolveRoles: () => {

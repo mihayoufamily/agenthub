@@ -34,6 +34,13 @@ export function fmtSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+/** Token 数格式化：1234 -> 1.2k，12345 -> 12.3k，1234567 -> 1.23M */
+export function fmtTokens(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
+  return `${(n / 1_000_000).toFixed(2)}M`
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }

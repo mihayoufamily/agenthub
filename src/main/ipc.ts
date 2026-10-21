@@ -53,6 +53,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   ipcMain.handle('prefs:set', (_e, prefs: Prefs) => getStore().setPrefs(prefs))
   ipcMain.handle('agents:set', (_e, agents: AgentConfig[]) => getStore().setAgents(agents))
   ipcMain.handle('workflowDefaults:set', (_e, wd: AppConfig['workflowDefaults']) => getStore().setWorkflowDefaults(wd))
+  ipcMain.handle('savedTasks:set', (_e, tasks: AppConfig['savedTasks']) => getStore().setSavedTasks(tasks))
 
   ipcMain.handle('config:export', async () => {
     const json = getStore().exportConfig()

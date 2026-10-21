@@ -25,6 +25,8 @@ export interface AgentConfig {
   /** 演示模式数据 */
   isDemo?: boolean
   addedAt: number
+  /** 累计 Token 用量（usage 事件累计；CLI/模型 Agent 通用，演示 Agent 恒为空） */
+  totalTokens?: number
 }
 
 /**
@@ -255,6 +257,21 @@ export interface AppConfig {
     executorAgentId: string
     reviewerAgentId: string
   }
+  /** 工作流保存的快捷任务（最多 3 个，超出淘汰最旧） */
+  savedTasks?: SavedTask[]
+}
+
+/** 保存的任务：目标 + 三角色完整配置 + 审核方式（点击卡片直接恢复整套配置发起新任务） */
+export interface SavedTask {
+  id: string
+  goal: string
+  createdAt: number
+  plannerAgentId: string
+  executorAgentId: string
+  reviewerAgentId: string
+  reviewMode: ReviewMode
+  /** 角色级模型覆盖（保存时的值；恢复时沿用） */
+  modelOverrides?: { planner?: string; executor?: string; reviewer?: string }
 }
 
 /** 长期记忆条目（区别于单次任务记录） */

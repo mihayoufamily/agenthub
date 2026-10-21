@@ -54,7 +54,7 @@ writeFileSync(join(outDir, '使用说明.txt'), [
   '',
   '1. 双击 AgentHub.exe 运行。',
   '2. 数据保存在 %APPDATA%/agenthub/，卸载时删除该目录即可清除全部本地数据。',
-  '3. 若 GPU/界面异常，可设置环境变量 AGENTHUB_NO_SANDBOX=1 后再运行（兼容模式）。',
+  '3. 默认启用硬件加速（界面动画更流畅）。若启动即崩溃会自动降级为软件渲染重启；也可手动设置环境变量 AGENTHUB_NO_GPU=1 强制软件渲染，设置 AGENTHUB_NO_SANDBOX=1 禁用沙箱（兼容模式，或直接运行 start-compat-mode.cmd）。',
   '4. 首次使用建议点击"添加 Agent → 演示 Agent"体验完整流程。',
   ''
 ].join('\n'))

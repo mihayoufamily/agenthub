@@ -238,6 +238,9 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         } else if (ev.type === 'notice' && ev.text) {
           // CLI 心跳提示（如 90 秒无输出可能卡在权限审批）：toast 一次，不打断消息
           useUi.getState().toast(ev.text, 'warn')
+        } else if (ev.type === 'usage' && ev.usage?.tokens) {
+          // Token 用量累计到 Agent（侧栏/设置展示；演示 Agent 不计）
+          useAgents.getState().addTokens(agentId, ev.usage.tokens)
         } else if (ev.type === 'tool' && ev.toolCall) {
           // 工具调用执行记录：合并进当前回复消息（同 id 更新状态与结果，新 id 追加）
           const tc = ev.toolCall

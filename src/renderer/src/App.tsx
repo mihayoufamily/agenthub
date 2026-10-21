@@ -90,6 +90,8 @@ export function App() {
           confirmEveryRound: wd?.confirmEveryRound ?? false,
           maxTokens: wd?.maxTokens ?? 0
         })
+        // 恢复保存的快捷任务（工作流左上角卡片）
+        useWorkflow.setState({ savedTasks: cfg.savedTasks ?? [] })
         setReady(true)
         // 更新检查：启动后静默检查（3 天节流，失败不打扰）；发现新版本显示顶部横幅
         bridge.update.check(false).then((r) => {
