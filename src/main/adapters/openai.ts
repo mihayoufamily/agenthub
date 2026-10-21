@@ -43,6 +43,26 @@ export async function testConnection(cfg: CustomModelConfig, apiKey: string): Pr
   }
 }
 
+/** 列出接口真实可用的模型（切换模型用；只返回接口实际报告的，不虚构选项） */
+export async function listModels(cfg: CustomModelConfig, apiKey: string): Promise<{ ok: boolean; models?: string[]; message?: string }> {
+  try {
+    const url = joinUrl(cfg.baseUrl, '/models')
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 8000)
+    const res = await fetch(url, { headers: headers(cfg, apiKey), signal: ctrl.signal })
+    clearTimeout(timer)
+    if (!res.ok) return { ok: false, message: `HTTP ${res.status} ${res.statusText || ''}`.trim() }
+    const data = (await res.json()) as { data?: { id?: string }[] }
+    const models = (data.data ?? []).map((m) => m.id ?? '').filter(Boolean)
+    if (models.length === 0) return { ok: false, message: '接口未返回任何模型' }
+    return { ok: true, models }
+  } catch (e) {
+    const err = e as Error
+    if (err.name === 'AbortError') return { ok: false, message: '请求超时（8 秒）' }
+    return { ok: false, message: `获取模型列表失败：${err.message}` }
+  }
+}
+
 export function chatStream(
   cfg: CustomModelConfig,
   apiKey: string,

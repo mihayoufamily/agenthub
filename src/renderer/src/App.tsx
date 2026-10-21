@@ -74,7 +74,8 @@ export function App() {
           reviewMode: wd?.reviewMode ?? 'human',
           maxRounds: wd?.maxRounds ?? 3,
           timeoutMin: wd?.timeoutMin ?? 30,
-          confirmEveryRound: wd?.confirmEveryRound ?? false
+          confirmEveryRound: wd?.confirmEveryRound ?? false,
+          maxTokens: wd?.maxTokens ?? 0
         })
         setReady(true)
       } catch (e) {

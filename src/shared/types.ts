@@ -67,6 +67,8 @@ export interface ChatMessage {
   error?: string
   attachments?: Attachment[]
   handoff?: { fromAgentId: string; fromAgentName: string }
+  /** 本条消息发送/回复时实际使用的模型（切换模型后仍可追溯） */
+  model?: string
 }
 
 export interface AgentSession {
@@ -92,6 +94,8 @@ export type TaskStatus =
   | 'interrupted'
   /** 超时被看门狗停止（非失败：成果与记录保留） */
   | 'timeout'
+  /** 累计 Token 达到上限自动停止（非失败：成果与记录保留） */
+  | 'token_limit'
 
 export type Stage = 'planning' | 'executing' | 'reviewing' | 'delivering'
 
@@ -177,6 +181,8 @@ export interface WorkflowConfig {
   maxRounds: number
   timeoutMin: number
   confirmEveryRound: boolean
+  /** 整个任务真实调用累计消耗 Token 上限；0 = 不限制 */
+  maxTokens: number
 }
 
 export interface Prefs {

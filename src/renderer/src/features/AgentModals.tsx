@@ -367,15 +367,16 @@ function OrderModal({ onClose }: { onClose: () => void }) {
 }
 
 /* ---------------- 交接 ---------------- */
+const EMPTY_MSGS: import('@shared/types').ChatMessage[] = []
 function HandoffModal({ onClose }: { onClose: () => void }) {
   const agents = useAgents((s) => s.agents)
   const selectedId = useAgents((s) => s.selectedId)
   const handoff = useSessions((s) => s.handoff)
-  const messagesOf = useSessions((s) => s.messagesOf)
+  // 直接订阅数据（函数引用订阅不会随 sessions 变化触发重渲染）
+  const msgs = useSessions((s) => (selectedId ? s.sessions[selectedId]?.messages ?? EMPTY_MSGS : EMPTY_MSGS))
   const others = agents.filter((a) => a.id !== selectedId)
   const [targetId, setTargetId] = useState(others[0]?.id ?? '')
   const source = agents.find((a) => a.id === selectedId)
-  const msgs = selectedId ? messagesOf(selectedId) : []
   const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant')
 
   return (

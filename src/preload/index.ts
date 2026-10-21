@@ -61,6 +61,8 @@ const api = {
   },
   models: {
     test: (cfg: CustomModelConfig, apiKey: string) => ipcRenderer.invoke('model:test', cfg, apiKey) as Promise<ModelTestResult>,
+    /** 列出接口真实可用的模型（切换模型用；凭据在主进程取，渲染层不经手） */
+    list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
     chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string }[]) =>
       ipcRenderer.invoke('model:chat', cfg, reqId, messages),
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),

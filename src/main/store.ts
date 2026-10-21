@@ -237,7 +237,8 @@ function migrateV0toV1(raw: Partial<AppConfig> & Record<string, unknown>): AppCo
       reviewMode: 'human',
       maxRounds: 3,
       timeoutMin: 30,
-      confirmEveryRound: false
+      confirmEveryRound: false,
+      maxTokens: 0
     }
   }
 }

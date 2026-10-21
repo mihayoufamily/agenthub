@@ -36,9 +36,25 @@ export const useSessions = create<SessionsState>()((set, get) => ({
     try {
       loaded = await bridge.sessions.load(agentId)
     } catch { /* 首次无会话文件 */ }
-    set((s) => ({
-      sessions: { ...s.sessions, [agentId]: loaded ?? { agentId, messages: [], draft: '' } }
-    }))
+    set((s) => {
+      const mem = s.sessions[agentId]
+      if (mem) {
+        // 加载期间用户已输入/发送（冷启动时 IPC 可能延迟到达）：保留内存草稿与新消息，仅补入磁盘历史，绝不覆盖
+        const base = loaded ?? { agentId, messages: [] as AgentSession['messages'], draft: '' }
+        const memIds = new Set(mem.messages.map((m) => m.id))
+        return {
+          sessions: {
+            ...s.sessions,
+            [agentId]: {
+              ...mem,
+              messages: [...base.messages.filter((m) => !memIds.has(m.id)), ...mem.messages],
+              draft: mem.draft || base.draft
+            }
+          }
+        }
+      }
+      return { sessions: { ...s.sessions, [agentId]: loaded ?? { agentId, messages: [], draft: '' } } }
+    })
   },
 
   messagesOf: (agentId) => get().sessions[agentId]?.messages ?? [],
@@ -65,6 +81,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       role: 'user',
       text,
       ts: Date.now(),
+      model: agent.model,
       attachments: attachments.length ? attachments : undefined
     }
     const streamKey = `chat:${agentId}`
@@ -86,7 +103,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       const msgId = uid('msg')
       const demoMsg: ChatMessage = {
         id: msgId, role: 'assistant', text: '', ts: Date.now(),
-        demo: true, streaming: true
+        demo: true, streaming: true, model: agent.model
       }
       set((s) => {
         const cur = s.sessions[agentId]
@@ -131,7 +148,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       // ---- 真实流式接入：自定义模型（OpenAI 兼容）或本机 CLI Agent ----
       const reqId = uid('req')
       const msgId = uid('msg')
-      const replyMsg: ChatMessage = { id: msgId, role: 'assistant', text: '', ts: Date.now(), streaming: true }
+      const replyMsg: ChatMessage = { id: msgId, role: 'assistant', text: '', ts: Date.now(), streaming: true, model: agent.model }
       set((s) => {
         const cur = s.sessions[agentId]
         return { sessions: { ...s.sessions, [agentId]: { ...cur, messages: [...cur.messages, replyMsg] } } }

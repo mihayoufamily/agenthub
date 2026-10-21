@@ -138,6 +138,19 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
           />
           <span className="help">超时视为停止条件：任务停止、记录与产物引用保留</span>
         </div>
+
+        <div className="form-row" style={{ marginTop: 10 }}>
+          <label>Token 上限（累计）</label>
+          <input
+            type="number"
+            min={0}
+            step={10000}
+            value={config.maxTokens}
+            onChange={(e) => patchConfig({ maxTokens: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+            style={{ width: 100 }}
+          />
+          <span className="help">整个任务真实调用累计消耗 Token 达到上限后自动停止（0 = 不限制）；已完成卡片与记录保留</span>
+        </div>
       </div>
     </Modal>
   )

@@ -114,6 +114,13 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return openai.testConnection(cfg, apiKey)
   })
 
+  // 模型切换：列出接口真实可用的模型（需要已保存的凭据）
+  ipcMain.handle('model:list', async (_e, cfg: CustomModelConfig) => {
+    const key = getStore().getCredential(cfg.keyId)
+    if (!key) return { ok: false, message: '未找到 API Key，请重新添加连接' }
+    return openai.listModels(cfg, key)
+  })
+
   ipcMain.handle('model:chat', (_e, cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string }[]) => {
     const key = getStore().getCredential(cfg.keyId)
     if (!key) {

@@ -1,21 +1,28 @@
-// 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口
+// 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型切换
 import React, { useEffect, useRef, useState } from 'react'
-import type { ChatMessage } from '@shared/types'
+import type { ChatMessage, AgentConfig } from '@shared/types'
 import { useSessions } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
+import { bridge } from '../lib/ipc'
 import { Avatar, StatusDot, statusText, CopyButton, Button } from '../components/primitives'
 import { Composer } from '../components/Composer'
+import { Modal } from '../components/Modal'
 import { Icon } from '../components/Icons'
 import { fmtTime, fmtSize, cls } from '../lib/utils'
+
+/** 稳定空数组：避免 selector 每次返回新引用导致多余渲染 */
+const EMPTY_MSGS: ChatMessage[] = []
 
 export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const agents = useAgents((s) => s.agents)
   const selectedId = useAgents((s) => s.selectedId)
   const colorOf = useAgents((s) => s.colorOf)
-  const messagesOf = useSessions((s) => s.messagesOf)
-  const draftOf = useSessions((s) => s.draftOf)
+  // 直接订阅数据（而非 draftOf/messagesOf 函数引用）：否则 sessions 变化不触发重渲染，
+  // 受控输入会被 React 重置回旧渲染值、发送按钮状态不更新（曾导致输入消失/演示 Agent 无输出）
+  const messages = useSessions((s) => (selectedId ? s.sessions[selectedId]?.messages ?? EMPTY_MSGS : EMPTY_MSGS))
+  const draft = useSessions((s) => (selectedId ? s.sessions[selectedId]?.draft ?? '' : ''))
   const setDraft = useSessions((s) => s.setDraft)
   const sendMessage = useSessions((s) => s.sendMessage)
   const exportSession = useSessions((s) => s.exportSession)
@@ -25,7 +32,6 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
 
   const agent = agents.find((a) => a.id === selectedId)
-  const messages = selectedId ? messagesOf(selectedId) : []
 
   useEffect(() => {
     if (selectedId) void ensure(selectedId)
@@ -34,6 +40,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [nearBottom, setNearBottom] = useState(true)
   const [newCount, setNewCount] = useState(0)
+  const [switchOpen, setSwitchOpen] = useState(false)
 
   const scrollToBottom = (smooth = false) => {
     const el = scrollRef.current
@@ -66,10 +73,11 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 
   if (!agent) return null
 
+  const canSwitchModel = (agent.kind === 'model' && !!agent.modelConfig) || (agent.kind === 'cli' && !!agent.cliConfig)
+
   const doSend = () => {
-    const text = draftOf(agent.id)
-    if (!text.trim()) return
-    void sendMessage(agent.id, text.trim(), [])
+    if (!draft.trim()) return
+    void sendMessage(agent.id, draft.trim(), [])
   }
 
   return (
@@ -82,7 +90,18 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
             {agent.isDemo && <span className="demo-badge">演示模式</span>}
           </div>
           <div className="sub" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <StatusDot status={agent.status} /> {statusText(agent.status)} · {agent.model}
+            <StatusDot status={agent.status} /> {statusText(agent.status)} ·{' '}
+            {canSwitchModel ? (
+              <button
+                className="model-chip"
+                onClick={() => setSwitchOpen(true)}
+                title={agent.kind === 'model' ? '切换此 Agent 使用的模型（列表来自真实接口）' : '修改传给 CLI 的模型参数（留空用 CLI 默认）'}
+              >
+                {agent.model} <Icon name="swap" size={11} />
+              </button>
+            ) : (
+              agent.model
+            )}
           </div>
         </div>
         <div className="spacer" />
@@ -93,6 +112,8 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           <Icon name="handoff" size={14} /> 交给其他 Agent
         </Button>
       </div>
+
+      {switchOpen && <ModelSwitchModal agent={agent} onClose={() => setSwitchOpen(false)} />}
 
       {homeDraft.trim() && (
         <div style={{
@@ -138,7 +159,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 
       <div className="wb-composer-wrap">
         <Composer
-          value={draftOf(agent.id)}
+          value={draft}
           onChange={(v) => setDraft(agent.id, v)}
           onSend={doSend}
           enterToSend={enterToSend}
@@ -188,6 +209,7 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
         </div>
         <div className="msg-time">
           {fmtTime(msg.ts)}
+          {msg.model && ` · ${msg.model}`}
           {msg.attachments && msg.attachments.length > 0 && ` · 附件 ${msg.attachments.length} 个${msg.attachments[0].size ? `（${fmtSize(msg.attachments[0].size)}）` : ''}`}
         </div>
       </div>
@@ -216,5 +238,106 @@ export function MessageBody({ text }: { text: string }) {
         )
       )}
     </>
+  )
+}
+
+/** 模型切换弹窗：模型 Agent 列表来自真实 /models 接口；CLI Agent 手动指定模型参数 */
+function ModelSwitchModal({ agent, onClose }: { agent: AgentConfig; onClose: () => void }) {
+  const updateAgent = useAgents((s) => s.updateAgent)
+  const [models, setModels] = useState<string[] | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [manual, setManual] = useState(agent.cliConfig?.model ?? '')
+
+  useEffect(() => {
+    if (agent.kind === 'model' && agent.modelConfig) {
+      void bridge.models.list(agent.modelConfig).then((r) => {
+        if (r.ok && r.models) setModels(r.models)
+        else setErr(r.message ?? '获取模型列表失败')
+      })
+    }
+  }, [agent])
+
+  if (agent.kind === 'cli' && agent.cliConfig) {
+    return (
+      <Modal
+        open
+        onClose={onClose}
+        title={`修改 ${agent.name} 的模型参数`}
+        width={460}
+        footer={
+          <>
+            <Button variant="ghost" onClick={onClose}>取消</Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                const v = manual.trim()
+                updateAgent(agent.id, {
+                  model: v || '默认（CLI 自身配置）',
+                  cliConfig: { ...agent.cliConfig!, model: v || undefined }
+                })
+                useUi.getState().toast(v ? `已切换模型参数：${v}（后续请求生效）` : '已恢复为 CLI 默认模型', 'ok')
+                onClose()
+              }}
+            >
+              保存
+            </Button>
+          </>
+        }
+      >
+        <div style={{ paddingBottom: 6 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, lineHeight: 1.6 }}>
+            该值作为 --model 参数传给 CLI；留空则使用 CLI 自身配置的默认模型。无法在此列出 CLI 支持的模型清单（各 CLI 无统一查询接口），请参考其官方文档填写。
+          </div>
+          <div className="form-row">
+            <label>模型参数（可选）</label>
+            <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="留空使用 CLI 默认模型" />
+          </div>
+        </div>
+      </Modal>
+    )
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`切换 ${agent.name} 的模型`} width={460}>
+      <div style={{ paddingBottom: 6 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, lineHeight: 1.6 }}>
+          列表来自该连接的真实 /models 接口。切换后<b>沿用当前对话上下文</b>，后续请求实际使用新模型；若新模型上下文长度不足，会由接口如实报错。配置按 Agent 分别保存，重启后保留。
+        </div>
+        {err && <div style={{ color: 'var(--danger)', fontSize: 12.5, lineHeight: 1.5 }}>{err}</div>}
+        {!models && !err && (
+          <div style={{ padding: 12, fontSize: 12.5, color: 'var(--text-3)' }}>正在获取模型列表…</div>
+        )}
+        {models && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 300, overflowY: 'auto' }}>
+            {models.map((m) => {
+              const cur = m === agent.modelConfig?.modelId
+              return (
+                <button
+                  key={m}
+                  disabled={cur}
+                  className="btn"
+                  style={{
+                    justifyContent: 'flex-start', height: 32, fontSize: 12.5,
+                    ...(cur
+                      ? { border: '1px solid var(--brand-yellow)', color: 'var(--text-2)', background: 'var(--surface-2)', cursor: 'default' }
+                      : { border: '1px solid var(--border)', background: 'var(--surface)' })
+                  }}
+                  onClick={() => {
+                    updateAgent(agent.id, {
+                      model: m,
+                      modelConfig: { ...agent.modelConfig!, modelId: m }
+                    })
+                    useUi.getState().toast(`已切换模型：${m}（后续请求生效）`, 'ok')
+                    onClose()
+                  }}
+                >
+                  {m} {cur && '· 当前'}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </Modal>
   )
 }

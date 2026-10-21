@@ -27,7 +27,8 @@ const STATUS_TEXT: Record<string, string> = {
   cancelled: '已取消',
   rework_limit: '返工达到上限',
   interrupted: '状态未知（应用重启）',
-  timeout: '超时已停止'
+  timeout: '超时已停止',
+  token_limit: 'Token 上限已停止'
 }
 
 export function TaskView() {
@@ -120,6 +121,20 @@ export function TaskView() {
           ))}
           {run.gate && run.status === 'waiting_user' && <GateCard run={run} />}
           {run.status === 'rework_limit' && <ReworkLimitCard run={run} />}
+          {run.status === 'token_limit' && (
+            <div className="gate-card" style={{ borderColor: 'rgba(180,83,9,.4)', background: 'var(--warn-bg)' }}>
+              <div className="gate-title" style={{ color: 'var(--warn)' }}>
+                <Icon name="warn" size={16} /> 累计 Token 已达上限，任务自动停止
+              </div>
+              <div className="gate-review">
+                为控制成本已按设置自动停止（可在工作流设置中调整 Token 上限）。已完成的卡片与记录均已保留，可导出或以此为目标开新任务。
+              </div>
+              <div className="gate-actions">
+                <Button variant="secondary" onClick={() => useWorkflow.getState().continueModify()}>以此为目标开新任务</Button>
+                <Button variant="ghost" onClick={() => void exportRun()}>导出任务记录</Button>
+              </div>
+            </div>
+          )}
           {run.status === 'interrupted' && (
             <div className="gate-card" style={{ borderColor: 'rgba(37,99,235,.4)', background: 'var(--info-bg)' }}>
               <div className="gate-title" style={{ color: 'var(--info)' }}>
@@ -176,7 +191,8 @@ const STATUS_BADGE: Record<string, 'ok' | 'info' | 'warn' | 'danger' | 'default'
   rework_limit: 'warn',
   waiting_user: 'warn',
   interrupted: 'info',
-  timeout: 'warn'
+  timeout: 'warn',
+  token_limit: 'warn'
 }
 
 function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {

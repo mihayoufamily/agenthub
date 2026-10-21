@@ -1,5 +1,5 @@
 // 工作台侧栏：Agent 列表（状态/未读/选中高亮，顺序固定不自动置顶）、底部功能入口、折叠
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
@@ -8,6 +8,9 @@ import { Icon } from '../components/Icons'
 import { LogoMark } from '../components/Logo'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
 import { cls } from '../lib/utils'
+
+const MENU_W = 190
+const MENU_H = 82 // 两个菜单项的实测高度（翻转判定用）
 
 export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => void }) {
   const agents = useAgents((s) => s.agents)
@@ -22,14 +25,51 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
   const patchPrefs = useSettings((s) => s.patchPrefs)
   const openSettings = useUi((s) => s.openSettings)
   const [menuFor, setMenuFor] = useState<string | null>(null)
+  /** 菜单 fixed 坐标：按触发按钮位置 + 剩余空间计算，避免被窗口/滚动容器裁切 */
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
+  const menuBtnRefs = useRef<Record<string, HTMLElement | null>>({})
 
   const onItemSelect = (id: string) => {
     select(id)
     clearUnread(id)
     setMenuFor(null)
   }
+
+  const openMenu = (id: string) => {
+    if (menuFor === id) { // 已打开：再次点击关闭
+      setMenuFor(null)
+      setMenuPos(null)
+      return
+    }
+    const btn = menuBtnRefs.current[id]
+    if (btn) {
+      const r = btn.getBoundingClientRect()
+      const left = Math.max(8, Math.min(r.right - MENU_W, window.innerWidth - MENU_W - 8))
+      const top = r.bottom + MENU_H + 6 > window.innerHeight - 8 ? r.top - MENU_H - 4 : r.bottom + 4
+      setMenuPos({ top, left })
+      setMenuFor(id)
+    }
+  }
+
+  // 点击外部 / Escape 关闭菜单（.more 按钮自身由 openMenu 处理 toggle）
+  useEffect(() => {
+    if (!menuFor) return
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement
+      if (!t.closest('.agent-menu') && !t.closest('.more')) setMenuFor(null)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuFor(null)
+    }
+    window.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menuFor])
 
   return (
     <aside className={cls('sidebar', collapsed && 'collapsed')}>
@@ -48,7 +88,7 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
 
       <div className="agent-list">
         {agents.map((a) => (
-          <div key={a.id} style={{ position: 'relative' }}>
+          <div key={a.id}>
             <button
               className={cls('agent-item', selectedId === a.id && 'selected')}
               onClick={() => onItemSelect(a.id)}
@@ -96,36 +136,38 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
               {!collapsed && unread[a.id] > 0 && <span className="unread-dot">{Math.min(unread[a.id], 9)}</span>}
               {!collapsed && (
                 <span
+                  ref={(el) => { menuBtnRefs.current[a.id] = el }}
                   className="more"
                   role="button"
                   tabIndex={0}
                   aria-label={`${a.name} 的更多操作`}
                   onClick={(e) => {
                     e.stopPropagation()
-                    setMenuFor(menuFor === a.id ? null : a.id)
+                    openMenu(a.id)
                   }}
                 >
                   <Icon name="chevron" size={14} />
                 </span>
               )}
             </button>
-
-            {menuFor === a.id && (
-              <div
-                className="wf-detail"
-                style={{ top: 'auto', bottom: 'auto', marginTop: 40, width: 190, right: 10, position: 'absolute', zIndex: 70 }}
-              >
-                <button className="foot-btn" onClick={() => { setRenaming(a.id); setMenuFor(null) }}>
-                  <Icon name="reorder" size={13} /> 重命名
-                </button>
-                <button className="foot-btn" onClick={() => { setRemoveTarget(a.id); setMenuFor(null) }}>
-                  <Icon name="close" size={13} /> 移除…
-                </button>
-              </div>
-            )}
           </div>
         ))}
       </div>
+
+      {/* Agent 操作菜单：fixed 定位（脱离滚动容器），按剩余空间向上/向下翻转 */}
+      {menuFor && menuPos && (
+        <div
+          className={cls('wf-detail', 'agent-menu')}
+          style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, width: MENU_W, zIndex: 70 }}
+        >
+          <button className="foot-btn" onClick={() => { setRenaming(menuFor); setMenuFor(null) }}>
+            <Icon name="reorder" size={13} /> 重命名
+          </button>
+          <button className="foot-btn" onClick={() => { setRemoveTarget(menuFor); setMenuFor(null) }}>
+            <Icon name="close" size={13} /> 移除…
+          </button>
+        </div>
+      )}
 
       {removeTarget && (
         <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setRemoveTarget(null) }}>

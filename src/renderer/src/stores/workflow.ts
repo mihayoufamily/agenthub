@@ -106,20 +106,22 @@ interface StageOutcome {
 /**
  * 真实 Agent 调用（自定义模型 / 本机 CLI）：流式写入指定卡片，返回完整文本。
  * 错误：置卡片 error + 任务 failed；取消：返回已收到的部分文本，由调用方检查 isCancelled。
+ * Token 上限：opts.maxTokens > 0 且累计用量达到上限时，取消请求并标记 tokenLimit。
  */
 function agentChatToCard(
   agent: AgentConfig,
   system: string,
   user: string,
   cardId: string,
-  setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void
-): Promise<{ ok: true; text: string } | { ok: false; message: string }> {
+  setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
+  opts?: { maxTokens?: number }
+): Promise<{ ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }> {
   const reqId = uid('req')
   activeModelReqId = reqId
   return new Promise((resolve) => {
     let text = ''
     let settled = false
-    const finish = (r: { ok: true; text: string } | { ok: false; message: string }) => {
+    const finish = (r: { ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }) => {
       if (settled) return
       settled = true
       off()
@@ -132,7 +134,18 @@ function agentChatToCard(
         text += ev.text
         setRun((r) => ({ ...r, cards: updateCard(r.cards, cardId, { conclusion: text }) }))
       } else if (ev.type === 'usage' && ev.usage?.tokens) {
-        setRun((r) => ({ ...r, usage: { ...r.usage, tokens: (r.usage?.tokens ?? 0) + (ev.usage?.tokens ?? 0) } }))
+        let exceeded = false
+        setRun((r) => {
+          const tokens = (r.usage?.tokens ?? 0) + (ev.usage?.tokens ?? 0)
+          if ((opts?.maxTokens ?? 0) > 0 && tokens >= (opts!.maxTokens as number)) exceeded = true
+          return { ...r, usage: { ...r.usage, tokens } }
+        })
+        if (exceeded) {
+          // 达到 Token 上限：取消仍在进行的流式请求，交由调用方置 token_limit 状态
+          bridge.models.cancel(reqId)
+          bridge.cli.cancel(reqId)
+          finish({ ok: false, message: `累计 Token 已达上限（${opts?.maxTokens}）`, tokenLimit: true })
+        }
       } else if (ev.type === 'error') {
         finish({ ok: false, message: ev.message ?? '未知错误' })
       } else if (ev.type === 'done') {
@@ -217,9 +230,24 @@ async function runStage(
     return null
   }
   const { system, user } = buildRoleMessages(role, ctx)
-  const res = await agentChatToCard(agent, system, user, card.id, setRun)
+  const res = await agentChatToCard(agent, system, user, card.id, setRun, { maxTokens: cfg.maxTokens })
   if (isCancelled()) return null
   if (!res.ok) {
+    if (res.tokenLimit) {
+      // Token 上限自动停止（非失败）：保留已产出的卡片与记录，等待用户决定
+      setRun((r) => ({
+        ...r,
+        status: 'token_limit',
+        stage: null,
+        endedAt: Date.now(),
+        notes: [...(r.notes ?? []), `累计 Token 已达上限（${cfg.maxTokens}），任务自动停止；已完成卡片与记录保留`],
+        cards: updateCard(r.cards, card.id, { status: 'error' })
+      }))
+      get().saveRun()
+      useSettings.getState().addMemory('progress', `任务因 Token 上限（${cfg.maxTokens}）自动停止`, false)
+      useUi.getState().toast(`累计 Token 已达上限（${cfg.maxTokens}），任务自动停止`, 'warn')
+      return null
+    }
     setRun((r) => ({
       ...r,
       status: 'failed',
@@ -303,7 +331,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     reviewMode: 'human',
     maxRounds: 3,
     timeoutMin: 30,
-    confirmEveryRound: false
+    confirmEveryRound: false,
+    maxTokens: 0
   },
   run: null,
   _cancelled: false,
@@ -321,7 +350,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       reviewMode: get().config.reviewMode,
       maxRounds: get().config.maxRounds,
       timeoutMin: get().config.timeoutMin,
-      confirmEveryRound: get().config.confirmEveryRound
+      confirmEveryRound: get().config.confirmEveryRound,
+      maxTokens: get().config.maxTokens
     })
   },
 
@@ -521,6 +551,29 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
           useUi.getState().toast('已达最大返工轮数，保留成果等待你的决定', 'warn')
           return
         }
+
+        // 疑似无进展检测：连续 2 轮审核问题项完全相同 → 不再自动返工，转人工处理
+        const normIssues = (list: string[]) => list.map((s) => s.trim().replace(/\s+/g, ' ')).sort().join('\n')
+        const curIssues = verdicts.filter((v) => v.verdict === 'issue').map((v) => v.text)
+        if (prevReviewIssues.length > 0 && curIssues.length > 0 && normIssues(curIssues) === normIssues(prevReviewIssues)) {
+          setRun((r) => ({
+            ...r,
+            status: 'waiting_user',
+            gate: {
+              id: uid('gate'),
+              round,
+              passed: verdicts.filter((v) => v.verdict === 'pass'),
+              issues: verdicts.filter((v) => v.verdict === 'issue'),
+              reworkFeedback: '连续 2 轮审核指出的问题项完全相同，疑似无进展，已转人工处理。可补充针对性返工意见后继续，或停止任务。'
+            },
+            notes: [...(r.notes ?? []), `连续 2 轮（第 ${round - 1}、${round} 轮）审核问题项完全相同，疑似无进展，转人工处理`]
+          }))
+          get().saveRun()
+          useSettings.getState().addMemory('review', `疑似无进展：第 ${round - 1}、${round} 轮审核问题项相同，转人工`, false)
+          useUi.getState().toast('连续 2 轮审核问题项相同，疑似无进展，已转人工', 'warn')
+          return
+        }
+
         prevReviewIssues = verdicts.filter((v) => v.verdict === 'issue').map((v) => v.text)
         round += 1
         setRun((r) => ({ ...r, round }))
