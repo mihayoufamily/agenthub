@@ -15,6 +15,16 @@ const api = {
     openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
     relaunch: () => ipcRenderer.invoke('app:relaunch')
   },
+  update: {
+    /** 版本检查（manual=true 不受 3 天节流，用于设置页按钮） */
+    check: (manual: boolean) => ipcRenderer.invoke('update:check', manual) as Promise<{
+      current: string; hasUpdate: boolean; latest?: string; releaseUrl?: string; error?: string
+    }>
+  },
+  autostart: {
+    get: () => ipcRenderer.invoke('autostart:get') as Promise<boolean>,
+    set: (on: boolean) => ipcRenderer.invoke('autostart:set', on) as Promise<boolean>
+  },
   config: {
     get: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),
     setPrefs: (prefs: AppConfig['prefs']) => ipcRenderer.invoke('prefs:set', prefs),
@@ -29,8 +39,11 @@ const api = {
     delete: (keyId: string) => ipcRenderer.invoke('credential:delete', keyId)
   },
   sessions: {
-    save: (s: AgentSession) => ipcRenderer.invoke('session:save', s),
-    load: (agentId: string) => ipcRenderer.invoke('session:load', agentId) as Promise<AgentSession | null>,
+    /** 保存该 Agent 的全部会话（v2 多会话；activeId 为当前活跃会话） */
+    save: (agentId: string, sessions: AgentSession[], activeId?: string) =>
+      ipcRenderer.invoke('session:save', agentId, sessions, activeId),
+    load: (agentId: string) =>
+      ipcRenderer.invoke('session:load', agentId) as Promise<{ sessions: AgentSession[]; activeId?: string } | null>,
     remove: (agentId: string, deleteHistory: boolean) => ipcRenderer.invoke('session:remove', agentId, deleteHistory)
   },
   runs: {

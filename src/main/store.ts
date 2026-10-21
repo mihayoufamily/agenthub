@@ -117,20 +117,41 @@ export class Store {
     }
   }
 
-  // ---------- 会话 ----------
-  saveSession(session: AgentSession) {
-    this.writeJson(join(this.dirs.sessions, `${session.agentId}.json`), session)
+  // ---------- 会话（v2 多会话：每 Agent 一个文件，内容为会话数组；旧单会话格式加载时自动迁移） ----------
+  saveSessions(agentId: string, sessions: AgentSession[], activeId?: string) {
+    this.writeJson(join(this.dirs.sessions, `${agentId}.json`), { v: 2, sessions, activeId })
   }
 
-  loadSession(agentId: string): AgentSession | null {
-    return this.readJson<AgentSession | null>(join(this.dirs.sessions, `${agentId}.json`), null)
+  loadSessions(agentId: string): { sessions: AgentSession[]; activeId?: string } | null {
+    const raw = this.readJson<Record<string, unknown> | null>(join(this.dirs.sessions, `${agentId}.json`), null)
+    if (!raw) return null
+    if (Array.isArray(raw.sessions)) {
+      const sessions = (raw.sessions as AgentSession[]).map((s) => ({
+        ...s,
+        id: s.id || `ses-${agentId}-migrated-${Math.random().toString(36).slice(2, 8)}`,
+        title: s.title || '历史会话'
+      }))
+      return { sessions, activeId: typeof raw.activeId === 'string' ? raw.activeId : undefined }
+    }
+    // 旧 v1 单会话格式（顶层含 messages）：迁移为单元素数组
+    if (Array.isArray(raw.messages)) {
+      const legacy = raw as unknown as AgentSession
+      const migrated: AgentSession = {
+        ...legacy,
+        id: legacy.id || `ses-${agentId}-legacy`,
+        title: legacy.title || '历史会话',
+        createdAt: legacy.createdAt ?? Date.now()
+      }
+      return { sessions: [migrated] }
+    }
+    return null
   }
 
   removeSession(agentId: string, deleteHistory: boolean) {
-    // deleteHistory=false 时仅"移除连接"不动会话；此处只有 deleteHistory=true 才删历史
+    // deleteHistory=false 时仅"移除连接"不动会话；此处只有 deleteHistory=true 才清空全部会话
     if (deleteHistory) {
       const p = join(this.dirs.sessions, `${agentId}.json`)
-      if (existsSync(p)) writeFileSync(p, JSON.stringify({ agentId, messages: [], draft: '' }))
+      if (existsSync(p)) writeFileSync(p, JSON.stringify({ v: 2, sessions: [], activeId: undefined }))
     }
   }
 

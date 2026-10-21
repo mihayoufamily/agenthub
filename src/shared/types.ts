@@ -103,9 +103,15 @@ export interface ChatMessage {
 }
 
 export interface AgentSession {
+  /** 会话 ID（多会话管理；旧单会话数据加载时自动迁移补 id） */
+  id: string
   agentId: string
+  /** 会话标题：默认"新会话"，首条消息后取其前缀自动命名，可手动重命名 */
+  title: string
   messages: ChatMessage[]
   draft: string
+  createdAt: number
+  updatedAt?: number
   /** 运行中的后台任务状态（演示） */
   bgTask?: 'running' | 'awaiting' | null
 }

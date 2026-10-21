@@ -60,6 +60,8 @@ const PATHS: Record<string, React.ReactNode> = {
   ),
   folder: <path d="M4 6a2 2 0 012-2h4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6z" />,
   terminal: <path d="M5 7l4 4-4 4M11 17h8" />,
+  edit: <path d="M4 20h4l10.5-10.5a2.1 2.1 0 00-3-3L5 17v3z" />,
+  trash: <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2" />,
   scan: (
     <>
       <path d="M4 8V6a2 2 0 012-2h2M16 4h2a2 2 0 012 2v2m0 8v2a2 2 0 01-2 2h-2M8 20H6a2 2 0 01-2-2v-2" />

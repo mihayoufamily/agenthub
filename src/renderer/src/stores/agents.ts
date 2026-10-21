@@ -1,6 +1,6 @@
 // Agent 管理：列表、顺序、状态、未读、发现扫描、连接
 import { create } from 'zustand'
-import type { AgentConfig, ScanResultItem, CustomModelConfig, AgentSession, CliName } from '@shared/types'
+import type { AgentConfig, ScanResultItem, CustomModelConfig, CliName } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { uid } from '../lib/utils'
 import { useUi } from './ui'
@@ -195,8 +195,3 @@ export const useAgents = create<AgentsState>()((set, get) => ({
   clearUnread: (id) => set((s) => ({ unread: { ...s.unread, [id]: 0 } })),
   colorOf: (id) => get().colors[id] ?? '#64748b'
 }))
-
-/** 会话保存辅助（供 sessions store 使用，避免循环依赖） */
-export function saveSessionPayload(s: AgentSession) {
-  void bridge.sessions.save(s)
-}

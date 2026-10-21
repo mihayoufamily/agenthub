@@ -385,8 +385,13 @@ function HandoffModal({ onClose }: { onClose: () => void }) {
   const agents = useAgents((s) => s.agents)
   const selectedId = useAgents((s) => s.selectedId)
   const handoff = useSessions((s) => s.handoff)
-  // 直接订阅数据（函数引用订阅不会随 sessions 变化触发重渲染）
-  const msgs = useSessions((s) => (selectedId ? s.sessions[selectedId]?.messages ?? EMPTY_MSGS : EMPTY_MSGS))
+  // 直接订阅数据（函数引用订阅不会随 sessions 变化触发重渲染）；多会话取活跃会话消息
+  const msgs = useSessions((s) => {
+    if (!selectedId) return EMPTY_MSGS
+    const list = s.sessions[selectedId]
+    const act = list?.find((x) => x.id === s.activeOf[selectedId]) ?? list?.[list.length - 1]
+    return act?.messages ?? EMPTY_MSGS
+  })
   const others = agents.filter((a) => a.id !== selectedId)
   const [targetId, setTargetId] = useState(others[0]?.id ?? '')
   const source = agents.find((a) => a.id === selectedId)

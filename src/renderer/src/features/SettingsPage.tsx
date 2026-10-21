@@ -1,5 +1,5 @@
 // 设置页：六分区（外观 / Agent 与模型 / 工作流 / 快捷键 / 数据 / 关于）
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
@@ -302,12 +302,60 @@ function DataSection() {
 /* ---- 关于 ---- */
 function AboutSection() {
   const info = useSettings((s) => s.appInfo)
+  const [autostart, setAutostart] = useState<boolean | null>(null)
+  const [checking, setChecking] = useState(false)
+
+  useEffect(() => {
+    bridge.autostart.get().then((on) => setAutostart(on)).catch(() => setAutostart(null))
+  }, [])
+
   return (
     <div className="set-group">
       <Row label="应用版本" desc={info?.version} />
       <Row label="Electron / Chromium / Node" desc={`${info?.electron} / ${info?.chrome} / ${info?.node}`} />
       <Row label="平台" desc={info?.platform} />
-      <Row label="开源仓库与许可证" desc="发布时由项目所有者填写仓库地址；许可证待项目所有者确认后加入（当前 LICENSE 为占位说明）" />
+      <Row label="检查更新" desc="比对 GitHub Releases 最新版本；发现新版会在界面顶部显示提示横幅">
+        <Button
+          variant="secondary"
+          style={{ height: 28 }}
+          loading={checking}
+          onClick={async () => {
+            setChecking(true)
+            const r = await bridge.update.check(true).catch(() => null)
+            setChecking(false)
+            if (!r) { useUi.getState().toast('检查更新失败：无法连接更新服务', 'error'); return }
+            if (r.error) { useUi.getState().toast(`检查更新失败：${r.error}`, 'error'); return }
+            if (r.hasUpdate && r.latest && r.releaseUrl) {
+              useUi.getState().setUpdateBanner({ version: r.latest, url: r.releaseUrl })
+              useUi.getState().toast(`发现新版本 ${r.latest}，点击顶部横幅前往下载`, 'ok')
+            } else {
+              useUi.getState().toast(`已是最新版本（${r.current}）`, 'ok')
+            }
+          }}
+        >
+          检查更新
+        </Button>
+      </Row>
+      <Row label="开机自启" desc="登录 Windows 后自动启动 AgentHub">
+        {autostart === null ? (
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>读取中…</span>
+        ) : (
+          <Switch
+            label="自启"
+            on={autostart}
+            onChange={async (v) => {
+              const applied = await bridge.autostart.set(v).catch(() => null)
+              if (applied === null) {
+                useUi.getState().toast('设置开机自启失败（注册表写入被拒）', 'error')
+                return
+              }
+              setAutostart(applied)
+              useUi.getState().toast(applied ? '已开启开机自启' : '已关闭开机自启', 'ok')
+            }}
+          />
+        )}
+      </Row>
+      <Row label="开源仓库与许可证" desc="MIT · https://github.com/mihayoufamily/agenthub" />
       <Row label="诊断信息导出" desc="版本、平台、配置摘要（不含 API Key 与个人数据）">
         <Button
           variant="secondary"
@@ -328,7 +376,7 @@ function AboutSection() {
         </Button>
       </Row>
       <div className="desc" style={{ lineHeight: 1.7 }}>
-        自动更新：当前版本未实现自动更新，不声明相关支持。
+        更新方式：手动下载——应用只检查并提示新版本，不自动下载或安装；启动时亦会静默检查（3 天一次，失败不打扰）。
         {info && <span style={{ color: 'var(--text-3)' }}>（生成于 {fmtTime(Date.now())}）</span>}
       </div>
     </div>

@@ -1,0 +1,41 @@
+name: Release
+
+# 推送 v* tag 时自动：构建 -> 组装便携版 -> 打 zip -> 创建 GitHub Release
+# 前置：package.json 的 version 与 tag 一致（下方校验步骤强约束）
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 校验 tag 与 package.json 版本一致
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v',''
+          $pkg = (Get-Content package.json | ConvertFrom-Json).version
+          if ($tag -ne $pkg) {
+            Write-Error "tag ${{ github.ref_name }} 与 package.json version $pkg 不一致；请先同步版本号"
+            exit 1
+          }
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run pack:portable
+
+      - name: 打 zip
+        shell: pwsh
+        run: Compress-Archive -Path release/AgentHub-win-x64 -DestinationPath "AgentHub-${{ github.ref_name }}-win-x64-portable.zip"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: AgentHub-${{ github.ref_name }}-win-x64-portable.zip

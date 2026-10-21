@@ -397,3 +397,48 @@
   animation: spin 700ms linear infinite;
   flex: none;
 }
+
+/* ---- 新版本提示横幅（非模态：顶部居中，不阻塞操作） ---- */
+.update-banner {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 16px;
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border-strong, #d8d2c4);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.18);
+  z-index: 900;
+  animation: ub-in 0.35s ease both;
+  font-size: 13px;
+}
+.update-banner .ub-text { font-weight: 600; color: var(--text); }
+.update-banner .ub-btn {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--brand-amber, #b45309);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.update-banner .ub-btn:hover { filter: brightness(1.08); }
+.update-banner .ub-dismiss {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3, #999);
+  font-size: 12px;
+  cursor: pointer;
+}
+.update-banner .ub-dismiss:hover { background: var(--hover, rgba(0,0,0,0.06)); color: var(--text); }
+@keyframes ub-in { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+:root[data-anim='off'] .update-banner, :root[data-motion='reduced'] .update-banner { animation: none; }

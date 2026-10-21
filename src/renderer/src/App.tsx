@@ -35,6 +35,19 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err
   }
 }
 
+/** 新版本提示横幅（非模态：顶部居中，不阻塞任何操作，可忽略） */
+function UpdateBanner() {
+  const b = useUi((s) => s.updateBanner)
+  if (!b) return null
+  return (
+    <div className="update-banner">
+      <span className="ub-text">发现新版本 {b.version}</span>
+      <button className="ub-btn" onClick={() => void bridge.app.openExternal(b.url)}>前往下载</button>
+      <button className="ub-dismiss" aria-label="忽略更新提示" title="忽略" onClick={() => useUi.getState().setUpdateBanner(null)}>✕</button>
+    </div>
+  )
+}
+
 export function App() {
   const screen = useUi((s) => s.screen)
   const run = useWorkflow((s) => s.run)
@@ -78,6 +91,12 @@ export function App() {
           maxTokens: wd?.maxTokens ?? 0
         })
         setReady(true)
+        // 更新检查：启动后静默检查（3 天节流，失败不打扰）；发现新版本显示顶部横幅
+        bridge.update.check(false).then((r) => {
+          if (r.hasUpdate && r.latest && r.releaseUrl) {
+            useUi.getState().setUpdateBanner({ version: r.latest, url: r.releaseUrl })
+          }
+        }).catch(() => { /* 静默 */ })
       } catch (e) {
         setFatal(`启动失败：${(e as Error).message}`)
       }
@@ -116,6 +135,7 @@ export function App() {
       {screen === 'brand' && <BrandHome />}
       {screen === 'workbench' && <Workbench />}
       {screen === 'workflow' && (run ? <TaskView /> : <WorkflowHome />)}
+      <UpdateBanner />
       <SettingsPage />
       <ModeSwitchWarning />
       <Toasts />

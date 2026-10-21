@@ -1,80 +1,130 @@
-// 会话状态：每个 Agent 独立的消息、草稿、滚动位置；演示回复引擎 + 真实模型流式接入
+// 会话状态：每个 Agent 独立的多会话（列表/切换/重命名/删除）+ 草稿随会话保留；
+// 演示回复引擎 + 真实模型流式接入；磁盘为 v2 多会话格式（旧单会话文件由主进程自动迁移）
 import { create } from 'zustand'
 import type { AgentSession, ChatMessage, Attachment } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
-import { useAgents, saveSessionPayload } from './agents'
+import { useAgents } from './agents'
 import { useUi } from './ui'
 import { demoChatReply, demoHandoffNote } from '../lib/demo'
 
 interface SessionsState {
-  sessions: Record<string, AgentSession>
+  /** agentId -> 会话列表（新的在前） */
+  sessions: Record<string, AgentSession[]>
+  /** agentId -> 当前活跃会话 id（随磁盘持久化，重启恢复） */
+  activeOf: Record<string, string>
   /** 运行中的模型流 reqId -> agentId，避免重复提交 */
   activeStreams: Record<string, string>
 
   ensure: (agentId: string) => Promise<void>
+  /** 某 Agent 的会话列表（面板展示用） */
+  listOf: (agentId: string) => AgentSession[]
+  /** 活跃会话（无会话时返回 undefined，不隐式创建） */
+  activeSessionOf: (agentId: string) => AgentSession | undefined
   messagesOf: (agentId: string) => ChatMessage[]
   draftOf: (agentId: string) => string
   setDraft: (agentId: string, text: string) => void
   sendMessage: (agentId: string, text: string, attachments: Attachment[]) => Promise<void>
-  /** 导出单个 Agent 的聊天会话为 Markdown 文件 */
+  newSession: (agentId: string) => void
+  switchSession: (agentId: string, sessionId: string) => void
+  renameSession: (agentId: string, sessionId: string, title: string) => void
+  deleteSession: (agentId: string, sessionId: string) => void
+  /** 导出单个 Agent 当前活跃会话为 Markdown 文件 */
   exportSession: (agentId: string) => Promise<void>
   handoff: (fromId: string, toId: string) => void
 }
 
-function persistSession(s: AgentSession) {
-  saveSessionPayload(s)
+/** 新建空会话 */
+function mkSession(agentId: string, title = '新会话'): AgentSession {
+  return { id: uid('ses'), agentId, title, messages: [], draft: '', createdAt: Date.now() }
+}
+
+type Core = Pick<SessionsState, 'sessions' | 'activeOf'>
+
+/** 取某 Agent 的活跃会话引用（容错：activeOf 失效时取最后一个；无会话返回 undefined） */
+function activeOf(state: Core, agentId: string): AgentSession | undefined {
+  const list = state.sessions[agentId]
+  if (!list || list.length === 0) return undefined
+  return list.find((x) => x.id === state.activeOf[agentId]) ?? list[list.length - 1]
+}
+
+/** 变更活跃会话（无会话时自动创建默认会话；activeOf 失效时自动纠正），返回 set 所需 partial */
+function withActive(state: Core, agentId: string, fn: (ses: AgentSession) => AgentSession): { sessions: Record<string, AgentSession[]>; activeOf: Record<string, string> } {
+  let list = state.sessions[agentId]
+  let activeId = state.activeOf[agentId]
+  if (!list || list.length === 0) {
+    const ns = mkSession(agentId)
+    list = [ns]
+    activeId = ns.id
+  } else if (!list.some((x) => x.id === activeId)) {
+    activeId = list[list.length - 1].id
+  }
+  return {
+    sessions: { ...state.sessions, [agentId]: list.map((s) => (s.id === activeId ? fn(s) : s)) },
+    activeOf: { ...state.activeOf, [agentId]: activeId }
+  }
+}
+
+/** 持久化某 Agent 的全部会话与活跃 id */
+function persistAgent(agentId: string) {
+  const st = useSessions.getState()
+  void bridge.sessions.save(agentId, st.sessions[agentId] ?? [], st.activeOf[agentId])
+}
+
+/** 从用户消息提取会话默认标题（去换行、限长） */
+function titleFrom(text: string): string {
+  const t = text.replace(/\s+/g, ' ').trim()
+  return t.length > 16 ? t.slice(0, 16) + '…' : t
 }
 
 export const useSessions = create<SessionsState>()((set, get) => ({
   sessions: {},
+  activeOf: {},
   activeStreams: {},
 
   ensure: async (agentId) => {
-    if (get().sessions[agentId]) return
-    let loaded: AgentSession | null = null
+    if (get().sessions[agentId]?.length) return
+    let loaded: { sessions: AgentSession[]; activeId?: string } | null = null
     try {
       loaded = await bridge.sessions.load(agentId)
     } catch { /* 首次无会话文件 */ }
     set((s) => {
       const mem = s.sessions[agentId]
-      if (mem) {
-        // 加载期间用户已输入/发送（冷启动时 IPC 可能延迟到达）：保留内存草稿与新消息，仅补入磁盘历史，绝不覆盖
-        const base = loaded ?? { agentId, messages: [] as AgentSession['messages'], draft: '' }
-        const memIds = new Set(mem.messages.map((m) => m.id))
-        return {
-          sessions: {
-            ...s.sessions,
-            [agentId]: {
-              ...mem,
-              messages: [...base.messages.filter((m) => !memIds.has(m.id)), ...mem.messages],
-              draft: mem.draft || base.draft
-            }
-          }
-        }
+      if (mem && mem.length > 0) {
+        // 加载期间用户已输入/发送（冷启动时 IPC 可能延迟到达）：内存版本优先，仅补入磁盘上内存缺失的会话
+        const memIds = new Set(mem.map((x) => x.id))
+        const merged = [...(loaded?.sessions ?? []).filter((x) => !memIds.has(x.id)), ...mem]
+        return { sessions: { ...s.sessions, [agentId]: merged } }
       }
-      return { sessions: { ...s.sessions, [agentId]: loaded ?? { agentId, messages: [], draft: '' } } }
+      const list = loaded && loaded.sessions.length > 0 ? loaded.sessions : [mkSession(agentId)]
+      const act = loaded?.activeId && list.some((x) => x.id === loaded!.activeId) ? loaded.activeId : list[0].id
+      return { sessions: { ...s.sessions, [agentId]: list }, activeOf: { ...s.activeOf, [agentId]: act } }
     })
   },
 
-  messagesOf: (agentId) => get().sessions[agentId]?.messages ?? [],
+  listOf: (agentId) => get().sessions[agentId] ?? [],
 
-  draftOf: (agentId) => get().sessions[agentId]?.draft ?? '',
+  activeSessionOf: (agentId) => activeOf(get(), agentId),
+
+  messagesOf: (agentId) => activeOf(get(), agentId)?.messages ?? [],
+
+  draftOf: (agentId) => activeOf(get(), agentId)?.draft ?? '',
 
   setDraft: (agentId, text) => {
-    set((s) => {
-      const cur = s.sessions[agentId] ?? { agentId, messages: [], draft: '' }
-      const next = { ...cur, draft: text }
-      return { sessions: { ...s.sessions, [agentId]: next } }
-    })
-    const ses = get().sessions[agentId]
-    if (ses) persistSession(ses)
+    set((s) => withActive(s, agentId, (ses) => ({ ...ses, draft: text })))
+    persistAgent(agentId)
   },
 
   sendMessage: async (agentId, text, attachments) => {
     const agents = useAgents.getState()
     const agent = agents.agents.find((a) => a.id === agentId)
     if (!agent) return
+
+    const streamKey = `chat:${agentId}`
+    if (get().activeStreams[streamKey]) {
+      useUi.getState().toast('该 Agent 正在回复中，请稍候', 'warn')
+      return
+    }
 
     const userMsg: ChatMessage = {
       id: uid('msg'),
@@ -84,17 +134,15 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       model: agent.model,
       attachments: attachments.length ? attachments : undefined
     }
-    const streamKey = `chat:${agentId}`
-    if (get().activeStreams[streamKey]) {
-      useUi.getState().toast('该 Agent 正在回复中，请稍候', 'warn')
-      return
-    }
-
-    set((s) => {
-      const cur = s.sessions[agentId] ?? { agentId, messages: [], draft: '' }
-      return { sessions: { ...s.sessions, [agentId]: { ...cur, messages: [...cur.messages, userMsg], draft: '' } } }
-    })
-    persistSession(get().sessions[agentId])
+    set((s) => withActive(s, agentId, (ses) => ({
+      ...ses,
+      // 首条消息后自动命名（用户手动改过标题则不再覆盖）
+      title: ses.title === '新会话' && text.trim() ? titleFrom(text) : ses.title,
+      messages: [...ses.messages, userMsg],
+      draft: '',
+      updatedAt: Date.now()
+    })))
+    persistAgent(agentId)
     agents.setStatus(agentId, 'running')
 
     if (agent.kind === 'demo') {
@@ -105,42 +153,31 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         id: msgId, role: 'assistant', text: '', ts: Date.now(),
         demo: true, streaming: true, model: agent.model
       }
-      set((s) => {
-        const cur = s.sessions[agentId]
-        return { sessions: { ...s.sessions, [agentId]: { ...cur, messages: [...cur.messages, demoMsg] } } }
-      })
+      set((s) => withActive(s, agentId, (ses) => ({ ...ses, messages: [...ses.messages, demoMsg] })))
       set((s) => ({ activeStreams: { ...s.activeStreams, [streamKey]: agentId } }))
       for (const chunk of chunkText(reply, 4)) {
         await sleep(24)
-        set((s) => {
-          const cur = s.sessions[agentId]
-          return {
-            sessions: {
-              ...s.sessions,
-              [agentId]: {
-                ...cur,
-                messages: cur.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + chunk } : m))
-              }
-            }
-          }
-        })
+        set((s) => withActive(s, agentId, (ses) => ({
+          ...ses,
+          messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + chunk } : m))
+        })))
       }
       set((s) => {
-        const cur = s.sessions[agentId]
         const activeStreams = { ...s.activeStreams }
         delete activeStreams[streamKey]
         return {
           activeStreams,
-          sessions: {
-            ...s.sessions,
-            [agentId]: { ...cur, messages: cur.messages.map((m) => (m.id === msgId ? { ...m, streaming: false } : m)) }
-          }
+          ...withActive(s, agentId, (ses) => ({
+            ...ses,
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, streaming: false } : m)),
+            updatedAt: Date.now()
+          }))
         }
       })
       // 后台完成提醒：不在当前页时计未读
       if (useAgents.getState().selectedId !== agentId) useAgents.getState().bumpUnread(agentId)
       useAgents.getState().setStatus(agentId, 'available')
-      persistSession(get().sessions[agentId])
+      persistAgent(agentId)
       return
     }
 
@@ -149,10 +186,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       const reqId = uid('req')
       const msgId = uid('msg')
       const replyMsg: ChatMessage = { id: msgId, role: 'assistant', text: '', ts: Date.now(), streaming: true, model: agent.model }
-      set((s) => {
-        const cur = s.sessions[agentId]
-        return { sessions: { ...s.sessions, [agentId]: { ...cur, messages: [...cur.messages, replyMsg] } } }
-      })
+      set((s) => withActive(s, agentId, (ses) => ({ ...ses, messages: [...ses.messages, replyMsg] })))
       set((s) => ({ activeStreams: { ...s.activeStreams, [streamKey]: agentId } }))
 
       // 携带最近的历史作为上下文（过长截断；真实工作流任务的完整上下文由 workflow 角色注入）
@@ -162,7 +196,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
         .map((a) => `\n\n[附件：${a.name}]\n${a.content}`)
         .join('')
-      const history = get().sessions[agentId].messages
+      const history = (activeOf(get(), agentId)?.messages ?? [])
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .slice(-HISTORY_WINDOW)
         .map((m) => ({ role: m.role, content: m.id === userMsg.id ? m.text + attachmentText : m.text }))
@@ -170,70 +204,48 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       let off = bridge.models.onEvent((ev) => {
         if (ev.reqId !== reqId) return
         if (ev.type === 'delta' && ev.text) {
-          set((s) => {
-            const cur = s.sessions[agentId]
-            return {
-              sessions: {
-                ...s.sessions,
-                [agentId]: {
-                  ...cur,
-                  messages: cur.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + ev.text } : m))
-                }
-              }
-            }
-          })
+          set((s) => withActive(s, agentId, (ses) => ({
+            ...ses,
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + ev.text } : m))
+          })))
         } else if (ev.type === 'tool' && ev.toolCall) {
           // 工具调用执行记录：合并进当前回复消息（同 id 更新状态与结果，新 id 追加）
           const tc = ev.toolCall
-          set((s) => {
-            const cur = s.sessions[agentId]
-            return {
-              sessions: {
-                ...s.sessions,
-                [agentId]: {
-                  ...cur,
-                  messages: cur.messages.map((m) => {
-                    if (m.id !== msgId) return m
-                    const calls = m.toolCalls ? [...m.toolCalls] : []
-                    const i = calls.findIndex((c) => c.id === tc.id)
-                    if (i >= 0) calls[i] = tc
-                    else calls.push(tc)
-                    return { ...m, toolCalls: calls }
-                  })
-                }
-              }
-            }
-          })
+          set((s) => withActive(s, agentId, (ses) => ({
+            ...ses,
+            messages: ses.messages.map((m) => {
+              if (m.id !== msgId) return m
+              const calls = m.toolCalls ? [...m.toolCalls] : []
+              const i = calls.findIndex((c) => c.id === tc.id)
+              if (i >= 0) calls[i] = tc
+              else calls.push(tc)
+              return { ...m, toolCalls: calls }
+            })
+          })))
         } else if (ev.type === 'error') {
-          set((s) => {
-            const cur = s.sessions[agentId]
-            return {
-              sessions: {
-                ...s.sessions,
-                [agentId]: {
-                  ...cur,
-                  messages: cur.messages.map((m) =>
-                    m.id === msgId ? { ...m, streaming: false, error: ev.message ?? '未知错误' } : m
-                  )
-                }
-              }
-            }
-          })
+          set((s) => withActive(s, agentId, (ses) => ({
+            ...ses,
+            messages: ses.messages.map((m) =>
+              m.id === msgId ? { ...m, streaming: false, error: ev.message ?? '未知错误' } : m
+            )
+          })))
           useAgents.getState().setStatus(agentId, 'failed')
         } else if (ev.type === 'done') {
           set((s) => {
-            const cur = s.sessions[agentId]
+            const activeStreams = { ...s.activeStreams }
+            delete activeStreams[streamKey]
             return {
-              activeStreams: { ...s.activeStreams, [streamKey]: '' },
-              sessions: {
-                ...s.sessions,
-                [agentId]: { ...cur, messages: cur.messages.map((m) => (m.id === msgId ? { ...m, streaming: false } : m)) }
-              }
+              activeStreams,
+              ...withActive(s, agentId, (ses) => ({
+                ...ses,
+                messages: ses.messages.map((m) => (m.id === msgId ? { ...m, streaming: false } : m)),
+                updatedAt: Date.now()
+              }))
             }
           })
           if (useAgents.getState().selectedId !== agentId) useAgents.getState().bumpUnread(agentId)
           useAgents.getState().setStatus(agentId, 'available')
-          persistSession(get().sessions[agentId])
+          persistAgent(agentId)
         }
       })
 
@@ -242,18 +254,16 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         : await bridge.models.chat(agent.modelConfig!, reqId, history, agent.tools ? { tools: agent.tools } : undefined)
       if (!r.ok) {
         set((s) => {
-          const cur = s.sessions[agentId]
+          const activeStreams = { ...s.activeStreams }
+          delete activeStreams[streamKey]
           return {
-            activeStreams: { ...s.activeStreams, [streamKey]: '' },
-            sessions: {
-              ...s.sessions,
-              [agentId]: {
-                ...cur,
-                messages: cur.messages.map((m) =>
-                  m.id === msgId ? { ...m, streaming: false, error: agent.kind === 'cli' ? '请求未发出（CLI 不可用或已卸载）' : '请求未发出（缺少 API Key 或配置）' } : m
-                )
-              }
-            }
+            activeStreams,
+            ...withActive(s, agentId, (ses) => ({
+              ...ses,
+              messages: ses.messages.map((m) =>
+                m.id === msgId ? { ...m, streaming: false, error: agent.kind === 'cli' ? '请求未发出（CLI 不可用或已卸载）' : '请求未发出（缺少 API Key 或配置）' } : m
+              )
+            }))
           }
         })
         useAgents.getState().setStatus(agentId, 'failed')
@@ -263,23 +273,76 @@ export const useSessions = create<SessionsState>()((set, get) => ({
     }
 
     // 未知类型：如实提示
-    const cur = get().sessions[agentId]
     const sysMsg: ChatMessage = {
       id: uid('msg'), role: 'system', text: '该 Agent 尚未连接，无法执行。请在"添加 Agent"中完成连接或选择演示 Agent。',
       ts: Date.now()
     }
-    set((s) => ({ sessions: { ...s.sessions, [agentId]: { ...cur, messages: [...cur.messages, sysMsg] } } }))
+    set((s) => withActive(s, agentId, (ses) => ({ ...ses, messages: [...ses.messages, sysMsg] })))
     agents.setStatus(agentId, 'awaiting')
+  },
+
+  newSession: (agentId) => {
+    if (get().activeStreams[`chat:${agentId}`]) {
+      useUi.getState().toast('回复进行中，稍后再开新会话', 'warn')
+      return
+    }
+    const ns = mkSession(agentId)
+    set((s) => ({
+      sessions: { ...s.sessions, [agentId]: [ns, ...(s.sessions[agentId] ?? [])] },
+      activeOf: { ...s.activeOf, [agentId]: ns.id }
+    }))
+    persistAgent(agentId)
+    useUi.getState().toast('已开始新会话', 'ok')
+  },
+
+  switchSession: (agentId, sessionId) => {
+    if (get().activeStreams[`chat:${agentId}`]) {
+      useUi.getState().toast('回复进行中，稍后再切换会话', 'warn')
+      return
+    }
+    const list = get().sessions[agentId]
+    if (!list?.some((x) => x.id === sessionId)) return
+    set((s) => ({ activeOf: { ...s.activeOf, [agentId]: sessionId } }))
+    persistAgent(agentId)
+  },
+
+  renameSession: (agentId, sessionId, title) => {
+    const t = title.trim().slice(0, 40)
+    if (!t) return
+    set((s) => ({
+      sessions: {
+        ...s.sessions,
+        [agentId]: (s.sessions[agentId] ?? []).map((x) => (x.id === sessionId ? { ...x, title: t } : x))
+      }
+    }))
+    persistAgent(agentId)
+  },
+
+  deleteSession: (agentId, sessionId) => {
+    if (get().activeStreams[`chat:${agentId}`]) {
+      useUi.getState().toast('回复进行中，稍后再删除会话', 'warn')
+      return
+    }
+    set((s) => {
+      const list = (s.sessions[agentId] ?? []).filter((x) => x.id !== sessionId)
+      // 删空时保持至少一个默认会话（与"新会话"入口一致）
+      const final = list.length > 0 ? list : [mkSession(agentId)]
+      const cur = s.activeOf[agentId]
+      const act = final.some((x) => x.id === cur) ? cur : final[0].id
+      return { sessions: { ...s.sessions, [agentId]: final }, activeOf: { ...s.activeOf, [agentId]: act } }
+    })
+    persistAgent(agentId)
+    useUi.getState().toast('会话已删除', 'ok')
   },
 
   exportSession: async (agentId) => {
     const agent = useAgents.getState().agents.find((a) => a.id === agentId)
-    const ses = get().sessions[agentId]
+    const ses = activeOf(get(), agentId)
     if (!ses || ses.messages.length === 0) {
-      useUi.getState().toast('该 Agent 暂无会话记录可导出', 'info')
+      useUi.getState().toast('当前会话暂无记录可导出', 'info')
       return
     }
-    const lines: string[] = [`# AgentHub 会话导出：${agent?.name ?? agentId}`, '']
+    const lines: string[] = [`# AgentHub 会话导出：${agent?.name ?? agentId}`, '', `> 会话：${ses.title}`, '']
     if (agent?.isDemo) lines.push('> 此会话包含演示 Agent 的脚本化回复（非真实模型输出）', '')
     for (const m of ses.messages) {
       const t = new Date(m.ts).toLocaleString()
@@ -294,7 +357,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         lines.push(`> 系统 · ${t}：${m.text}`, '')
       }
     }
-    const name = safeName(`agenthub-chat-${agent?.name ?? agentId}-${Date.now()}`) + '.md'
+    const name = safeName(`agenthub-chat-${agent?.name ?? agentId}-${ses.title}-${Date.now()}`) + '.md'
     const r = await bridge.dialogs.saveFile(name, lines.join('\n'))
     useUi.getState().toast(r.ok ? `已导出到 ${r.message}` : '已取消导出', r.ok ? 'ok' : 'info')
   },
@@ -304,7 +367,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
     const from = agents.agents.find((a) => a.id === fromId)
     const to = agents.agents.find((a) => a.id === toId)
     if (!from || !to) return
-    const fromSession = get().sessions[fromId]
+    const fromSession = activeOf(get(), fromId)
     const lastAssistant = [...(fromSession?.messages ?? [])].reverse().find((m) => m.role === 'assistant')
     const note = demoHandoffNote(from.name, to.name, lastAssistant?.text ?? '（无最近结论可交接）')
     const msg: ChatMessage = {
@@ -314,11 +377,8 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       ts: Date.now(),
       handoff: { fromAgentId: fromId, fromAgentName: from.name }
     }
-    set((s) => {
-      const cur = s.sessions[toId] ?? { agentId: toId, messages: [], draft: '' }
-      return { sessions: { ...s.sessions, [toId]: { ...cur, messages: [...cur.messages, msg] } } }
-    })
-    persistSession(get().sessions[toId])
+    set((s) => withActive(s, toId, (ses) => ({ ...ses, messages: [...ses.messages, msg] })))
+    persistAgent(toId)
     useUi.getState().toast(`已交接给 ${to.name}`, 'ok')
   }
 }))

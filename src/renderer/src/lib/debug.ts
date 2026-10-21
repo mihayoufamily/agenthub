@@ -3,6 +3,7 @@
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
+import { useSessions } from '../stores/sessions'
 import type { AgentConfig } from '@shared/types'
 
 export function installDebugHooks() {
@@ -101,7 +102,23 @@ export function installDebugHooks() {
     // 状态读取（校验用）
     state: () => ({
       screen: useUi.getState().screen,
-      agents: useAgents.getState().agents.map((a: AgentConfig) => ({ name: a.name, kind: a.kind, status: a.status })),
+      selectedId: useAgents.getState().selectedId,
+      // 运行中的流（E2E 等待流式结束用）：chat:<agentId> 键列表
+      streamKeys: Object.keys(useSessions.getState().activeStreams),
+      agents: useAgents.getState().agents.map((a: AgentConfig) => ({ id: a.id, name: a.name, kind: a.kind, status: a.status })),
+      // 多会话摘要（E2E 断言用）：agentId -> { sessions, activeId, titles, counts }
+      sessions: Object.fromEntries(
+        Object.entries(useSessions.getState().sessions).map(([agentId, list]) => [
+          agentId,
+          {
+            count: list.length,
+            activeId: useSessions.getState().activeOf[agentId] ?? null,
+            titles: list.map((s) => s.title),
+            counts: list.map((s) => s.messages.length),
+            drafts: list.map((s) => s.draft)
+          }
+        ])
+      ),
       run: useWorkflow.getState().run
         ? {
             status: useWorkflow.getState().run!.status,

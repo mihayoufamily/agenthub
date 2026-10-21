@@ -7,6 +7,7 @@ import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant } from '../shared/types'
 import { execTool } from './tools'
+import { checkUpdate } from './updater'
 import type { ChatMsg } from './adapters/openai'
 
 /** 注册全部 IPC 通道。getStore/getWin 为延迟引用，避免初始化顺序问题。 */
@@ -33,6 +34,17 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   ipcMain.handle('app:relaunch', () => {
     app.relaunch()
     app.quit()
+  })
+
+  // ---------- 更新检查与开机自启 ----------
+  ipcMain.handle('update:check', (_e, manual: boolean) => checkUpdate(manual === true))
+
+  ipcMain.handle('autostart:get', () => app.getLoginItemSettings().openAtLogin)
+
+  ipcMain.handle('autostart:set', (_e, on: boolean) => {
+    // openAtLogin 指向当前可执行文件（便携版即 exe 本身）
+    app.setLoginItemSettings({ openAtLogin: on === true, path: process.execPath })
+    return app.getLoginItemSettings().openAtLogin
   })
 
   // ---------- 配置 ----------
@@ -82,11 +94,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   // ---------- 会话 ----------
-  ipcMain.handle('session:save', (_e, session: AgentSession) => {
-    getStore().saveSession(session)
+  ipcMain.handle('session:save', (_e, agentId: string, sessions: AgentSession[], activeId?: string) => {
+    getStore().saveSessions(agentId, sessions, activeId)
     return { ok: true }
   })
-  ipcMain.handle('session:load', (_e, agentId: string) => getStore().loadSession(agentId))
+  ipcMain.handle('session:load', (_e, agentId: string) => getStore().loadSessions(agentId))
   ipcMain.handle('session:remove', (_e, agentId: string, deleteHistory: boolean) => {
     getStore().removeSession(agentId, deleteHistory)
     return { ok: true }

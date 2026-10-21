@@ -1,6 +1,6 @@
 // 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型切换
 import React, { useEffect, useRef, useState } from 'react'
-import type { ChatMessage, AgentConfig, ToolCall } from '@shared/types'
+import type { ChatMessage, AgentConfig, AgentSession, ToolCall } from '@shared/types'
 import { useSessions } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
@@ -21,10 +21,15 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const colorOf = useAgents((s) => s.colorOf)
   // 直接订阅数据（而非 draftOf/messagesOf 函数引用）：否则 sessions 变化不触发重渲染，
   // 受控输入会被 React 重置回旧渲染值、发送按钮状态不更新（曾导致输入消失/演示 Agent 无输出）
-  const messages = useSessions((s) => (selectedId ? s.sessions[selectedId]?.messages ?? EMPTY_MSGS : EMPTY_MSGS))
-  const draft = useSessions((s) => (selectedId ? s.sessions[selectedId]?.draft ?? '' : ''))
+  // 多会话：订阅会话数组与活跃 id，在组件内派生活跃会话（messages/draft 引用稳定）
+  const sessionList = useSessions((s) => (selectedId ? s.sessions[selectedId] : undefined))
+  const activeSesId = useSessions((s) => (selectedId ? s.activeOf[selectedId] : undefined))
   const setDraft = useSessions((s) => s.setDraft)
   const sendMessage = useSessions((s) => s.sendMessage)
+  const newSession = useSessions((s) => s.newSession)
+  const switchSession = useSessions((s) => s.switchSession)
+  const renameSession = useSessions((s) => s.renameSession)
+  const deleteSession = useSessions((s) => s.deleteSession)
   const exportSession = useSessions((s) => s.exportSession)
   const ensure = useSessions((s) => s.ensure)
   const homeDraft = useUi((s) => s.homeDraft)
@@ -32,6 +37,9 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
 
   const agent = agents.find((a) => a.id === selectedId)
+  const act = sessionList?.find((x) => x.id === activeSesId) ?? sessionList?.[sessionList.length - 1]
+  const messages = act?.messages ?? EMPTY_MSGS
+  const draft = act?.draft ?? ''
 
   useEffect(() => {
     if (selectedId) void ensure(selectedId)
@@ -43,18 +51,20 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const [switchOpen, setSwitchOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [dirOpen, setDirOpen] = useState(false)
+  const [sesOpen, setSesOpen] = useState(false)
+  const sesBtnRef = useRef<HTMLButtonElement>(null)
 
   const scrollToBottom = (smooth = false) => {
     const el = scrollRef.current
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
   }
 
-  // 切换 Agent 时恢复到底部（滚动位置随会话保留由消息内容决定，简化处理）
+  // 切换 Agent 或会话时恢复到底部
   useEffect(() => {
     scrollToBottom()
     setNearBottom(true)
     setNewCount(0)
-  }, [selectedId])
+  }, [selectedId, activeSesId])
 
   // 新内容到达：底部附近跟随；否则计数提示
   const lastLen = messages.length
@@ -93,6 +103,14 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           </div>
           <div className="sub" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <StatusDot status={agent.status} /> {statusText(agent.status)} ·{' '}
+          <button
+            ref={sesBtnRef}
+            className={`model-chip ${sesOpen ? 'open' : ''}`}
+            onClick={() => setSesOpen((v) => !v)}
+            title="会话列表：切换 / 新建 / 重命名 / 删除（草稿随会话保留）"
+          >
+            <Icon name="file" size={11} /> {act ? act.title : '会话'} <Icon name="chevron" size={10} />
+          </button>
           {canSwitchModel ? (
             <button
               className="model-chip"
@@ -136,6 +154,18 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
       {switchOpen && <ModelSwitchModal agent={agent} onClose={() => setSwitchOpen(false)} />}
       {toolsOpen && <ToolsGrantModal agent={agent} onClose={() => setToolsOpen(false)} />}
       {dirOpen && <WorkDirModal agent={agent} onClose={() => setDirOpen(false)} />}
+      {sesOpen && (
+        <SessionPanel
+          list={sessionList ?? []}
+          activeId={act?.id}
+          anchorRef={sesBtnRef}
+          onSwitch={(id) => { switchSession(agent.id, id); setSesOpen(false) }}
+          onNew={() => { newSession(agent.id); setSesOpen(false) }}
+          onRename={(id, title) => renameSession(agent.id, id, title)}
+          onDelete={(id) => deleteSession(agent.id, id)}
+          onClose={() => setSesOpen(false)}
+        />
+      )}
 
       {homeDraft.trim() && (
         <div style={{
@@ -230,6 +260,107 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
           {msg.model && ` · ${msg.model}`}
           {msg.attachments && msg.attachments.length > 0 && ` · 附件 ${msg.attachments.length} 个${msg.attachments[0].size ? `（${fmtSize(msg.attachments[0].size)}）` : ''}`}
         </div>
+      </div>
+    </div>
+  )
+}
+
+/** 会话面板：列表 / 切换 / 重命名 / 删除（fixed 定位防滚动容器裁切；空间不足自动上翻） */
+function SessionPanel({ list, activeId, anchorRef, onSwitch, onNew, onRename, onDelete, onClose }: {
+  list: AgentSession[]
+  activeId?: string
+  anchorRef: React.RefObject<HTMLButtonElement | null>
+  onSwitch: (id: string) => void
+  onNew: () => void
+  onRename: (id: string, title: string) => void
+  onDelete: (id: string) => void
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+
+  // 定位：锚点下方 8px；下方空间不足时上翻
+  useEffect(() => {
+    const anchor = anchorRef.current
+    if (!anchor) return
+    const r = anchor.getBoundingClientRect()
+    const needH = Math.min(340, list.length * 54 + 88)
+    const top = window.innerHeight - r.bottom >= needH ? r.bottom + 8 : Math.max(12, r.top - needH - 8)
+    setPos({ left: Math.max(12, Math.min(r.left, window.innerWidth - 304)), top })
+  }, [anchorRef, list.length])
+
+  // Escape 关闭；点击面板/锚点之外关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (ref.current?.contains(t) || anchorRef.current?.contains(t)) return
+      onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('mousedown', onDown)
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('mousedown', onDown) }
+  }, [anchorRef, onClose])
+
+  const commitEdit = () => {
+    if (editingId && editText.trim()) onRename(editingId, editText)
+    setEditingId(null)
+  }
+
+  if (!pos) return null
+  return (
+    <div ref={ref} className="ses-panel" style={pos} role="menu" aria-label="会话列表">
+      <div className="ses-head">
+        <span>会话（{list.length}）</span>
+        <button className="ses-new" onClick={onNew}><Icon name="plus" size={12} /> 新会话</button>
+      </div>
+      <div className="ses-list">
+        {list.map((s) => (
+          <div
+            key={s.id}
+            className={`ses-item ${s.id === activeId ? 'active' : ''}`}
+            onClick={() => { if (editingId !== s.id) onSwitch(s.id) }}
+          >
+            {editingId === s.id ? (
+              <input
+                autoFocus
+                className="ses-edit"
+                value={editText}
+                maxLength={40}
+                onChange={(e) => setEditText(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitEdit()
+                  if (e.key === 'Escape') setEditingId(null)
+                }}
+                onBlur={commitEdit}
+              />
+            ) : (
+              <>
+                <div className="ses-meta">
+                  <div className="ses-title">{s.title}</div>
+                  <div className="ses-sub">{s.messages.length} 条 · {fmtTime(s.createdAt)}</div>
+                </div>
+                <button
+                  className="ses-act"
+                  title="重命名"
+                  onClick={(e) => { e.stopPropagation(); setEditingId(s.id); setEditText(s.title) }}
+                >
+                  <Icon name="edit" size={12} />
+                </button>
+                <button
+                  className="ses-act danger"
+                  title="删除会话"
+                  onClick={(e) => { e.stopPropagation(); onDelete(s.id) }}
+                >
+                  <Icon name="trash" size={12} />
+                </button>
+              </>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   )

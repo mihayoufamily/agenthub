@@ -23,6 +23,8 @@ interface UiState {
   toasts: ToastItem[]
   switchHud: string | null
   bootError: string | null
+  /** 新版本提示横幅（更新检查发现新版本时置位；用户忽略后清除） */
+  updateBanner: { version: string; url: string } | null
 
   setScreen: (s: Screen) => void
   setSplashStage: (s: SplashStage) => void
@@ -35,6 +37,7 @@ interface UiState {
   dismissToast: (id: string) => void
   setSwitchHud: (t: string | null) => void
   setBootError: (e: string | null) => void
+  setUpdateBanner: (b: { version: string; url: string } | null) => void
 }
 
 export const useUi = create<UiState>()((set) => ({
@@ -47,6 +50,7 @@ export const useUi = create<UiState>()((set) => ({
   toasts: [],
   switchHud: null,
   bootError: null,
+  updateBanner: null,
 
   setScreen: (s) => set({ screen: s }),
   setSplashStage: (s) => set({ splashStage: s }),
@@ -64,5 +68,6 @@ export const useUi = create<UiState>()((set) => ({
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   setSwitchHud: (t) => set({ switchHud: t }),
-  setBootError: (e) => set({ bootError: e })
+  setBootError: (e) => set({ bootError: e }),
+  setUpdateBanner: (b) => set({ updateBanner: b })
 }))

@@ -16,6 +16,7 @@
     "build:main": "tsc -p tsconfig.build-main.json",
     "build:renderer": "node scripts/build-renderer.mjs",
     "build": "npm run typecheck && npm run build:main && npm run build:renderer",
+    "test:e2e": "node tests/e2e/local.mjs",
     "pack:portable": "node scripts/pack-portable.mjs",
     "dist": "npm run build && electron-builder --win"
   },
