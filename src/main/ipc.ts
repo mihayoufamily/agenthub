@@ -20,7 +20,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     chrome: process.versions.chrome,
     node: process.versions.node,
     platform: `Windows ${process.getSystemVersion()}`,
-    userDataPath: app.getPath('userData')
+    userDataPath: app.getPath('userData'),
+    documentsPath: app.getPath('documents')
   }))
 
   ipcMain.handle('app:openDataFolder', () => {
@@ -176,7 +177,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return cli.testConnection(name)
   })
 
-  ipcMain.handle('cli:chat', async (_e, name: string, opts: cli.CliChatOptions, reqId: string, messages: { role: string; content: string }[]) => {
+  ipcMain.handle('cli:chat', async (_e, name: string, opts: cli.CliChatOptions, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[]) => {
     if (!cli.isKnownCli(name)) {
       getWin()?.webContents.send('model:event', { reqId, type: 'error', message: `未知 CLI：${name}` })
       return { ok: false }
@@ -190,6 +191,12 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   ipcMain.handle('cli:cancel', (_e, reqId: string) => {
     cli.cancelChat(reqId)
     return { ok: true }
+  })
+
+  // 模型清单：可枚举的 CLI 返回列表（CodeBuddy 解析 --help，Codex 读 catalog），其余如实说明
+  ipcMain.handle('cli:models', (_e, name: string) => {
+    if (!cli.isKnownCli(name)) return { ok: false, message: `未知 CLI：${name}` }
+    return cli.listModels(name)
   })
 
   // ---------- 对话框 ----------

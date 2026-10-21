@@ -48,9 +48,9 @@ const SYSTEM_PROMPTS: Record<WorkflowRole, string> = {
 }
 
 const EXEC_NO_TOOLS = '当前接入为纯文本模型（无本机工具执行权限）：如任务涉及本机操作，请产出可直接使用的完整文本成果（方案/代码/文案等），并如实说明无法代为执行的部分，绝不虚构已执行的操作。'
-const EXEC_WITH_TOOLS = '当前已授权文件工具：可在指定目录内读取/写入/列出/删除（回收站）/移动文件。请优先用工具产出真实文件产物（代码、文档等）；工具无法完成的部分如实说明，绝不虚构已执行的操作。'
+const EXEC_WITH_TOOLS = '当前已授权文件工具：可在指定目录内读取/写入/列出/删除（回收站）/移动文件，可递归文本搜索、通配符查找文件、精准替换片段。请优先用工具产出真实文件产物（代码、文档等）；工具无法完成的部分如实说明，绝不虚构已执行的操作。'
 
-export function buildRoleMessages(role: WorkflowRole, ctx: RunContext, execTools?: { dir: string; allowCommands?: boolean }): { system: string; user: string } {
+export function buildRoleMessages(role: WorkflowRole, ctx: RunContext, execTools?: { dir: string; allowCommands?: boolean; allowWeb?: boolean }): { system: string; user: string } {
   const lines: string[] = [`任务目标：${ctx.goal}`]
   if (ctx.attachmentText) {
     lines.push(`\n用户提供的文本附件（真实文件内容，规划时请据此拆解）：${ctx.attachmentText}`)
@@ -85,6 +85,9 @@ export function buildRoleMessages(role: WorkflowRole, ctx: RunContext, execTools
     system = system.replace(EXEC_NO_TOOLS, EXEC_WITH_TOOLS)
     if (execTools.allowCommands) {
       system += '\n此外已授权执行 shell 命令（工作目录为授权目录，超时 60 秒）：可用于构建、测试等产物验证。'
+    }
+    if (execTools.allowWeb) {
+      system += '\n此外已授权联网：web_fetch 可抓取网页（HTML 自动转文本）、web_search 可搜索（DuckDuckGo）。需要查资料/引用最新信息时使用。'
     }
   }
   return { system, user: lines.join('\n') }

@@ -55,7 +55,17 @@ npm run dist            # 生成 NSIS 安装包（需要环境能运行 electron
 - 数据持久化：配置带版本号 + 迁移、会话与任务记录独立 JSON、API Key 用系统安全凭据存储（safeStorage 加密）、配置导出不含任何秘密
 - Agent 扫描：仅查 PATH 上的常见 CLI，不读任何软件配置/密钥；发现 ≠ 接入（如实标注）
 - 模型 API（OpenAI 兼容）：真实连接测试 + 流式对话 + 取消；无 Key 时如实报错
-- 本地 CLI Agent 执行适配器：**arkcli 已内置并本机实测**（`+chat` 流式 NDJSON 解析、真实推理、取消、用量统计；凭据由 arkcli 自身完成，本应用不读取任何密钥；支持 Agent 级工作目录边界）；claude / codex 按官方 CLI 规范实现（stream-json / exec --json），**未在本机实测**，未安装时如实报错
+- 本地 CLI Agent 执行适配器（统一 `CliTarget`：真 exe + 前置参数 + 环境变量，非 PATH 安装按"已知位置 + 盘符浅扫描"定位；spawn 不经 shell、stdin 关闭）：
+  - **arkcli 本机实测**：`+chat` 流式 NDJSON、真实推理、取消、用量统计
+  - **Codex CLI 本机实测**：`exec --json` JSONL；支持应用安装形态 `%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe`；上游错误（如 429）如实透出
+  - **CodeBuddy Code 本机实测**：官方 npm 包 `@tencent-ai/codebuddy-code` 优先，WorkBuddy 内置 lite 版兜底；`-p --output-format stream-json`；未登录时原样返回 `Authentication required`
+  - **DeepSeek Harness headless 本机实测**：`dsh headless`（纯文本、非流式）；缺模型凭据时原样返回 `MISSING_CREDENTIAL`
+  - **claude 未实测**：按官方 CLI 规范实现，未安装时如实报错
+  - 共同点：凭据全部由 CLI 自身管理，本应用不读取任何密钥；支持 Agent 级工作目录边界
+- CLI 工具事件透传：CodeBuddy/Claude 的 tool_use/tool_result、codex 的命令执行与文件变更实时进入执行卡片（单聊与工作流，产物可登记）；按角色区分的调用超时（规划 3 分钟/审核 5 分钟/执行 10 分钟，超时保留已产出）与 90 秒无输出心跳提示
+- 模型 Agent 思考模型支持（DeepSeek/方舟等）：reasoning_content 采集、折叠展示、多轮按官方协议传回（含工具循环）
+- 错误信息中文化：限流/未登录/缺凭据/权限拒绝/认证失败等常见错误映射为人话提示 + 原文折叠
+- 工作流三角色同源警示：审核方与执行方同源时在确认门与交付卡片黄字提示（不阻止）
 - 应用内更新检查（GitHub Releases 比对版本，手动下载模式，不自动安装）与开机自启开关（设置 → 关于）
 - 应用图标与打包资源：Logo 同源 ico（256/48/32/16），NSIS 与便携版均已接入
 - 本地 E2E（`npm run test:e2e`，CDP 驱动便携版）：启动序列/演示对话/多会话/设置入口断言（见 tests/e2e/README.md）
@@ -67,7 +77,9 @@ npm run dist            # 生成 NSIS 安装包（需要环境能运行 electron
 
 ### 未实现 / 已知限制 ❌
 
-- **claude / codex CLI 适配器未实测**：适配层已按官方 CLI 规范实现（见 docs/AGENT_ADAPTERS.md），但本机未安装这两个 CLI，无法端到端验证；arkcli 适配器已本机实测
+- **claude CLI 适配器未实测**：适配层已按官方 CLI 规范实现（见 docs/AGENT_ADAPTERS.md），但本机未安装，无法端到端验证；arkcli / codex / codebuddy / dsh 四个适配器均已本机实测
+- **CodeBuddy CLI 需先登录**：装官方 CLI（`npm i -g @tencent-ai/codebuddy-code`）后在终端执行 `codebuddy` → `/login`（或设 `CODEBUDDY_API_KEY`）。WorkBuddy 内置的 lite 版**没有交互模式**，无法在其中登录，但它与官方 CLI 共享 `~/.codebuddy` 凭据，登录后同样可用
+- **DSH headless 需模型凭据**：`dsh headless` 走 DeepSeek Harness 的凭据服务，启动环境里需要有 `DEEPSEEK_API_KEY`（或在 DSH 的 web profile Models 页写入），否则返回 `MISSING_CREDENTIAL`；且它的输出是纯文本非流式，卡片内容在任务结束时一次性出现
 - **electron-builder 打包**：依赖其内置的 Go 二进制（app-builder）；在本项目开发机上 Go 二进制被系统安全策略拦截，故本机验证走 `pack:portable`（纯 JS）。在正常机器上 `npm run dist` 可用，但**未在其他机器实测**
 - **Chromium 沙箱兼容开关**：部分装有大数字类安全软件的机器上，Electron 的 GPU/渲染沙箱子进程会被拦截崩溃（0xC0000005）。本应用提供 `AGENTHUB_NO_SANDBOX=1` 环境变量作为兼容模式（降低渲染进程隔离；本应用只加载本地页面，无远程内容）。正常机器无需开启
 - 自动更新：仅"检查 + 提示"（发现新版本显示横幅，用户前往 Releases 手动下载），不自动下载或安装

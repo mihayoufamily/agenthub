@@ -56,7 +56,8 @@ function makeCard(role: RoleCard['role'], round: number, cfg: WorkflowConfig, de
     id: uid('card'),
     role,
     agentName: roleName.agentName,
-    model: roleName.model,
+    // 角色级模型覆盖优先展示：否则改了覆盖后卡片仍显示 Agent 默认模型，会误导（覆盖才是真实生效值）
+    model: roleName.modelOverride ?? roleName.model,
     round,
     status: 'streaming',
     title: role === 'planner' ? '规划' : role === 'executor' ? '执行' : role === 'reviewer' ? '审核' : '交付',
@@ -114,7 +115,7 @@ function agentChatToCard(
   user: string,
   cardId: string,
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
-  opts?: { maxTokens?: number; modelOverride?: string }
+  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number }
 ): Promise<{ ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }> {
   const reqId = uid('req')
   activeModelReqId = reqId
@@ -161,6 +162,14 @@ function agentChatToCard(
             })
           }
         })
+      } else if (ev.type === 'notice' && ev.text) {
+        // CLI 心跳提示（如 90 秒无输出可能卡在权限审批）：进入卡片过程，不打断任务
+        setRun((r) => ({
+          ...r,
+          cards: updateCard(r.cards, cardId, {
+            process: [...(r.cards.find((c) => c.id === cardId)?.process ?? []), { kind: 'log' as const, text: ev.text!, ts: Date.now() }]
+          })
+        }))
       } else if (ev.type === 'usage' && ev.usage?.tokens) {
         let exceeded = false
         setRun((r) => {
@@ -186,7 +195,7 @@ function agentChatToCard(
     ]
     const launched =
       agent.kind === 'cli' && agent.cliConfig
-        ? bridge.cli.chat(agent.cliConfig.cli, { model: opts?.modelOverride ?? agent.cliConfig.model, exePath: agent.cliConfig.exePath, workDir: agent.cliConfig.workDir }, reqId, messages)
+        ? bridge.cli.chat(agent.cliConfig.cli, { model: opts?.modelOverride ?? agent.cliConfig.model, exePath: agent.cliConfig.exePath, workDir: agent.cliConfig.workDir, timeoutMs: opts?.cliTimeoutMs }, reqId, messages)
         : agent.modelConfig
           ? bridge.models.chat(
               opts?.modelOverride ? { ...agent.modelConfig, modelId: opts.modelOverride } : agent.modelConfig,
@@ -263,7 +272,9 @@ async function runStage(
     return null
   }
   const { system, user } = buildRoleMessages(role, ctx, agent.tools)
-  const res = await agentChatToCard(agent, system, user, card.id, setRun, { maxTokens: cfg.maxTokens, modelOverride: roleCfg.modelOverride })
+  // CLI 超时按角色区分：规划 3 分钟 / 审核 5 分钟 / 执行 10 分钟（把无限挂起变有界失败）
+  const cliTimeoutMs = role === 'planner' ? 3 * 60_000 : role === 'reviewer' ? 5 * 60_000 : 10 * 60_000
+  const res = await agentChatToCard(agent, system, user, card.id, setRun, { maxTokens: cfg.maxTokens, modelOverride: roleCfg.modelOverride, cliTimeoutMs })
   if (isCancelled()) return null
   if (!res.ok) {
     if (res.tokenLimit) {

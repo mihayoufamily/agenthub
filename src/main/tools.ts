@@ -1,8 +1,9 @@
-// 模型 Agent 工具层：沙箱文件操作 + 命令执行（Agent 级授权制）
+// 模型 Agent 工具层：沙箱文件操作 + 编辑增强 + 命令执行 + 联网（Agent 级授权制）
 // 所有文件路径在沙箱根（ToolGrant.dir）内规范化校验，逃逸即拒绝；
 // 命令以沙箱根为工作目录运行，超时与输出有上限，全程记录可追溯。
+// 联网工具（web_fetch/web_search）需用户在授权面板单独开启（allowWeb）。
 import { promises as fs } from 'node:fs'
-import { resolve as resolvePath, dirname, sep } from 'node:path'
+import { resolve as resolvePath, dirname, sep, relative } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { ToolGrant } from '../shared/types'
 
@@ -12,9 +13,78 @@ const MAX_LIST = 500 // 列目录条目上限
 const MAX_OUTPUT = 100 * 1024 // 命令输出/工具结果上限
 export { MAX_OUTPUT }
 const CMD_TIMEOUT_MS = 60_000 // 命令超时
+const MAX_SEARCH_HITS = 100 // 文本搜索匹配上限
+const MAX_GLOB = 200 // 通配符匹配文件上限
+const WEB_TIMEOUT_MS = 20_000 // 联网请求超时
+const MAX_WEB_BODY = 200 * 1024 // 联网响应体上限
+/** 遍历时跳过的目录（对齐常见工程习惯，避免把依赖/版本库翻出来） */
+const SKIP_DIRS = new Set(['node_modules', '.git', '.workbuddy', 'dist', 'out', 'release'])
 
-/** OpenAI function calling 工具定义（发给模型的 schema；命令执行仅授权后可见） */
-export function toolDefs(allowCommands: boolean): unknown[] {
+/** 简易通配符转正则：支持 **（跨目录）、*（目录内）、?（单字符）；不引入 minimatch 依赖 */
+function globToRegex(g: string): RegExp | null {
+  if (!g.trim()) return null
+  let re = ''
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i]
+    if (c === '*') {
+      if (g[i + 1] === '*') {
+        // **/ → 任意层级（含零层）；裸 ** → 任意字符
+        if (g[i + 2] === '/') { re += '(?:.*/)?'; i += 2 } else { re += '.*'; i += 1 }
+      } else re += '[^/]*'
+    } else if (c === '?') re += '[^/]'
+    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  }
+  try { return new RegExp(`^${re}$`, 'i') } catch { return null }
+}
+
+/** 递归收集沙箱内全部文件的相对路径（跳过 SKIP_DIRS；上限保护） */
+async function walkRelPaths(root: string, dir: string, out: string[], limit = 5000): Promise<void> {
+  if (out.length >= limit) return
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+  for (const e of entries) {
+    if (out.length >= limit) return
+    if (e.name.startsWith('.') && SKIP_DIRS.has(e.name.toLowerCase())) continue
+    const abs = resolvePath(dir, e.name)
+    if (e.isDirectory()) {
+      if (SKIP_DIRS.has(e.name.toLowerCase())) continue
+      await walkRelPaths(root, abs, out, limit)
+    } else if (e.isFile()) {
+      out.push(relative(root, abs).replace(/\\/g, '/'))
+    }
+  }
+}
+
+/** HTML 粗转文本：剥 script/style/标签、基础实体解码（轻量，不做完整 markdown 化） */
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/td)[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n\s*/g, '\n')
+    .trim()
+}
+
+/** 校验外链 URL：仅 http/https（防 file:// 等本地协议与注入） */
+function safeWebUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  try {
+    const u = new URL(raw.trim())
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+    return u.toString()
+  } catch { return null }
+}
+
+/** OpenAI function calling 工具定义（发给模型的 schema；命令执行与联网仅授权后可见） */
+export function toolDefs(allowCommands: boolean, allowWeb: boolean): unknown[] {
   const defs: unknown[] = [
     {
       type: 'function',
@@ -81,6 +151,51 @@ export function toolDefs(allowCommands: boolean): unknown[] {
           required: ['from', 'to']
         }
       }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'search_files',
+        description: '在沙箱目录内递归搜索文本（类似 grep）：返回 文件:行号: 匹配行。可用 glob 过滤文件范围',
+        parameters: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: '搜索的文本片段（或正则，需 is_regex=true）' },
+            is_regex: { type: 'boolean', description: '默认 false 按普通文本搜索；true 时 pattern 按正则解析（非法正则会被拒绝）' },
+            glob: { type: 'string', description: '可选文件过滤，如 "**/*.md" 仅搜 markdown；支持 ** * ?' }
+          },
+          required: ['pattern']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'glob_files',
+        description: '按通配符列出沙箱目录内匹配的文件（支持 ** * ?，如 "src/**/*.ts"）',
+        parameters: {
+          type: 'object',
+          properties: { pattern: { type: 'string', description: '通配符模式，如 "**/*.md"' } },
+          required: ['pattern']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'replace_in_file',
+        description: '在沙箱内某文件中做精准文本替换：默认要求目标片段在文件中唯一（出现多次会拒绝，需更长上下文或 replace_all）',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: '相对沙箱根的路径' },
+            find: { type: 'string', description: '要查找的原文（含足够上下文以保证唯一）' },
+            replace: { type: 'string', description: '替换后的文本' },
+            replace_all: { type: 'boolean', description: '默认 false；true 时替换全部出现' }
+          },
+          required: ['path', 'find', 'replace']
+        }
+      }
     }
   ]
   if (allowCommands) {
@@ -88,7 +203,7 @@ export function toolDefs(allowCommands: boolean): unknown[] {
       type: 'function',
       function: {
         name: 'run_command',
-        description: '在沙箱目录内执行一条 shell 命令（工作目录为沙箱根；超时 60 秒）。用于构建、测试产物等',
+        description: '在沙箱目录内执行一条 shell 命令（Windows 系统，shell 为 cmd.exe；工作目录为沙箱根；超时 60 秒）。用于构建、测试、环境检查等。注意：请使用 Windows 兼容的命令语法（如 where 而非 command -v）',
         parameters: {
           type: 'object',
           properties: { command: { type: 'string', description: '完整命令行' } },
@@ -96,6 +211,34 @@ export function toolDefs(allowCommands: boolean): unknown[] {
         }
       }
     })
+  }
+  if (allowWeb) {
+    defs.push(
+      {
+        type: 'function',
+        function: {
+          name: 'web_fetch',
+          description: '抓取一个 http/https 网页并转为纯文本（HTML 会剥离标签；JSON/纯文本原样返回）',
+          parameters: {
+            type: 'object',
+            properties: { url: { type: 'string', description: '完整 URL（http/https）' } },
+            required: ['url']
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'web_search',
+          description: '联网搜索（DuckDuckGo，无需 Key）：返回前 8 条结果的标题、链接与摘要',
+          parameters: {
+            type: 'object',
+            properties: { query: { type: 'string', description: '搜索词' } },
+            required: ['query']
+          }
+        }
+      }
+    )
   }
   return defs
 }
@@ -182,6 +325,149 @@ export async function execTool(
         await fs.rename(from, to)
         return { ok: true, output: '已移动' }
       }
+      case 'search_files': {
+        const pattern = typeof args.pattern === 'string' ? args.pattern : ''
+        if (!pattern) return { ok: false, output: '拒绝：搜索内容为空' }
+        let matcher: RegExp
+        try {
+          matcher = args.is_regex === true
+            ? new RegExp(pattern, 'i')
+            : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+        } catch (e) {
+          return { ok: false, output: `拒绝：非法正则（${(e as Error).message}）` }
+        }
+        const root = resolvePath(grant.dir)
+        const gfilter = typeof args.glob === 'string' && args.glob.trim() ? globToRegex(args.glob) : null
+        const files: string[] = []
+        await walkRelPaths(root, root, files)
+        const hits: string[] = []
+        let scanned = 0
+        for (const rel of files) {
+          if (hits.length >= MAX_SEARCH_HITS) break
+          if (gfilter && !gfilter.test(rel)) continue
+          const abs = resolvePath(root, rel)
+          try {
+            const st = await fs.stat(abs)
+            if (st.size > MAX_READ) continue // 超大文件跳过（避免读爆）
+            const text = await fs.readFile(abs, 'utf8')
+            scanned += 1
+            const lines = text.split('\n')
+            for (let i = 0; i < lines.length; i++) {
+              if (hits.length >= MAX_SEARCH_HITS) break
+              if (matcher.test(lines[i])) {
+                const lineText = lines[i].length > 200 ? lines[i].slice(0, 200) + '…' : lines[i]
+                hits.push(`${rel}:${i + 1}: ${lineText.trim()}`)
+              }
+            }
+          } catch { /* 单文件读取失败跳过 */ }
+        }
+        return {
+          ok: true,
+          output: hits.length
+            ? `${hits.length} 处匹配（扫描 ${scanned} 个文本文件${hits.length >= MAX_SEARCH_HITS ? '，已达上限' : ''}）：\n${hits.join('\n')}`
+            : `未找到匹配（扫描 ${scanned} 个文本文件${gfilter ? '，过滤条件 ' + args.glob : ''}）`
+        }
+      }
+      case 'glob_files': {
+        const re = globToRegex(typeof args.pattern === 'string' ? args.pattern : '')
+        if (!re) return { ok: false, output: '拒绝：通配符模式为空或非法' }
+        const root = resolvePath(grant.dir)
+        const files: string[] = []
+        await walkRelPaths(root, root, files)
+        const matched = files.filter((f) => re.test(f))
+        const shown = matched.slice(0, MAX_GLOB)
+        return {
+          ok: true,
+          output: shown.length
+            ? `${matched.length} 个文件匹配${matched.length > MAX_GLOB ? `（仅显示前 ${MAX_GLOB}）` : ''}：\n${shown.join('\n')}`
+            : '没有匹配的文件'
+        }
+      }
+      case 'replace_in_file': {
+        const p = sandboxPath(grant, args.path)
+        if (!p) return { ok: false, output: '拒绝：路径越界或为空（仅限沙箱目录内）' }
+        const find = typeof args.find === 'string' ? args.find : ''
+        const replace = typeof args.replace === 'string' ? args.replace : ''
+        if (!find) return { ok: false, output: '拒绝：find 为空' }
+        let text: string
+        try {
+          text = await fs.readFile(p, 'utf8')
+        } catch {
+          return { ok: false, output: `读取失败：文件不存在或不可读` }
+        }
+        const count = text.split(find).length - 1
+        if (count === 0) return { ok: false, output: '未找到要替换的文本（find 在文件中不存在）' }
+        if (count > 1 && args.replace_all !== true) {
+          return { ok: false, output: `拒绝：目标片段出现 ${count} 次，不唯一。请提供更长上下文使其唯一，或传 replace_all=true 替换全部` }
+        }
+        const next = args.replace_all === true ? text.split(find).join(replace) : text.replace(find, replace)
+        if (next.length > MAX_WRITE) return { ok: false, output: `拒绝：替换后内容超过 ${MAX_WRITE / 1024}KB 上限` }
+        await fs.writeFile(p, next, 'utf8')
+        return { ok: true, output: `已替换 ${args.replace_all === true ? count : 1} 处`, writtenPath: p }
+      }
+      case 'web_fetch': {
+        if (!grant.allowWeb) return { ok: false, output: '拒绝：该 Agent 未授权联网' }
+        const url = safeWebUrl(args.url)
+        if (!url) return { ok: false, output: '拒绝：URL 为空或不是 http/https 链接' }
+        const { net } = require('electron') as typeof import('electron')
+        const res = await net.fetch(url, {
+          redirect: 'follow',
+          signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2', Accept: 'text/html,application/json,text/plain,*/*' }
+        }).catch((e: unknown) => ({ err: e as Error }))
+        if ('err' in res && res.err) return { ok: false, output: `请求失败：${res.err.message}` }
+        const r = res as Response
+        if (!r.ok) return { ok: false, output: `HTTP ${r.status} ${r.statusText}` }
+        let body = await r.text()
+        if (body.length > MAX_WEB_BODY) body = body.slice(0, MAX_WEB_BODY) + '…（内容超限已截断）'
+        const ct = r.headers.get('content-type') ?? ''
+        const text = ct.includes('html') ? htmlToText(body) : body
+        return { ok: true, output: text ? text.slice(0, MAX_OUTPUT) || '（空内容）' : '（空内容）' }
+      }
+      case 'web_search': {
+        if (!grant.allowWeb) return { ok: false, output: '拒绝：该 Agent 未授权联网' }
+        const query = typeof args.query === 'string' ? args.query.trim() : ''
+        if (!query) return { ok: false, output: '拒绝：搜索词为空' }
+        const { net } = require('electron') as typeof import('electron')
+        const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query)
+        const res = await net.fetch(url, {
+          redirect: 'follow',
+          signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2' }
+        }).catch((e: unknown) => ({ err: e as Error }))
+        if ('err' in res && res.err) return { ok: false, output: `搜索失败：${res.err.message}` }
+        const r = res as Response
+        if (!r.ok) return { ok: false, output: `搜索失败：HTTP ${r.status}` }
+        const html = await r.text()
+        // DuckDuckGo HTML 版结果解析（非官方接口，稳定性一般——如实标注）
+        const results: string[] = []
+        const linkRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
+        const snippetRe = /class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
+        const snippets: string[] = []
+        let sm: RegExpExecArray | null
+        while ((sm = snippetRe.exec(html)) && snippets.length < 8) snippets.push(htmlToText(sm[1]))
+        let lm: RegExpExecArray | null
+        let rank = 0
+        while ((lm = linkRe.exec(html)) && results.length < 8) {
+          rank += 1
+          const href = lm[1].replace(/^\/\/duckduckgo\.com\/l\/\?uddg=/, (m) => m) // 保留原始（可能是跳转链）
+          let target = href
+          try {
+            if (href.startsWith('//duckduckgo.com/l/?uddg=')) {
+              target = decodeURIComponent(href.split('uddg=')[1]?.split('&')[0] ?? href)
+            }
+          } catch { /* 解析失败用原链 */ }
+          const title = htmlToText(lm[2])
+          const snip = snippets[rank - 1] ?? ''
+          results.push(`${rank}. ${title}\n   ${target}\n   ${snip.slice(0, 160)}`)
+        }
+        return {
+          ok: true,
+          output: results.length
+            ? `搜索「${query}」前 ${results.length} 条结果（DuckDuckGo）：\n\n${results.join('\n\n')}`
+            : `搜索「${query}」无结果或页面结构变化（DuckDuckGo 非官方接口，可换 web_fetch 直接抓取）`
+        }
+      }
       case 'run_command': {
         if (!grant.allowCommands) return { ok: false, output: '拒绝：该 Agent 未授权执行命令' }
         const command = typeof args.command === 'string' ? args.command : ''
@@ -193,14 +479,24 @@ export async function execTool(
             windowsHide: true,
             timeout: CMD_TIMEOUT_MS
           })
-          let out = ''
+          // 输出按 Buffer 收集，结束后统一解码（避免多字节序列被 chunk 边界切断）
+          const chunks: Buffer[] = []
+          let total = 0
           const append = (b: Buffer | string) => {
-            if (out.length < MAX_OUTPUT) out += b.toString()
+            if (typeof b === 'string') { chunks.push(Buffer.from(b, 'utf8')); total += b.length; return }
+            if (total < MAX_OUTPUT) { chunks.push(b); total += b.length }
           }
           child.stdout?.on('data', append)
           child.stderr?.on('data', append)
           child.on('error', (e) => res({ ok: false, output: `启动失败：${e.message}` }))
           child.on('close', (code, signal) => {
+            // 中文 Windows 的 cmd 输出为 GBK（代码页 936）：先严格按 UTF-8 解码，失败则回退 GBK
+            let out: string
+            try {
+              out = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))
+            } catch {
+              try { out = new TextDecoder('gbk').decode(Buffer.concat(chunks)) } catch { out = Buffer.concat(chunks).toString('utf8') }
+            }
             if (out.length >= MAX_OUTPUT) out = out.slice(0, MAX_OUTPUT) + '…（输出已截断）'
             if (signal === 'SIGTERM' || signal === 'SIGKILL') {
               res({ ok: false, output: `命令超时（${CMD_TIMEOUT_MS / 1000}s）被终止。已产生的输出：\n${out || '（无）'}` })

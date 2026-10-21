@@ -1,4 +1,4 @@
-/* ===== 组件库样式 ===== */
+﻿/* ===== 组件库样式 ===== */
 
 /* ---- 按钮 ---- */
 .btn {
@@ -442,3 +442,21 @@
 .update-banner .ub-dismiss:hover { background: var(--hover, rgba(0,0,0,0.06)); color: var(--text); }
 @keyframes ub-in { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 :root[data-anim='off'] .update-banner, :root[data-motion='reduced'] .update-banner { animation: none; }
+
+/* ---- 思考过程块（思考模型 reasoning_content，折叠展示） ---- */
+.reasoning-block { margin: 4px 0 6px; }
+.reasoning-block .rb-head {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 10px; border: 1px solid var(--border, #e5ddcc); border-radius: 999px;
+  background: var(--surface, #fff); color: var(--text-2);
+  font-size: 11.5px; cursor: pointer;
+}
+.reasoning-block .rb-head:hover { border-color: var(--brand-amber, #b45309); color: var(--text); }
+.reasoning-block .rb-meta { color: var(--text-3); font-size: 10.5px; }
+.reasoning-block .rb-body {
+  margin: 6px 0; padding: 10px 12px; border-radius: 10px;
+  background: var(--bg, #f7f4ed); border: 1px dashed var(--border, #e5ddcc);
+  color: var(--text-2); font-size: 12px; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto;
+  font-family: inherit;
+}

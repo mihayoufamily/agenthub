@@ -133,7 +133,12 @@ async function main() {
     console.error(`[e2e] 未找到便携版：${EXE}（先 npm run build && npm run pack:portable 并同步）`)
     process.exit(2)
   }
-  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', detached: false })
+  // 从 Electron 应用派生的终端里，ELECTRON_RUN_AS_NODE 会被继承，导致被驱动的 exe
+  // 以 node 模式启动并报 "bad option: --remote-debugging-port"，因此启动前必须清掉
+  const env = { ...process.env }
+  delete env.ELECTRON_RUN_AS_NODE
+  delete env.ELECTRON_NO_ATTACH_CONSOLE
+  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', detached: false, env })
   let cdp
   try {
     // 等 DevTools 端点

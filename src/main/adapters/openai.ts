@@ -10,12 +10,12 @@ import { execTool, toolDefs, MAX_OUTPUT } from '../tools'
 /** 工具循环的对话消息（兼容 OpenAI tool 协议的扩展形状） */
 export type ChatMsg =
   | { role: 'system' | 'user'; content: string }
-  | { role: 'assistant'; content: string | null; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
+  | { role: 'assistant'; content: string | null; reasoning_content?: string; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
   | { role: 'tool'; content: string; tool_call_id: string }
 
 export interface ChatChunkEvent {
   reqId: string
-  type: 'delta' | 'done' | 'error' | 'usage' | 'tool'
+  type: 'delta' | 'reasoning' | 'done' | 'error' | 'usage' | 'tool' | 'notice'
   text?: string
   message?: string
   usage?: { tokens?: number }
@@ -29,6 +29,27 @@ const activeStreams = new Map<string, AbortController>()
 
 /** 工具调用轮数上限：防止模型无限循环调用工具 */
 const MAX_TOOL_ROUNDS = 16
+
+/**
+ * 错误信息中文化：常见 CLI / 模型接口错误 → 人话 + 原文（未命中时原样返回）。
+ * 只做提示语转换，不吞掉任何原始信息。
+ */
+export function humanizeError(raw: string): string {
+  const r = raw.trim()
+  const rules: [RegExp, string][] = [
+    [/429|rate.?limit|too many requests/i, '该模型正在限流：请换一个模型或稍后再试'],
+    [/authentication required|not logged in|请先登录|未登录/i, 'CLI 未登录：请在终端运行该 CLI 并完成登录（如 codebuddy 后输入 /login）'],
+    [/MISSING_CREDENTIAL|missing.{0,20}credential/i, '缺少模型凭据：请设置对应环境变量（如 DEEPSEEK_API_KEY）或先在该 CLI 中完成配置'],
+    [/permission.{0,30}denied|权限.{0,10}拒绝/i, 'CLI 拒绝了工具权限：非交互模式下没有审批界面（可调整其 permission-mode 设置）'],
+    [/\b401\b|unauthorized|invalid.{0,10}api.?key/i, '认证失败：API Key 无效或已过期，请检查后重新填写'],
+    [/\b404\b|not found/i, '接口地址或模型不存在：请检查 Base URL 与模型 ID'],
+    [/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|network/i, '网络连接失败：请检查网络或服务地址']
+  ]
+  for (const [re, text] of rules) {
+    if (re.test(r)) return `${text}\n（原文：${r.slice(0, 200)}）`
+  }
+  return r
+}
 
 function headers(cfg: CustomModelConfig, apiKey: string): Record<string, string> {
   return {
@@ -88,16 +109,19 @@ interface RoundResult {
   finish: 'stop' | 'tool_calls' | null
   toolCalls: AccToolCall[]
   usage?: { tokens?: number }
+  /** 思考模型本轮的思考内容（DeepSeek/方舟等协议：多轮须随 assistant 消息传回 reasoning_content） */
+  reasoning: string
 }
 
-/** 单轮对话请求（流式）：文本增量直发 onDelta；结束时返回工具调用与完成原因 */
+/** 单轮对话请求（流式）：文本增量直发 onDelta、思考增量直发 onReasoning；结束时返回工具调用与完成原因 */
 async function chatRound(
   cfg: CustomModelConfig,
   apiKey: string,
   messages: ChatMsg[],
   tools: unknown[] | undefined,
   onDelta: (t: string) => void,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onReasoning?: (t: string) => void
 ): Promise<RoundResult> {
   const url = joinUrl(cfg.baseUrl, '/chat/completions')
   const body = {
@@ -123,6 +147,7 @@ async function chatRound(
   const acc = new Map<number, AccToolCall>()
   let finish: RoundResult['finish'] = null
   let usage: { tokens?: number } | undefined
+  let reasoning = ''
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
@@ -139,6 +164,12 @@ async function chatRound(
         const choice = json.choices?.[0]
         const delta = choice?.delta
         if (typeof delta?.content === 'string' && delta.content) onDelta(delta.content)
+        // 思考模型的思考增量（reasoning_content）：收集并在事件流转发（UI 展示 + 多轮回传协议）
+        const rc = delta?.reasoning_content
+        if (typeof rc === 'string' && rc) {
+          reasoning += rc
+          onReasoning?.(rc)
+        }
         // 流式工具调用分片：按 index 拼接 id/name/arguments
         if (Array.isArray(delta?.tool_calls)) {
           for (const tc of delta.tool_calls) {
@@ -159,7 +190,8 @@ async function chatRound(
   return {
     finish,
     toolCalls: [...acc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v),
-    usage
+    usage,
+    reasoning
   }
 }
 
@@ -192,7 +224,7 @@ export function chatStream(
 ) {
   const ctrl = new AbortController()
   activeStreams.set(reqId, ctrl)
-  const tools = grant ? toolDefs(!!grant.allowCommands) : undefined
+  const tools = grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb) : undefined
 
   void (async () => {
     try {
@@ -200,7 +232,7 @@ export function chatStream(
       let tokens = 0
       let rounds = 0
       for (;;) {
-        const r = await chatRound(cfg, apiKey, convo, tools, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal)
+        const r = await chatRound(cfg, apiKey, convo, tools, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal, (t) => onEvent({ reqId, type: 'reasoning', text: t }))
         if (r.usage?.tokens) tokens += r.usage.tokens
         if (r.finish !== 'tool_calls' || !grant || r.toolCalls.length === 0) {
           if (tokens) onEvent({ reqId, type: 'usage', usage: { tokens } })
@@ -212,17 +244,18 @@ export function chatStream(
         if (rounds > MAX_TOOL_ROUNDS) {
           convo.push({ role: 'user', content: `（系统）已达到工具调用轮数上限（${MAX_TOOL_ROUNDS}），请直接给出最终答复。` })
           // 标记后继续：下一轮无 tool_calls 自然收束
-          const r2 = await chatRound(cfg, apiKey, convo, undefined, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal)
+          const r2 = await chatRound(cfg, apiKey, convo, undefined, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal, (t) => onEvent({ reqId, type: 'reasoning', text: t }))
           if (r2.usage?.tokens) tokens += r2.usage.tokens
           if (tokens) onEvent({ reqId, type: 'usage', usage: { tokens } })
           onEvent({ reqId, type: 'done' })
           activeStreams.delete(reqId)
           return
         }
-        // 记录 assistant 的工具调用消息，逐个执行并回传结果
+        // 记录 assistant 的工具调用消息（思考模型的 reasoning_content 随消息传回），逐个执行并回传结果
         convo.push({
           role: 'assistant',
           content: null,
+          ...(r.reasoning ? { reasoning_content: r.reasoning } : {}),
           tool_calls: r.toolCalls.map((t) => ({ id: t.id, type: 'function' as const, function: { name: t.name, arguments: t.args } }))
         })
         for (const tc of r.toolCalls) {
@@ -243,7 +276,7 @@ export function chatStream(
       if (err.name === 'AbortError') {
         onEvent({ reqId, type: 'done', message: '已取消' })
       } else {
-        onEvent({ reqId, type: 'error', message: err.message })
+        onEvent({ reqId, type: 'error', message: humanizeError(err.message) })
       }
       activeStreams.delete(reqId)
     }

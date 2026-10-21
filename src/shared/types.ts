@@ -6,7 +6,7 @@ export type ReviewMode = 'auto' | 'human'
 
 /** Agent 接入方式 */
 export type AgentKind = 'demo' | 'model' | 'cli'
-export type CliName = 'arkcli' | 'claude' | 'codex'
+export type CliName = 'arkcli' | 'claude' | 'codex' | 'codebuddy' | 'dsh'
 export type AgentConnStatus = 'disconnected' | 'available' | 'running' | 'awaiting' | 'failed'
 
 export interface AgentConfig {
@@ -29,12 +29,15 @@ export interface AgentConfig {
 
 /**
  * 模型 Agent 的工具授权（Agent 级授权制）。
- * dir 为沙箱根：read/write/list/delete/move 全部限制在其内（路径规范化后逃逸即拒绝）；
- * allowCommands 单独开关（默认关）：开启后 run_command 以 dir 为工作目录执行，超时与输出有上限。
+ * dir 为沙箱根：read/write/list/delete/move/search/glob/replace 全部限制在其内（路径规范化后逃逸即拒绝）；
+ * allowCommands 单独开关（默认关）：开启后 run_command 以 dir 为工作目录执行，超时与输出有上限；
+ * allowWeb 单独开关（默认关）：开启后 web_fetch/web_search 可访问外网（http/https）。
  */
 export interface ToolGrant {
   dir: string
   allowCommands?: boolean
+  /** 联网工具（web_fetch/web_search）授权；默认关，用户在授权面板单独开启 */
+  allowWeb?: boolean
 }
 
 /** 一次工具调用的执行记录（随消息保存，可追溯） */
@@ -98,6 +101,8 @@ export interface ChatMessage {
   handoff?: { fromAgentId: string; fromAgentName: string }
   /** 本条消息发送/回复时实际使用的模型（切换模型后仍可追溯） */
   model?: string
+  /** 思考模型的思考过程（reasoning_content；多轮对话需随 assistant 消息传回，UI 折叠展示） */
+  reasoning?: string
   /** 本次回复中的工具调用记录（文件读写/命令执行，随消息可追溯） */
   toolCalls?: ToolCall[]
 }
@@ -281,4 +286,6 @@ export interface AppInfo {
   node: string
   platform: string
   userDataPath: string
+  /** 系统文档目录（CLI Agent 未设工作目录时的默认落点） */
+  documentsPath: string
 }

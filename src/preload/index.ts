@@ -62,7 +62,9 @@ const api = {
   cli: {
     /** 本地连接测试（解析 exe + 版本命令，不联网） */
     test: (name: CliName) => ipcRenderer.invoke('cli:test', name) as Promise<{ ok: boolean; message: string; version?: string; exePath?: string }>,
-    chat: (name: CliName, opts: { model?: string; exePath?: string; workDir?: string }, reqId: string, messages: { role: string; content: string }[]) =>
+    /** 可枚举的模型清单（不可枚举时 ok=false，界面回退到手填） */
+    models: (name: CliName) => ipcRenderer.invoke('cli:models', name) as Promise<{ ok: boolean; models?: string[]; message?: string; source?: string }>,
+    chat: (name: CliName, opts: { model?: string; exePath?: string; workDir?: string; timeoutMs?: number }, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[]) =>
       ipcRenderer.invoke('cli:chat', name, opts, reqId, messages) as Promise<{ ok: boolean; message?: string }>,
     cancel: (reqId: string) => ipcRenderer.invoke('cli:cancel', reqId),
     /** 流式事件与 models 共用 model:event 通道（reqId 路由） */
@@ -76,7 +78,7 @@ const api = {
     test: (cfg: CustomModelConfig, apiKey: string) => ipcRenderer.invoke('model:test', cfg, apiKey) as Promise<ModelTestResult>,
     /** 列出接口真实可用的模型（切换模型用；凭据在主进程取，渲染层不经手） */
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
-    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string }[], opts?: { tools?: ToolGrant }) =>
+    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[], opts?: { tools?: ToolGrant }) =>
       ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts),
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
     /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */

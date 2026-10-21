@@ -6,6 +6,7 @@ import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
 import { useAgents } from './agents'
 import { useUi } from './ui'
+import { useSettings } from './settings'
 import { demoChatReply, demoHandoffNote } from '../lib/demo'
 
 interface SessionsState {
@@ -189,6 +190,18 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       set((s) => withActive(s, agentId, (ses) => ({ ...ses, messages: [...ses.messages, replyMsg] })))
       set((s) => ({ activeStreams: { ...s.activeStreams, [streamKey]: agentId } }))
 
+      // CLI Agent 工作目录兜底（存量 Agent 未设 workDir 时）：默认文档工作区并持久化告知——
+      // 不拦截对话，但绝不能让 CLI 在应用安装目录里执行（会污染程序文件）
+      let cliWorkDir = agent.cliConfig?.workDir
+      if (agent.kind === 'cli' && agent.cliConfig && !cliWorkDir) {
+        const docs = useSettings.getState().appInfo?.documentsPath
+        if (docs) {
+          cliWorkDir = `${docs}\\AgentHub-workspaces\\${agent.cliConfig.cli}`
+          useAgents.getState().updateAgent(agent.id, { cliConfig: { ...agent.cliConfig, workDir: cliWorkDir } })
+          useUi.getState().toast(`该 Agent 未设工作目录，已默认使用 ${cliWorkDir}（可在顶栏"目录"修改）`, 'warn')
+        }
+      }
+
       // 携带最近的历史作为上下文（过长截断；真实工作流任务的完整上下文由 workflow 角色注入）
       const HISTORY_WINDOW = 24
       // 文本附件内容拼入本次 user 消息（真实模型/CLI 均可收到；binary 附件只保留引用不发送）
@@ -197,9 +210,17 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         .map((a) => `\n\n[附件：${a.name}]\n${a.content}`)
         .join('')
       const history = (activeOf(get(), agentId)?.messages ?? [])
-        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位——
+        // 思考模型+tools 协议要求所有 assistant 带 reasoning_content，空占位会导致 400）
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.error && !m.demo && !m.streaming && m.id !== msgId)
         .slice(-HISTORY_WINDOW)
-        .map((m) => ({ role: m.role, content: m.id === userMsg.id ? m.text + attachmentText : m.text }))
+        .map((m) => ({
+          role: m.role,
+          content: m.id === userMsg.id ? m.text + attachmentText : m.text,
+          // 思考模型协议（DeepSeek/方舟官方样例）：assistant 消息总是带 reasoning_content 字段
+          // （无思考内容时为空串；非思考模型服务端会忽略该字段）
+          ...(m.role === 'assistant' ? { reasoning_content: m.reasoning ?? '' } : {})
+        }))
 
       let off = bridge.models.onEvent((ev) => {
         if (ev.reqId !== reqId) return
@@ -208,6 +229,15 @@ export const useSessions = create<SessionsState>()((set, get) => ({
             ...ses,
             messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + ev.text } : m))
           })))
+        } else if (ev.type === 'reasoning' && ev.text) {
+          // 思考模型的思考过程：追加到消息 reasoning 字段（UI 折叠展示；多轮对话回传协议）
+          set((s) => withActive(s, agentId, (ses) => ({
+            ...ses,
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, reasoning: (m.reasoning ?? '') + ev.text } : m))
+          })))
+        } else if (ev.type === 'notice' && ev.text) {
+          // CLI 心跳提示（如 90 秒无输出可能卡在权限审批）：toast 一次，不打断消息
+          useUi.getState().toast(ev.text, 'warn')
         } else if (ev.type === 'tool' && ev.toolCall) {
           // 工具调用执行记录：合并进当前回复消息（同 id 更新状态与结果，新 id 追加）
           const tc = ev.toolCall
@@ -223,12 +253,21 @@ export const useSessions = create<SessionsState>()((set, get) => ({
             })
           })))
         } else if (ev.type === 'error') {
-          set((s) => withActive(s, agentId, (ses) => ({
-            ...ses,
-            messages: ses.messages.map((m) =>
-              m.id === msgId ? { ...m, streaming: false, error: ev.message ?? '未知错误' } : m
-            )
-          })))
+          // 错误（含 HTTP 4xx，如模型名不合法）：同样结束流并清理 activeStreams，
+          // 否则流状态卡死、后续发送全部被"正在回复中"拒绝（实测踩坑）
+          set((s) => {
+            const activeStreams = { ...s.activeStreams }
+            delete activeStreams[streamKey]
+            return {
+              activeStreams,
+              ...withActive(s, agentId, (ses) => ({
+                ...ses,
+                messages: ses.messages.map((m) =>
+                  m.id === msgId ? { ...m, streaming: false, error: ev.message ?? '未知错误' } : m
+                )
+              }))
+            }
+          })
           useAgents.getState().setStatus(agentId, 'failed')
         } else if (ev.type === 'done') {
           set((s) => {
@@ -250,7 +289,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       })
 
       const r = agent.kind === 'cli'
-        ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath, workDir: agent.cliConfig!.workDir }, reqId, history)
+        ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath, workDir: cliWorkDir }, reqId, history)
         : await bridge.models.chat(agent.modelConfig!, reqId, history, agent.tools ? { tools: agent.tools } : undefined)
       if (!r.ok) {
         set((s) => {

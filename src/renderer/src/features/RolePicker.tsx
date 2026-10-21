@@ -7,6 +7,7 @@ import { useWorkflow } from '../stores/workflow'
 import { bridge } from '../lib/ipc'
 import { Avatar, StatusDot, statusText } from '../components/primitives'
 import { Icon } from '../components/Icons'
+import { CliModelOptions } from '../components/CliModels'
 import { cls } from '../lib/utils'
 
 export type RoleKey = 'planner' | 'executor' | 'reviewer'
@@ -116,6 +117,7 @@ function ModelSection({ role, agent }: { role: RoleKey; agent: AgentConfig }) {
     return (
       <div className="cp-models">
         <div className="cp-m-title">模型参数（CLI）</div>
+        <CliModelOptions cli={agent.cliConfig.cli} current={manual} onPick={setManual} />
         <div style={{ display: 'flex', gap: 6 }}>
           <input
             className="cp-input"
@@ -134,7 +136,7 @@ function ModelSection({ role, agent }: { role: RoleKey; agent: AgentConfig }) {
             应用
           </button>
         </div>
-        <div className="cp-note">作为 --model 参数传给 CLI；各 CLI 无统一查询接口，请参考其官方文档填写。</div>
+        <div className="cp-note">作为 --model 参数传给 CLI；上面是该 CLI 能枚举出的清单，点一下即可回填。</div>
       </div>
     )
   }

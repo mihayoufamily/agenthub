@@ -10,6 +10,7 @@ import { Avatar, StatusDot, statusText, CopyButton, Button } from '../components
 import { Composer } from '../components/Composer'
 import { Modal } from '../components/Modal'
 import { Icon } from '../components/Icons'
+import { CliModelOptions } from '../components/CliModels'
 import { fmtTime, fmtSize, cls } from '../lib/utils'
 
 /** 稳定空数组：避免 selector 每次返回新引用导致多余渲染 */
@@ -126,9 +127,9 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
             <button
               className="model-chip"
               onClick={() => setToolsOpen(true)}
-              title="文件/命令工具授权（沙箱目录、命令执行开关）"
+              title="文件/命令/联网工具授权（沙箱目录、命令执行开关、联网开关）"
             >
-              <Icon name="file" size={11} /> 工具{agent.tools ? '·已启用' : ''}
+              <Icon name="file" size={11} /> 工具{agent.tools ? `·${[agent.tools.allowCommands && '命令', agent.tools.allowWeb && '联网'].filter(Boolean).join('·') || '文件'}` : ''}
             </button>
           )}
           {agent.kind === 'cli' && agent.cliConfig && (
@@ -243,6 +244,7 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
         {msg.toolCalls && msg.toolCalls.length > 0 && msg.toolCalls.map((tc) => (
           <ToolCallCard key={tc.id} tc={tc} />
         ))}
+        {msg.reasoning && msg.reasoning.trim() && <ReasoningBlock text={msg.reasoning} streaming={msg.streaming && !msg.text} />}
         {(msg.text || !msg.toolCalls?.length) && (
           <div className={cls('bubble word-break')}>
             <MessageBody text={msg.text} />
@@ -461,16 +463,50 @@ function WelcomePanel({ agent }: { agent: AgentConfig }) {
   )
 }
 
+/** 思考过程块（思考模型 reasoning_content）：默认折叠，点击展开；流式期间显示进行中 */
+function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean }) {
+  const [open, setOpen] = useState(false)
+  const lines = text.split('\n').filter((l) => l.trim()).length
+  return (
+    <div className="reasoning-block">
+      <button className="rb-head" onClick={() => setOpen((v) => !v)} title="思考模型的思考过程（随消息保存，多轮对话传回 API）">
+        <Icon name={open ? 'chevron' : 'up'} size={11} />
+        <span>{streaming ? '思考中…' : '思考过程'}</span>
+        <span className="rb-meta">{streaming ? `${text.length} 字` : `${lines} 行 · ${text.length} 字`}</span>
+      </button>
+      {open && <pre className="rb-body">{text}</pre>}
+    </div>
+  )
+}
+
 /** 工具调用卡片：真实执行的文件读写/命令记录（状态、参数、结果可展开） */
 function ToolCallCard({ tc }: { tc: ToolCall }) {
   const [open, setOpen] = useState(false)
   const TOOL_TEXT: Record<string, string> = {
+    // AgentHub 模型 Agent 沙箱工具
     read_file: '读取文件',
     write_file: '写入文件',
     list_dir: '列出目录',
     delete_file: '删除（回收站）',
     move: '移动/重命名',
-    run_command: '执行命令'
+    run_command: '执行命令',
+    search_files: '搜索文本',
+    glob_files: '查找文件',
+    replace_in_file: '替换内容',
+    web_fetch: '抓取网页',
+    web_search: '联网搜索',
+    // CLI Agent 透传（Claude Code / CodeBuddy 的工具名 + codex 的事件）
+    Read: '读取文件',
+    Write: '写入文件',
+    Edit: '编辑文件',
+    Bash: '执行命令',
+    Glob: '查找文件',
+    Grep: '搜索文本',
+    Task: '子任务',
+    WebFetch: '抓取网页',
+    WebSearch: '联网搜索',
+    TodoWrite: '待办清单',
+    file_change: '文件变更'
   }
   const argLine = Object.entries(tc.args)
     .map(([k, v]) => `${k}: ${v.length > 60 ? v.slice(0, 60) + '…' : v}`)
@@ -513,12 +549,15 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   const [enabled, setEnabled] = useState(!!agent.tools)
   const [dir, setDir] = useState(agent.tools?.dir ?? '')
   const [allowCommands, setAllowCommands] = useState(!!agent.tools?.allowCommands)
+  const [allowWeb, setAllowWeb] = useState(!!agent.tools?.allowWeb)
 
   const save = () => {
-    const tools = enabled && dir.trim() ? { dir: dir.trim(), allowCommands } : undefined
+    const tools = enabled && dir.trim() ? { dir: dir.trim(), allowCommands, allowWeb } : undefined
     updateAgent(agent.id, { tools })
     useUi.getState().toast(
-      tools ? `已启用文件工具（沙箱目录：${tools.dir}${tools.allowCommands ? '，允许执行命令' : ''}）` : '已关闭文件工具，恢复纯对话',
+      tools
+        ? `已启用工具（沙箱：${tools.dir}${tools.allowCommands ? '，命令' : ''}${tools.allowWeb ? '，联网' : ''}）`
+        : '已关闭文件工具，恢复纯对话',
       'ok'
     )
     onClose()
@@ -543,7 +582,7 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
           <span style={{ lineHeight: 1.6 }}>
             <b>启用文件工具</b>
             <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
-              开启即授权该模型在沙箱目录内：读/写/列出/删除（回收站）/移动文件。未开启时为纯对话（如实无文件能力）。所有调用过程在对话中如实展示并随记录保存。
+              开启即授权该模型在沙箱目录内：读/写/列出/删除（回收站）/移动文件，以及文本搜索、通配符查找、精准替换。未开启时为纯对话（如实无文件能力）。所有调用过程在对话中如实展示并随记录保存。
             </div>
           </span>
         </label>
@@ -575,6 +614,15 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
                 <b>允许执行命令</b>（默认关）
                 <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
                   开启后模型可在沙箱目录内执行 shell 命令（工作目录固定为沙箱根，超时 60 秒、输出有上限）。用于构建/测试产物；每条命令与输出都会在对话中展示。风险高于文件读写，请谨慎开启。
+                </div>
+              </span>
+            </label>
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
+              <input type="checkbox" checked={allowWeb} onChange={(e) => setAllowWeb(e.target.checked)} style={{ marginTop: 3 }} />
+              <span style={{ lineHeight: 1.6 }}>
+                <b>允许联网</b>（默认关）
+                <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                  开启后模型可抓取网页（web_fetch，HTML 自动转文本）与联网搜索（web_search，DuckDuckGo 无需 Key、非官方接口稳定性一般）。仅允许 http/https，响应大小与超时有限制；每次请求在对话中展示。
                 </div>
               </span>
             </label>
@@ -690,8 +738,9 @@ function ModelSwitchModal({ agent, onClose }: { agent: AgentConfig; onClose: () 
       >
         <div style={{ paddingBottom: 6 }}>
           <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, lineHeight: 1.6 }}>
-            该值作为 --model 参数传给 CLI；留空则使用 CLI 自身配置的默认模型。无法在此列出 CLI 支持的模型清单（各 CLI 无统一查询接口），请参考其官方文档填写。
+            该值作为 --model 参数传给 CLI；留空则使用 CLI 自身配置的默认模型。下面列出的是该 CLI 自己能枚举出的清单（不可枚举时只能手填）。
           </div>
+          <CliModelOptions cli={agent.cliConfig.cli} current={manual} onPick={setManual} />
           <div className="form-row">
             <label>模型参数（可选）</label>
             <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="留空使用 CLI 默认模型" />

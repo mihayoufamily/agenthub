@@ -16,6 +16,24 @@ const STAGE_TEXT: Record<Stage, string> = {
   delivering: '交付中'
 }
 
+/**
+ * 三角色同源检测（不阻止、只警示）：审核方与执行方为同一 Agent 时结论无独立性。
+ * 取当前轮三个角色的 agentName 比对（名字相同即视为同源，足够覆盖常规配置）。
+ */
+function sameSourceWarning(run: WorkflowRun): string | null {
+  const pick = (role: RoleCardType['role']) =>
+    [...run.cards].reverse().find((c) => c.role === role && c.round === run.round)?.agentName
+  const ex = pick('executor')
+  const rv = pick('reviewer')
+  const pl = pick('planner')
+  if (ex && rv && ex === rv) {
+    return pl === ex
+      ? '⚠ 规划、执行、审核三方均为同一 Agent：结论既无分工校验也无独立验收，请谨慎采信'
+      : '⚠ 审核方与执行方同源：该结论不具备独立验收效力（可在配置条为审核角色换一个 Agent）'
+  }
+  return null
+}
+
 const STATUS_TEXT: Record<string, string> = {
   preparing: '准备中',
   running: '执行中',
@@ -271,6 +289,11 @@ function GateCard({ run }: { run: WorkflowRun }) {
         {gate.passed.length > 0 && <div>✓ 通过 {gate.passed.length} 项</div>}
         {gate.issues.length > 0 && <div style={{ color: 'var(--danger-strong)' }}>✗ 问题 {gate.issues.length} 项：{gate.issues.map((i) => i.text).join('；')}</div>}
         {gate.reworkFeedback && <div style={{ color: 'var(--text-2)', marginTop: 4 }}>{gate.reworkFeedback}</div>}
+        {sameSourceWarning(run) && (
+          <div style={{ color: '#9a6700', background: 'rgba(180,83,9,0.08)', borderRadius: 8, padding: '6px 10px', marginTop: 6, fontSize: 12.5, lineHeight: 1.6 }}>
+            {sameSourceWarning(run)}
+          </div>
+        )}
         <div style={{ color: 'var(--text-3)', marginTop: 6, fontSize: 12 }}>
           通过即交付；填写意见将进入下一轮返工。需授权的动作（发布/删除/覆盖）不因此获得自动授权。
         </div>
@@ -342,6 +365,11 @@ function DeliveryCard({ run }: { run: WorkflowRun }) {
         <div className="dc-section-title">已完成内容</div>
         <div className="word-break">{run.cards.filter((c) => c.role === 'delivery').slice(-1)[0]?.conclusion}</div>
         <div className="dc-section-title">验收对照</div>
+        {sameSourceWarning(run) && (
+          <div style={{ color: '#9a6700', background: 'rgba(180,83,9,0.08)', borderRadius: 8, padding: '6px 10px', marginBottom: 8, fontSize: 12.5, lineHeight: 1.6 }}>
+            {sameSourceWarning(run)}
+          </div>
+        )}
         <div className="checklist">
           {(run.cards.filter((c) => c.role === 'reviewer').slice(-1)[0]?.checklist ?? []).map((it, i) => (
             <div key={i} className={cls('check-item', it.verdict === 'pass' ? 'pass' : 'issue')}>

@@ -85,7 +85,7 @@ function DemoTab({ onClose }: { onClose: () => void }) {
 }
 
 /* ---------------- 本机 CLI Agent ---------------- */
-const SUPPORTED_CLIS: CliName[] = ['arkcli', 'claude', 'codex']
+const SUPPORTED_CLIS: CliName[] = Object.keys(CLI_META) as CliName[]
 
 function CliTab({ onClose }: { onClose: () => void }) {
   const addCliAgent = useAgents((s) => s.addCliAgent)
@@ -94,6 +94,7 @@ function CliTab({ onClose }: { onClose: () => void }) {
   const [testing, setTesting] = useState<CliName | null>(null)
   const [adding, setAdding] = useState<CliName | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [workDir, setWorkDir] = useState('')
 
   const test = async (cli: CliName) => {
     setTesting(cli)
@@ -107,7 +108,30 @@ function CliTab({ onClose }: { onClose: () => void }) {
     <div style={{ paddingBottom: 8 }}>
       <div style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.7, marginBottom: 10 }}>
         接入本机已安装的 Agent CLI（规格 §10"接入现成 Agent"）：执行与凭据完全由 CLI 自身完成，
-        <b>AgentHub 不读取其配置、不保存任何密钥</b>。仅支持原生 .exe 安装形态（npm 的 .cmd shim 无法安全执行）。
+        <b>AgentHub 不读取其配置、不保存任何密钥</b>。启动不经 shell，因此原生 exe、Node 脚本入口
+        （如 WorkBuddy 内置的 CodeBuddy Code）与 Electron-as-node 启动器（如 DeepSeek Harness）都可直接执行。
+      </div>
+      <div className="form-row">
+        <label>工作目录（必填）</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            value={workDir}
+            onChange={(e) => setWorkDir(e.target.value)}
+            placeholder="该 CLI 的文件读写与命令执行都发生在此目录内"
+            style={{ flex: 1 }}
+          />
+          <Button
+            variant="secondary"
+            style={{ height: 30 }}
+            onClick={async () => {
+              const p = await bridge.tools.pickDir()
+              if (p) setWorkDir(p)
+            }}
+          >
+            选择…
+          </Button>
+        </div>
+        <span className="help">必须指定（避免 CLI 在应用目录里跑、污染程序文件）；可在顶栏"目录"随时修改</span>
       </div>
       <div className="form-row">
         <label>覆盖模型（可选）</label>
@@ -135,12 +159,12 @@ function CliTab({ onClose }: { onClose: () => void }) {
               <Button
                 variant="primary"
                 style={{ height: 28 }}
-                disabled={!t?.ok || adding !== null}
+                disabled={!t?.ok || adding !== null || !workDir.trim()}
                 loading={adding === cli}
                 onClick={async () => {
                   setAdding(cli)
                   setErr(null)
-                  const r = await addCliAgent(cli, model)
+                  const r = await addCliAgent(cli, model, workDir)
                   setAdding(null)
                   if (r.ok && r.agent) {
                     useAgents.getState().select(r.agent.id)
@@ -236,14 +260,15 @@ function ScanTab({ onClose }: { onClose: () => void }) {
   return (
     <div style={{ paddingBottom: 8 }}>
       <div style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.7, marginBottom: 10 }}>
-        扫描范围：PATH 上的常见 Agent CLI 命令。不扫描整块磁盘、不读取任何软件的配置或密钥。
-        <b>检测到安装 ≠ 已接入</b>：arkcli / claude / codex 已内置执行适配器（其中 claude / codex 未在本机实测），其余仅加入候选并如实标注。
+        扫描范围：已适配的 CLI 走适配层定位（PATH + 已知安装位置 + 各盘符浅层目录，因此 WorkBuddy 内置的
+        CodeBuddy、DeepSeek Harness 这类非 PATH 安装也能发现）；未适配的只在 PATH 上探测。不读取任何软件的配置或密钥。
+        <b>检测到安装 ≠ 已接入</b>：arkcli / codex / codebuddy / dsh 已内置执行适配器并本机实测，claude 未实测，其余仅加入候选并如实标注。
       </div>
       <Button variant="secondary" loading={scanning} onClick={() => void scan()} style={{ marginBottom: 12 }}>
         <Icon name="scan" size={14} /> {scanning ? '扫描中…' : '扫描本机 Agent'}
       </Button>
       {discovered.map((d: ScanResultItem) => {
-        const supported = (['arkcli', 'claude', 'codex'] as const).includes(d.name as 'arkcli')
+        const supported = SUPPORTED_CLIS.includes(d.name as CliName)
         return (
           <div key={d.path} className="agent-manage-row">
             <div className="info">

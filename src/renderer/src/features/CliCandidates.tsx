@@ -33,6 +33,9 @@ export interface CliCandidate {
   adapt: string
 }
 
+/** 已本机实测的候选（界面徽章依据，与主进程适配器实现状态一致） */
+export const TESTED_CLI_IDS = new Set(['arkcli', 'codex', 'codebuddy', 'dsh'])
+
 /** 候选清单（仅收录有 CLI 或官方 API 的；GUI 桌面应用不在此列） */
 export const CLI_CANDIDATES: CliCandidate[] = [
   {
@@ -81,7 +84,33 @@ export const CLI_CANDIDATES: CliCandidate[] = [
       { label: 'GitHub 仓库', url: 'https://github.com/openai/codex' },
       { label: 'npm 包页', url: 'https://www.npmjs.com/package/@openai/codex' }
     ],
-    adapt: 'AgentHub 按官方 exec --json JSONL 规范实现，本机未安装、未实测；仅原生 .exe 安装形态可被执行'
+    adapt: 'AgentHub 已适配并本机实测：exec --json JSONL 事件流、用量、错误透出、取消、工作目录、模型覆盖；支持应用安装形态（%LOCALAPPDATA%\\OpenAI\\Codex\\bin）'
+  },
+  {
+    id: 'codebuddy',
+    name: 'CodeBuddy Code',
+    type: 'cli',
+    cli: 'codebuddy',
+    desc: '腾讯 CodeBuddy Code CLI（与 Claude Code 同构的 stream-json）',
+    platforms: 'Windows',
+    install: 'npm install -g @tencent-ai/codebuddy-code（WorkBuddy 桌面版内置的 lite 版也会被自动发现）',
+    runtime: 'Node.js 18+（npm 全局安装）',
+    auth: '在终端运行 codebuddy 后执行 /login 完成授权（凭据落在 ~/.codebuddy）；或设 CODEBUDDY_API_KEY（自定义端点再加 CODEBUDDY_BASE_URL）。AgentHub 不读取、不保存任何密钥',
+    docs: [{ label: 'CLI 文档', url: 'https://www.codebuddy.ai/docs/cli/installation' }],
+    adapt: 'AgentHub 已适配并本机实测：-p --output-format stream-json 事件流、用量统计、取消、工作目录、模型覆盖（--model）；优先使用官方 npm 安装，WorkBuddy 内置版作兜底。注意：WorkBuddy 内置的 lite 版没有交互模式，无法在其中执行 /login'
+  },
+  {
+    id: 'dsh',
+    name: 'DeepSeek Harness（headless）',
+    type: 'cli',
+    cli: 'dsh',
+    desc: 'DeepSeek Harness 的非交互模式：回答一次任务、打印结果并退出',
+    platforms: 'Windows',
+    install: '随 DeepSeek Harness 桌面版安装，无需单独安装；入口：<安装目录>\\resources\\runtime\\cli\\bin\\dsh.cmd',
+    runtime: 'DeepSeek Harness 自带的 Electron 运行时（以 node 模式执行）',
+    auth: '用 DSH 自身的模型凭据：在启动环境导出 DEEPSEEK_API_KEY，或在 web profile 的 Models 页写入。AgentHub 不读取、不保存任何密钥',
+    docs: [],
+    adapt: 'AgentHub 已适配并本机实测：headless 一次性任务；输出为纯文本（非流式），卡片内容在任务结束时一次性出现；缺少凭据时 CLI 返回 MISSING_CREDENTIAL，本层原样透出'
   },
   {
     id: 'deepseek',
@@ -192,8 +221,8 @@ export function CliCandidatesTab({ onUseApi, onClose }: {
                 <div className="cand-title">
                   <b>{c.name}</b>
                   <span className="cand-type">{c.type === 'cli' ? 'CLI' : 'API'}</span>
-                  {c.id === 'arkcli' && <span className="demo-badge">已实测</span>}
-                  {c.type === 'cli' && c.id !== 'arkcli' && <span className="demo-badge" style={{ opacity: 0.75 }}>适配未实测</span>}
+                  {TESTED_CLI_IDS.has(c.id) && <span className="demo-badge">已实测</span>}
+                  {c.type === 'cli' && !TESTED_CLI_IDS.has(c.id) && <span className="demo-badge" style={{ opacity: 0.75 }}>适配未实测</span>}
                 </div>
                 <div className="cand-sub">{c.desc}</div>
                 <div className="cand-meta">
