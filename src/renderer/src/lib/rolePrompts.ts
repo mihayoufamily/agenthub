@@ -47,7 +47,10 @@ const SYSTEM_PROMPTS: Record<WorkflowRole, string> = {
     '要求：checklist 与验收清单一一对应（可补充关键新发现项）；verdict 只能是 "pass" 或 "issue"；不许为了放行而放宽标准。'
 }
 
-export function buildRoleMessages(role: WorkflowRole, ctx: RunContext): { system: string; user: string } {
+const EXEC_NO_TOOLS = '当前接入为纯文本模型（无本机工具执行权限）：如任务涉及本机操作，请产出可直接使用的完整文本成果（方案/代码/文案等），并如实说明无法代为执行的部分，绝不虚构已执行的操作。'
+const EXEC_WITH_TOOLS = '当前已授权文件工具：可在指定目录内读取/写入/列出/删除（回收站）/移动文件。请优先用工具产出真实文件产物（代码、文档等）；工具无法完成的部分如实说明，绝不虚构已执行的操作。'
+
+export function buildRoleMessages(role: WorkflowRole, ctx: RunContext, execTools?: { dir: string; allowCommands?: boolean }): { system: string; user: string } {
   const lines: string[] = [`任务目标：${ctx.goal}`]
   if (ctx.attachmentText) {
     lines.push(`\n用户提供的文本附件（真实文件内容，规划时请据此拆解）：${ctx.attachmentText}`)
@@ -76,7 +79,15 @@ export function buildRoleMessages(role: WorkflowRole, ctx: RunContext): { system
   if (role === 'planner') {
     lines.push(`\n（当前第 ${ctx.round} 轮，返工上限 ${ctx.maxRounds} 轮）`)
   }
-  return { system: SYSTEM_PROMPTS[role], user: lines.join('\n') }
+  // 执行角色已授权工具时如实告知（避免"无工具权限"的误导）；命令执行能力随授权单独说明
+  let system = SYSTEM_PROMPTS[role]
+  if (role === 'executor' && execTools) {
+    system = system.replace(EXEC_NO_TOOLS, EXEC_WITH_TOOLS)
+    if (execTools.allowCommands) {
+      system += '\n此外已授权执行 shell 命令（工作目录为授权目录，超时 60 秒）：可用于构建、测试等产物验证。'
+    }
+  }
+  return { system, user: lines.join('\n') }
 }
 
 /** 上下文截断：防止历史结论把请求撑爆（保留头尾） */

@@ -55,12 +55,33 @@ export function installDebugHooks() {
       store.select(r.agent.id)
       return r.agent.id
     },
-    // 按名称删除 Agent（验证清理用）
-    removeAgentByName: (name: string) => {
-      const a = useAgents.getState().agents.find((x) => x.name === name)
-      if (!a) return false
-      void useAgents.getState().removeAgent(a.id, { deleteHistory: true })
-      return true
+    // 工作流工具 E2E：mock 模型 Agent（含文件工具授权）绑定三角色，跑一轮真实工作流（人工确认停门）
+    startMockToolTask: async (baseUrl: string, dir: string, goal: string) => {
+      const store = useAgents.getState()
+      const r = await store.addCustomModelAgent(
+        { provider: 'Mock', baseUrl, modelId: 'mock-model' },
+        'mock-key'
+      )
+      if (!r.ok || !r.agent) throw new Error(`mock Agent 添加失败：${r.message}`)
+      store.updateAgent(r.agent.id, { name: 'Mock 工具验证', tools: { dir, allowCommands: false } })
+      const agent = useAgents.getState().agents.find((a) => a.id === r.agent!.id)!
+      const mk = () => ({ agentId: agent.id, agentName: agent.name, model: agent.model })
+      useWorkflow.getState().patchConfig({ planner: mk(), executor: mk(), reviewer: mk(), reviewMode: 'human', confirmEveryRound: true })
+      const wf = useWorkflow.getState()
+      wf.setDraft(goal)
+      void wf.start()
+    },
+    // 按名称删除 Agent（验证清理用；等待持久化完成避免进程退出丢失）
+    removeAgentByName: async (name: string) => {
+      let n = 0
+      for (;;) {
+        const a = useAgents.getState().agents.find((x) => x.name === name)
+        if (!a) break
+        await useAgents.getState().removeAgent(a.id, { deleteHistory: true })
+        n++
+        if (n > 20) break
+      }
+      return n > 0
     },
     // 状态读取（校验用）
     state: () => ({
@@ -72,7 +93,13 @@ export function installDebugHooks() {
             stage: useWorkflow.getState().run!.stage,
             round: useWorkflow.getState().run!.round,
             cards: useWorkflow.getState().run!.cards.length,
-            demo: useWorkflow.getState().run!.demo
+            demo: useWorkflow.getState().run!.demo,
+            // 卡片级摘要（工具过程与产物断言用）
+            cardDetails: useWorkflow.getState().run!.cards.map((c) => ({
+              role: c.role,
+              process: c.process.map((p) => `${p.kind}:${p.text.slice(0, 60)}`),
+              artifacts: c.artifacts?.map((a) => `${a.kind}:${a.name}${a.path ? `(${a.path})` : ''}`)
+            }))
           }
         : null
     })

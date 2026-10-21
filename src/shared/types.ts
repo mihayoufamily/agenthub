@@ -140,6 +140,8 @@ export interface ProcessEvent {
   text: string
   ts: number
   demo?: boolean
+  /** 工具调用 id（running→done 同 id 替换，避免重复记录） */
+  id?: string
 }
 
 export interface ArtifactRef {

@@ -100,12 +100,13 @@ export function toolDefs(allowCommands: boolean): unknown[] {
   return defs
 }
 
-/** 沙箱校验：路径规范化后必须仍在沙箱根内（防 ../ 逃逸与绝对路径注入） */
+/** 沙箱校验：路径规范化后必须仍在沙箱根内（防 ../ 逃逸与绝对路径注入）；返回原始大小写路径 */
 function sandboxPath(grant: ToolGrant, rel: unknown): string | null {
   if (typeof rel !== 'string' || rel.length === 0) return null
+  const abs = resolvePath(grant.dir, rel)
   const root = resolvePath(grant.dir).toLowerCase()
-  const abs = resolvePath(grant.dir, rel).toLowerCase()
-  if (abs !== root && !abs.startsWith(root + sep)) return null
+  const low = abs.toLowerCase()
+  if (low !== root && !low.startsWith(root + sep)) return null
   return abs
 }
 

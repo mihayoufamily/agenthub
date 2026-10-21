@@ -134,25 +134,33 @@ function agentChatToCard(
         text += ev.text
         setRun((r) => ({ ...r, cards: updateCard(r.cards, cardId, { conclusion: text }) }))
       } else if (ev.type === 'tool' && ev.toolCall) {
-        // 工具调用如实进入卡片过程；write_file 成功的真实产物登记为 artifacts
+        // 工具调用如实进入卡片过程（同 id 替换：running→done 只留一条）；write_file 成功的真实产物登记为 artifacts
         const tc = ev.toolCall
-        setRun((r) => ({
-          ...r,
-          cards: updateCard(r.cards, cardId, {
-            process: [
-              ...r.cards.find((c) => c.id === cardId)?.process ?? [],
-              { kind: 'tool' as const, text: `[${tc.tool}] ${Object.entries(tc.args).map(([k, v]) => `${k}=${v.length > 80 ? v.slice(0, 80) + '…' : v}`).join(' ')} → ${tc.status === 'error' ? '失败' : '完成'}`, ts: Date.now() }
-            ],
-            ...(ev.writtenPath
-              ? {
-                  artifacts: [
-                    ...r.cards.find((c) => c.id === cardId)?.artifacts ?? [],
-                    { id: uid('art'), name: ev.writtenPath.split(/[\\/]/).pop() ?? ev.writtenPath, kind: 'file' as const, path: ev.writtenPath }
-                  ]
-                }
-              : {})
-          })
-        }))
+        const argText = Object.entries(tc.args).map(([k, v]) => `${k}=${v.length > 80 ? v.slice(0, 80) + '…' : v}`).join(' ')
+        const stateText = tc.status === 'running' ? '执行中' : tc.status === 'error' ? '失败' : '完成'
+        setRun((r) => {
+          const cur = r.cards.find((c) => c.id === cardId)
+          if (!cur) return r
+          const process = [...cur.process]
+          const entry = { kind: 'tool' as const, id: tc.id, text: `[${tc.tool}] ${argText} → ${stateText}`, ts: Date.now() }
+          const i = process.findIndex((p) => p.id === tc.id)
+          if (i >= 0) process[i] = entry
+          else process.push(entry)
+          return {
+            ...r,
+            cards: updateCard(r.cards, cardId, {
+              process,
+              ...(ev.writtenPath
+                ? {
+                    artifacts: [
+                      ...cur.artifacts ?? [],
+                      { id: uid('art'), name: ev.writtenPath.split(/[\\/]/).pop() ?? ev.writtenPath, kind: 'file' as const, path: ev.writtenPath }
+                    ]
+                  }
+                : {})
+            })
+          }
+        })
       } else if (ev.type === 'usage' && ev.usage?.tokens) {
         let exceeded = false
         setRun((r) => {
@@ -249,7 +257,7 @@ async function runStage(
     useUi.getState().toast(`Agent「${roleCfg.agentName}」缺少接入配置（模型或 CLI），无法执行`, 'error')
     return null
   }
-  const { system, user } = buildRoleMessages(role, ctx)
+  const { system, user } = buildRoleMessages(role, ctx, agent.tools)
   const res = await agentChatToCard(agent, system, user, card.id, setRun, { maxTokens: cfg.maxTokens })
   if (isCancelled()) return null
   if (!res.ok) {
@@ -301,7 +309,15 @@ function buildDeliveryConclusion(run: WorkflowRun, verdicts: ChecklistItem[], ex
     `\n执行成果见上方执行卡片结论。`
   ]
   if (execWasDemo) lines.push('\n注意：执行角色为演示 Agent，其卡片内容为脚本数据。')
-  lines.push('\n说明：当前工作流接入的模型为纯文本对话（无本机工具执行权限），未产生落盘产物；如需真实文件操作，请接入支持工具执行的 Agent。')
+  // 落盘产物如实报告：有真实文件产物列出路径；没有才说明未产生（不因文案误导）
+  const realFiles = run.cards
+    .filter((c) => c.role === 'executor' && !c.demo)
+    .flatMap((c) => (c.artifacts ?? []).filter((a) => a.kind === 'file' && !a.demo && a.path))
+  if (realFiles.length > 0) {
+    lines.push(`\n真实落盘产物 ${realFiles.length} 个：${realFiles.map((a) => a.path).join('、')}。`)
+  } else {
+    lines.push('\n说明：当前工作流接入的模型为纯文本对话（无本机工具执行权限），未产生落盘产物；如需真实文件操作，请接入支持工具执行的 Agent。')
+  }
   return lines.join('')
 }
 
