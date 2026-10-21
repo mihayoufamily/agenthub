@@ -11,3 +11,5 @@ Thumbs.db
 verify/
 
 .workbuddy/
+
+.commit-msg.txt
