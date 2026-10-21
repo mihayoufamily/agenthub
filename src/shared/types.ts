@@ -20,9 +20,33 @@ export interface AgentConfig {
   modelConfig?: CustomModelConfig
   /** 本机 CLI 配置（kind === 'cli' 时有效）；凭据由 CLI 自身管理，AgentHub 不保存任何密钥 */
   cliConfig?: CliAgentConfig
+  /** 文件/命令工具授权（kind === 'model' 时可选）：开启即授权在 dir 内读写；未开启 = 纯对话无文件能力 */
+  tools?: ToolGrant
   /** 演示模式数据 */
   isDemo?: boolean
   addedAt: number
+}
+
+/**
+ * 模型 Agent 的工具授权（Agent 级授权制）。
+ * dir 为沙箱根：read/write/list/delete/move 全部限制在其内（路径规范化后逃逸即拒绝）；
+ * allowCommands 单独开关（默认关）：开启后 run_command 以 dir 为工作目录执行，超时与输出有上限。
+ */
+export interface ToolGrant {
+  dir: string
+  allowCommands?: boolean
+}
+
+/** 一次工具调用的执行记录（随消息保存，可追溯） */
+export interface ToolCall {
+  id: string
+  /** read_file | write_file | list_dir | delete_file | move | run_command */
+  tool: string
+  args: Record<string, string>
+  status: 'running' | 'done' | 'error'
+  /** 执行结果文本（文件内容/命令输出/错误信息；超限截断） */
+  result?: string
+  ts: number
 }
 
 /** CLI Agent 配置：执行走 CLI 可执行文件，凭据走 CLI 自身（如 arkcli 的 profile） */
@@ -69,6 +93,8 @@ export interface ChatMessage {
   handoff?: { fromAgentId: string; fromAgentName: string }
   /** 本条消息发送/回复时实际使用的模型（切换模型后仍可追溯） */
   model?: string
+  /** 本次回复中的工具调用记录（文件读写/命令执行，随消息可追溯） */
+  toolCalls?: ToolCall[]
 }
 
 export interface AgentSession {

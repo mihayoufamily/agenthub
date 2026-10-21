@@ -43,6 +43,25 @@ export function installDebugHooks() {
     // 人工确认门：通过并交付
     passGate: () => void useWorkflow.getState().confirmGate('deliver'),
     stopTask: () => useWorkflow.getState().stop('user'),
+    // 添加指向本地 mock OpenAI 兼容服务的模型 Agent 并授予工具权限（端到端工具验证专用）
+    addMockToolAgent: async (baseUrl: string, dir: string, allowCommands: boolean) => {
+      const store = useAgents.getState()
+      const r = await store.addCustomModelAgent(
+        { provider: 'Mock', baseUrl, modelId: 'mock-model' },
+        'mock-key'
+      )
+      if (!r.ok || !r.agent) throw new Error(`mock Agent 添加失败：${r.message}`)
+      store.updateAgent(r.agent.id, { name: 'Mock 工具验证', tools: { dir, allowCommands } })
+      store.select(r.agent.id)
+      return r.agent.id
+    },
+    // 按名称删除 Agent（验证清理用）
+    removeAgentByName: (name: string) => {
+      const a = useAgents.getState().agents.find((x) => x.name === name)
+      if (!a) return false
+      void useAgents.getState().removeAgent(a.id, { deleteHistory: true })
+      return true
+    },
     // 状态读取（校验用）
     state: () => ({
       screen: useUi.getState().screen,

@@ -59,6 +59,7 @@ const PATHS: Record<string, React.ReactNode> = {
     </>
   ),
   folder: <path d="M4 6a2 2 0 012-2h4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6z" />,
+  terminal: <path d="M5 7l4 4-4 4M11 17h8" />,
   scan: (
     <>
       <path d="M4 8V6a2 2 0 012-2h2M16 4h2a2 2 0 012 2v2m0 8v2a2 2 0 01-2 2h-2M8 20H6a2 2 0 01-2-2v-2" />

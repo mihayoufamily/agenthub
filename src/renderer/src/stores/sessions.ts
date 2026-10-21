@@ -182,6 +182,28 @@ export const useSessions = create<SessionsState>()((set, get) => ({
               }
             }
           })
+        } else if (ev.type === 'tool' && ev.toolCall) {
+          // 工具调用执行记录：合并进当前回复消息（同 id 更新状态与结果，新 id 追加）
+          const tc = ev.toolCall
+          set((s) => {
+            const cur = s.sessions[agentId]
+            return {
+              sessions: {
+                ...s.sessions,
+                [agentId]: {
+                  ...cur,
+                  messages: cur.messages.map((m) => {
+                    if (m.id !== msgId) return m
+                    const calls = m.toolCalls ? [...m.toolCalls] : []
+                    const i = calls.findIndex((c) => c.id === tc.id)
+                    if (i >= 0) calls[i] = tc
+                    else calls.push(tc)
+                    return { ...m, toolCalls: calls }
+                  })
+                }
+              }
+            }
+          })
         } else if (ev.type === 'error') {
           set((s) => {
             const cur = s.sessions[agentId]
@@ -217,7 +239,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
 
       const r = agent.kind === 'cli'
         ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath }, reqId, history)
-        : await bridge.models.chat(agent.modelConfig!, reqId, history)
+        : await bridge.models.chat(agent.modelConfig!, reqId, history, agent.tools ? { tools: agent.tools } : undefined)
       if (!r.ok) {
         set((s) => {
           const cur = s.sessions[agentId]

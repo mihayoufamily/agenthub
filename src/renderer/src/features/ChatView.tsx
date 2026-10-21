@@ -1,6 +1,6 @@
 // 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型切换
 import React, { useEffect, useRef, useState } from 'react'
-import type { ChatMessage, AgentConfig } from '@shared/types'
+import type { ChatMessage, AgentConfig, ToolCall } from '@shared/types'
 import { useSessions } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
@@ -41,6 +41,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const [nearBottom, setNearBottom] = useState(true)
   const [newCount, setNewCount] = useState(0)
   const [switchOpen, setSwitchOpen] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
 
   const scrollToBottom = (smooth = false) => {
     const el = scrollRef.current
@@ -90,19 +91,28 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
             {agent.isDemo && <span className="demo-badge">演示模式</span>}
           </div>
           <div className="sub" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <StatusDot status={agent.status} /> {statusText(agent.status)} ·{' '}
-            {canSwitchModel ? (
-              <button
-                className="model-chip"
-                onClick={() => setSwitchOpen(true)}
-                title={agent.kind === 'model' ? '切换此 Agent 使用的模型（列表来自真实接口）' : '修改传给 CLI 的模型参数（留空用 CLI 默认）'}
-              >
-                {agent.model} <Icon name="swap" size={11} />
-              </button>
-            ) : (
-              agent.model
-            )}
-          </div>
+          <StatusDot status={agent.status} /> {statusText(agent.status)} ·{' '}
+          {canSwitchModel ? (
+            <button
+              className="model-chip"
+              onClick={() => setSwitchOpen(true)}
+              title={agent.kind === 'model' ? '切换此 Agent 使用的模型（列表来自真实接口）' : '修改传给 CLI 的模型参数（留空用 CLI 默认）'}
+            >
+              {agent.model} <Icon name="swap" size={11} />
+            </button>
+          ) : (
+            agent.model
+          )}
+          {agent.kind === 'model' && agent.modelConfig && (
+            <button
+              className="model-chip"
+              onClick={() => setToolsOpen(true)}
+              title="文件/命令工具授权（沙箱目录、命令执行开关）"
+            >
+              <Icon name="file" size={11} /> 工具{agent.tools ? '·已启用' : ''}
+            </button>
+          )}
+        </div>
         </div>
         <div className="spacer" />
         <Button variant="ghost" onClick={() => void exportSession(agent.id)} title="导出当前 Agent 的聊天记录为 Markdown">
@@ -114,6 +124,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
       </div>
 
       {switchOpen && <ModelSwitchModal agent={agent} onClose={() => setSwitchOpen(false)} />}
+      {toolsOpen && <ToolsGrantModal agent={agent} onClose={() => setToolsOpen(false)} />}
 
       {homeDraft.trim() && (
         <div style={{
@@ -197,16 +208,21 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
             交接自 {msg.handoff.fromAgentName} <Icon name="handoff" size={11} />
           </div>
         )}
-        <div className={cls('bubble word-break')}>
-          <MessageBody text={msg.text} />
-          {msg.streaming && <span className="caret" />}
-          {msg.error && <div className="err">⚠ {msg.error}</div>}
-          {msg.demo && !msg.streaming && (
-            <div style={{ marginTop: 6 }}>
-              <span className="demo-badge">演示数据 · 非真实模型输出</span>
-            </div>
-          )}
-        </div>
+        {msg.toolCalls && msg.toolCalls.length > 0 && msg.toolCalls.map((tc) => (
+          <ToolCallCard key={tc.id} tc={tc} />
+        ))}
+        {(msg.text || !msg.toolCalls?.length) && (
+          <div className={cls('bubble word-break')}>
+            <MessageBody text={msg.text} />
+            {msg.streaming && <span className="caret" />}
+            {msg.error && <div className="err">⚠ {msg.error}</div>}
+            {msg.demo && !msg.streaming && (
+              <div style={{ marginTop: 6 }}>
+                <span className="demo-badge">演示数据 · 非真实模型输出</span>
+              </div>
+            )}
+          </div>
+        )}
         <div className="msg-time">
           {fmtTime(msg.ts)}
           {msg.model && ` · ${msg.model}`}
@@ -241,6 +257,132 @@ export function MessageBody({ text }: { text: string }) {
   )
 }
 
+/** 工具调用卡片：真实执行的文件读写/命令记录（状态、参数、结果可展开） */
+function ToolCallCard({ tc }: { tc: ToolCall }) {
+  const [open, setOpen] = useState(false)
+  const TOOL_TEXT: Record<string, string> = {
+    read_file: '读取文件',
+    write_file: '写入文件',
+    list_dir: '列出目录',
+    delete_file: '删除（回收站）',
+    move: '移动/重命名',
+    run_command: '执行命令'
+  }
+  const argLine = Object.entries(tc.args)
+    .map(([k, v]) => `${k}: ${v.length > 60 ? v.slice(0, 60) + '…' : v}`)
+    .join(' · ')
+  return (
+    <div
+      className="tool-call-card"
+      style={{
+        margin: '4px 0 6px', padding: '7px 10px', borderRadius: 'var(--r-sm)',
+        border: `1px solid ${tc.status === 'error' ? 'rgba(220,38,38,.35)' : 'var(--border)'}`,
+        background: tc.status === 'error' ? 'var(--danger-bg, rgba(220,38,38,.06))' : 'var(--surface-2)',
+        fontSize: 12, lineHeight: 1.5
+      }}
+    >
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{ all: 'unset', cursor: 'pointer', display: 'flex', gap: 6, alignItems: 'center', width: '100%', boxSizing: 'border-box' }}
+      >
+        <Icon name={tc.tool === 'run_command' ? 'terminal' : 'file'} size={12} />
+        <b style={{ flexShrink: 0 }}>{TOOL_TEXT[tc.tool] ?? tc.tool}</b>
+        <span style={{ color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
+          {argLine}
+        </span>
+        <span style={{ flexShrink: 0, color: tc.status === 'error' ? 'var(--danger)' : tc.status === 'running' ? 'var(--text-3)' : 'var(--ok)' }}>
+          {tc.status === 'running' ? '执行中…' : tc.status === 'error' ? '失败' : '完成'}
+        </span>
+      </button>
+      {open && tc.result && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border)', color: 'var(--text-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 220, overflowY: 'auto' }}>
+          {tc.result}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 工具授权弹窗（Agent 级授权制）：沙箱目录 + 命令执行开关 */
+function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () => void }) {
+  const updateAgent = useAgents((s) => s.updateAgent)
+  const [enabled, setEnabled] = useState(!!agent.tools)
+  const [dir, setDir] = useState(agent.tools?.dir ?? '')
+  const [allowCommands, setAllowCommands] = useState(!!agent.tools?.allowCommands)
+
+  const save = () => {
+    const tools = enabled && dir.trim() ? { dir: dir.trim(), allowCommands } : undefined
+    updateAgent(agent.id, { tools })
+    useUi.getState().toast(
+      tools ? `已启用文件工具（沙箱目录：${tools.dir}${tools.allowCommands ? '，允许执行命令' : ''}）` : '已关闭文件工具，恢复纯对话',
+      'ok'
+    )
+    onClose()
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`${agent.name} · 文件/命令工具`}
+      width={500}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={save} disabled={enabled && !dir.trim()}>保存</Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingBottom: 6 }}>
+        <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ marginTop: 3 }} />
+          <span style={{ lineHeight: 1.6 }}>
+            <b>启用文件工具</b>
+            <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+              开启即授权该模型在沙箱目录内：读/写/列出/删除（回收站）/移动文件。未开启时为纯对话（如实无文件能力）。所有调用过程在对话中如实展示并随记录保存。
+            </div>
+          </span>
+        </label>
+        {enabled && (
+          <>
+            <div className="form-row">
+              <label>沙箱目录（产物根）</label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  value={dir}
+                  onChange={(e) => setDir(e.target.value)}
+                  placeholder="例如 D:\AgentHub\产物\该Agent名"
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  variant="secondary"
+                  onClick={async () => {
+                    const p = await bridge.tools.pickDir()
+                    if (p) setDir(p)
+                  }}
+                >
+                  选择…
+                </Button>
+              </div>
+            </div>
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
+              <input type="checkbox" checked={allowCommands} onChange={(e) => setAllowCommands(e.target.checked)} style={{ marginTop: 3 }} />
+              <span style={{ lineHeight: 1.6 }}>
+                <b>允许执行命令</b>（默认关）
+                <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                  开启后模型可在沙箱目录内执行 shell 命令（工作目录固定为沙箱根，超时 60 秒、输出有上限）。用于构建/测试产物；每条命令与输出都会在对话中展示。风险高于文件读写，请谨慎开启。
+                </div>
+              </span>
+            </label>
+            <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6 }}>
+              安全边界：路径规范化后越出沙箱目录的调用一律拒绝；删除走系统回收站可恢复；工具调用轮数有上限（16 轮）。
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  )
+}
 /** 模型切换弹窗：模型 Agent 列表来自真实 /models 接口；CLI Agent 手动指定模型参数 */
 function ModelSwitchModal({ agent, onClose }: { agent: AgentConfig; onClose: () => void }) {
   const updateAgent = useAgents((s) => s.updateAgent)

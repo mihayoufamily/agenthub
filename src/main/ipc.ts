@@ -5,7 +5,9 @@ import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
-import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig } from '../shared/types'
+import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant } from '../shared/types'
+import { execTool } from './tools'
+import type { ChatMsg } from './adapters/openai'
 
 /** 注册全部 IPC 通道。getStore/getWin 为延迟引用，避免初始化顺序问题。 */
 export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow | null) {
@@ -121,22 +123,39 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return openai.listModels(cfg, key)
   })
 
-  ipcMain.handle('model:chat', (_e, cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string }[]) => {
+  ipcMain.handle('model:chat', (_e, cfg: CustomModelConfig, reqId: string, messages: ChatMsg[], opts?: { tools?: ToolGrant }) => {
     const key = getStore().getCredential(cfg.keyId)
     if (!key) {
       const win = getWin()
       win?.webContents.send('model:event', { reqId, type: 'error', message: '未找到 API Key，请先在 Agent 设置中填写并保存' })
       return { ok: false }
     }
+    // opts.tools（Agent 级授权）存在时启用工具循环：模型可在沙箱目录内读写文件/执行命令
     openai.chatStream(cfg, key, reqId, messages, (ev) => {
       getWin()?.webContents.send('model:event', ev)
-    })
+    }, opts?.tools)
     return { ok: true }
   })
 
   ipcMain.handle('model:cancel', (_e, reqId: string) => {
     openai.cancelStream(reqId)
     return { ok: true }
+  })
+
+  // ---------- 工具层（沙箱执行；渲染层可直调用于验证/高级用途） ----------
+  ipcMain.handle('tools:exec', async (_e, grant: ToolGrant, tool: string, argsJson: string) => {
+    if (!grant || typeof grant.dir !== 'string' || !grant.dir) {
+      return { ok: false, output: '拒绝：未配置工具目录' }
+    }
+    return execTool(grant, tool, argsJson)
+  })
+
+  // 选择目录（Agent 工具沙箱根配置用）
+  ipcMain.handle('dialog:pickDir', async () => {
+    const win = getWin()
+    if (!win) return null
+    const r = await dialog.showOpenDialog(win, { title: '选择产物目录（Agent 的文件操作将限制在此目录内）', properties: ['openDirectory'] })
+    return r.canceled ? null : r.filePaths[0]
   })
 
   // ---------- 本机 CLI Agent（真实执行，凭据由 CLI 自身管理） ----------

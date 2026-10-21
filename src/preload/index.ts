@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
-  ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName
+  ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall
 } from '../shared/types'
 
 /**
@@ -63,15 +63,21 @@ const api = {
     test: (cfg: CustomModelConfig, apiKey: string) => ipcRenderer.invoke('model:test', cfg, apiKey) as Promise<ModelTestResult>,
     /** 列出接口真实可用的模型（切换模型用；凭据在主进程取，渲染层不经手） */
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
-    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string }[]) =>
-      ipcRenderer.invoke('model:chat', cfg, reqId, messages),
+    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string }[], opts?: { tools?: ToolGrant }) =>
+      ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts),
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
-    /** 订阅流式事件（main -> renderer） */
-    onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number } }) => void) => {
+    /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */
+    onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number }; toolCall?: ToolCall; writtenPath?: string }) => void) => {
       const handler = (_e: unknown, data: Parameters<typeof cb>[0]) => cb(data)
       ipcRenderer.on('model:event', handler)
       return () => ipcRenderer.removeListener('model:event', handler)
     }
+  },
+  tools: {
+    /** 直接执行一次沙箱工具（验证与高级用途；参数不合法/越界会被拒） */
+    exec: (grant: ToolGrant, tool: string, argsJson: string) =>
+      ipcRenderer.invoke('tools:exec', grant, tool, argsJson) as Promise<{ ok: boolean; output: string; writtenPath?: string }>,
+    pickDir: () => ipcRenderer.invoke('dialog:pickDir') as Promise<string | null>
   },
   dialogs: {
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<Array<{ name: string; path: string; size: number; content?: string; error?: boolean }>>,

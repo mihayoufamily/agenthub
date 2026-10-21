@@ -133,6 +133,26 @@ function agentChatToCard(
       if (ev.type === 'delta' && ev.text) {
         text += ev.text
         setRun((r) => ({ ...r, cards: updateCard(r.cards, cardId, { conclusion: text }) }))
+      } else if (ev.type === 'tool' && ev.toolCall) {
+        // 工具调用如实进入卡片过程；write_file 成功的真实产物登记为 artifacts
+        const tc = ev.toolCall
+        setRun((r) => ({
+          ...r,
+          cards: updateCard(r.cards, cardId, {
+            process: [
+              ...r.cards.find((c) => c.id === cardId)?.process ?? [],
+              { kind: 'tool' as const, text: `[${tc.tool}] ${Object.entries(tc.args).map(([k, v]) => `${k}=${v.length > 80 ? v.slice(0, 80) + '…' : v}`).join(' ')} → ${tc.status === 'error' ? '失败' : '完成'}`, ts: Date.now() }
+            ],
+            ...(ev.writtenPath
+              ? {
+                  artifacts: [
+                    ...r.cards.find((c) => c.id === cardId)?.artifacts ?? [],
+                    { id: uid('art'), name: ev.writtenPath.split(/[\\/]/).pop() ?? ev.writtenPath, kind: 'file' as const, path: ev.writtenPath }
+                  ]
+                }
+              : {})
+          })
+        }))
       } else if (ev.type === 'usage' && ev.usage?.tokens) {
         let exceeded = false
         setRun((r) => {
@@ -160,7 +180,7 @@ function agentChatToCard(
       agent.kind === 'cli' && agent.cliConfig
         ? bridge.cli.chat(agent.cliConfig.cli, { model: agent.cliConfig.model, exePath: agent.cliConfig.exePath }, reqId, messages)
         : agent.modelConfig
-          ? bridge.models.chat(agent.modelConfig, reqId, messages)
+          ? bridge.models.chat(agent.modelConfig, reqId, messages, agent.tools ? { tools: agent.tools } : undefined)
           : Promise.resolve({ ok: false })
     void launched.then((r: { ok: boolean }) => {
       // 主进程会通过 model:event 发送错误；此处兜底通道异常（无事件到达）的场景
