@@ -9,3 +9,5 @@ release/
 Thumbs.db
 .vite/
 verify/
+
+.workbuddy/
