@@ -10,6 +10,15 @@
 }
 @keyframes wb-bg-in { from { background: var(--brand-cream); } }
 
+/* 共享外壳里的内容屏：.screen 默认 absolute，会盖住左侧栏——在壳内改为正常 flex 子项 */
+.workbench > .screen {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
 /* 模式进入大字 */
 .wb-mode-title {
   position: absolute;
@@ -141,10 +150,15 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  row-gap: 8px;
   padding: 10px 20px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  /* 窄窗口下动作按钮换行而不是把整行挤出视口（720px 实测溢出）；换行后靠右对齐 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
+.wb-topbar > * { min-width: 0; }
 .wb-topbar .title { font-size: 14px; font-weight: 700; }
 .wb-topbar .sub { font-size: 12px; color: var(--text-3); }
 .wb-topbar .spacer { flex: 1; }
@@ -342,12 +356,12 @@
   background: rgba(210, 59, 59, 0.12); border: 1px solid rgba(210, 59, 59, 0.45);
   color: var(--danger, #c0392b); font-size: 11px; font-weight: 700;
 }
-/* 上下文用量条（WorkBuddy 风格）：输入框上方细条 + 文本 */
+/* 对话栏底部条：模型选择 + 上下文进度 + 本会话消耗（窄屏时换行，不挤压进度轨） */
 .ctx-bar {
-  display: flex; align-items: center; gap: 8px; padding: 0 2px 6px;
+  display: flex; align-items: center; gap: 8px; padding: 0 2px 6px; flex-wrap: wrap;
 }
 .ctx-track {
-  flex: 1; height: 4px; border-radius: 999px; overflow: hidden;
+  flex: 1; min-width: 60px; height: 4px; border-radius: 999px; overflow: hidden;
   background: var(--border, rgba(0,0,0,0.12));
 }
 .ctx-fill { height: 100%; border-radius: 999px; transition: width 0.25s ease; }

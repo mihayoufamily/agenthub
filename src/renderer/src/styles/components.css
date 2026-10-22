@@ -164,6 +164,9 @@
 .attach-chip.error { border-color: rgba(210, 59, 59, 0.4); color: var(--danger); }
 .attach-chip .rm { border: none; background: none; padding: 0 2px; color: var(--text-3); font-size: 13px; }
 .attach-chip .rm:hover { color: var(--danger); }
+/* 图片附件：缩略图直接可见，用户不用猜"这张到底发不发得出去" */
+.attach-chip.image { padding-left: 3px; }
+.attach-chip .att-thumb { width: 20px; height: 20px; object-fit: cover; border-radius: 4px; flex: none; background: var(--surface-2); }
 
 /* ---- 模态框 ---- */
 .modal-overlay {
@@ -276,6 +279,10 @@
 .collapse-body .ev.tool .k { color: var(--info); font-weight: 600; }
 .collapse-body .ev.log .k { color: var(--text-3); }
 .collapse-body .ev.summary .k { color: var(--role-planner); font-weight: 600; }
+
+/* 思考分段展示（ThinkingText）：段落保留换行，正文占满剩余宽度，展开按钮另起一行 */.collapse-body .ev .thinking-view { flex: 1; min-width: 0; }
+.thinking-view .tv-body { white-space: pre-wrap; word-break: break-word; }
+.thinking-view .link-btn { display: block; margin-top: 5px; }
 
 /* ---- 空状态 ---- */
 .empty-state {
@@ -457,6 +464,48 @@
   margin: 6px 0; padding: 10px 12px; border-radius: 10px;
   background: var(--bg, #f7f4ed); border: 1px dashed var(--border, #e5ddcc);
   color: var(--text-2); font-size: 12px; line-height: 1.65;
-  white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word;
   font-family: inherit;
 }
+/* 滚动落在思考正文上而不是整块上：展开/收起按钮留在滚动区外，
+   否则长思考展开后按钮被压在折叠区底部，用户收不回去（实测踩坑） */
+.reasoning-block .rb-body { max-height: none; overflow: visible; }
+.reasoning-block .rb-body .tv-body { max-height: 300px; overflow-y: auto; }
+
+/* ---- Skill 启用开关与标准包标记（设置 → Skill） ---- */
+.skill-switch { display: inline-flex; align-items: center; flex: none; cursor: pointer; }
+.skill-switch input { width: 15px; height: 15px; accent-color: var(--brand-amber, #b45309); cursor: pointer; }
+.skill-tag {
+  margin-left: 6px; padding: 1px 6px; border-radius: var(--r-pill);
+  font-size: 10px; font-weight: 600;
+  background: var(--surface-2); border: 1px solid var(--border, #e5ddcc); color: var(--text-3);
+}
+
+/* ---- 用量统计与最近调用（设置页 / 对话栏快捷入口共用） ---- */
+.usage-panel { display: flex; flex-direction: column; gap: 10px; }
+.usage-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.usage-note { font-size: 11px; color: var(--text-3); flex: 1; min-width: 180px; line-height: 1.5; }
+.usage-acts { display: flex; gap: 6px; margin-left: auto; }
+.usage-empty { font-size: 12.5px; color: var(--text-3); padding: 10px 2px; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.usage-table th, .usage-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border, #e5ddcc); }
+.usage-table th { color: var(--text-3); font-weight: 600; font-size: 11px; }
+.usage-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.usage-table .mono { font-family: var(--font-mono, monospace); font-size: 11.5px; }
+.usage-split { color: var(--text-3); font-size: 11px; }
+.usage-subtitle { font-size: 11.5px; color: var(--text-3); margin-bottom: 4px; }
+.usage-recent { max-height: 260px; overflow-y: auto; }
+.usage-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; padding: 3px 0; border-bottom: 1px dashed var(--border, #e5ddcc); min-width: 0; }
+.usage-row .t { color: var(--text-3); flex: none; font-variant-numeric: tabular-nums; }
+.usage-row .st { flex: none; width: 34px; }
+.usage-row .st.ok { color: var(--ok); }
+.usage-row .st.bad { color: var(--danger); }
+.usage-row .h { flex: none; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-row .m { flex: 1; min-width: 60px; color: var(--text-3); }
+.usage-row .n { flex: none; width: 62px; text-align: right; font-variant-numeric: tabular-nums; }
+.usage-row .tag { flex: none; font-size: 10px; color: var(--info); border: 1px solid currentColor; border-radius: var(--r-pill); padding: 0 5px; }
+
+/* 改键录制中的键位徽标：明确"现在按下的会被记下来" */
+.kbd-rec { border-color: var(--brand-amber, #b45309); color: var(--brand-amber, #b45309); animation: kbd-rec-pulse 1.2s ease-in-out infinite; }
+@keyframes kbd-rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+:root[data-anim='off'] .kbd-rec, :root[data-motion='reduced'] .kbd-rec { animation: none; }

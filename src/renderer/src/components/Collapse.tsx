@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { ProcessEvent } from '@shared/types'
 import { Icon } from './Icons'
+import { ThinkingText } from './Thinking'
 import { cls } from '../lib/utils'
 
 export function Collapse({
@@ -44,7 +45,7 @@ export function Collapse({
             <div key={i} className={cls('ev', ev.kind)}>
               <span className="k">{ev.kind === 'tool' ? '工具' : ev.kind === 'log' ? '日志' : ev.kind === 'summary' ? '摘要' : '思考'}</span>
               <span className="t">{new Date(ev.ts).toLocaleTimeString('zh-CN', { hour12: false })}</span>
-              <span>{ev.text}</span>
+              {ev.kind === 'thinking' ? <ThinkingText text={ev.text} streaming={streaming} /> : <span>{ev.text}</span>}
             </div>
           ))}
           {events.length === 0 && <div className="ev"><span>暂无过程记录</span></div>}

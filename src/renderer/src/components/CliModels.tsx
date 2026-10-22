@@ -48,6 +48,7 @@ export function CliModelOptions({
             key={m}
             type="button"
             title={m}
+            className="cli-model-chip"
             onClick={() => onPick(m)}
             style={{
               font: 'inherit',

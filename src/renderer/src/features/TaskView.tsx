@@ -7,7 +7,16 @@ import { Icon } from '../components/Icons'
 import { Button, Badge } from '../components/primitives'
 import { Collapse } from '../components/Collapse'
 import { Composer } from '../components/Composer'
+import { OutputDirChip } from '../components/OutputDir'
+import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls } from '../lib/utils'
+
+/** 打开本机文件（shell.openPath；失败时如实提示，不静默 no-op） */
+async function openLocalPath(p: string) {
+  const { bridge } = await import('../lib/ipc')
+  const r = await bridge.app.openPath(p)
+  if (!r.ok) useUi.getState().toast(`无法打开：${r.message ?? p}`, 'warn')
+}
 
 const STAGE_TEXT: Record<Stage, string> = {
   planning: '规划中',
@@ -32,21 +41,6 @@ function sameSourceWarning(run: WorkflowRun): string | null {
       : '⚠ 审核方与执行方同源：该结论不具备独立验收效力（可在配置条为审核角色换一个 Agent）'
   }
   return null
-}
-
-const STATUS_TEXT: Record<string, string> = {
-  preparing: '准备中',
-  running: '执行中',
-  waiting_review: '等待审核',
-  waiting_user: '等待你的确认',
-  stopping: '停止中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-  rework_limit: '返工达到上限',
-  interrupted: '状态未知（应用重启）',
-  timeout: '超时已停止',
-  token_limit: 'Token 上限已停止'
 }
 
 export function TaskView() {
@@ -96,9 +90,7 @@ export function TaskView() {
           </div>
         </div>
         <div className="spacer" />
-        <Button variant="ghost" onClick={() => useUi.getState().setSwitchHud('__switch_ask')} title="切换到工作站或其他模式">
-          <Icon name="swap" size={14} /> 切换模式
-        </Button>
+        <OutputDirChip />
         <Button variant="ghost" onClick={() => setDetailOpen((d) => !d)}>
           <Icon name="info" size={14} /> 详情
         </Button>
@@ -282,11 +274,12 @@ function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
             {card.artifacts.map((art) => (
               <span key={art.id} className="artifact-chip">
                 <Icon name="file" size={12} />
-                {art.name}
+                <span title={art.demo ? '演示产物（未写入磁盘）' : art.by === 'tool' ? '由执行 Agent 写盘' : '由 AgentHub 保存的文本成果'}>{art.name}</span>
+                {!art.demo && <span className="artifact-by">{art.by === 'tool' ? '执行方写盘' : 'AgentHub 保存'}</span>}
                 <button
-                  disabled={!!art.demo}
+                  disabled={!!art.demo || !art.path}
                   title={art.demo ? '演示产物未写入磁盘，无法打开' : '打开产物'}
-                  onClick={() => void import('../lib/ipc').then(({ bridge }) => bridge.app.openExternal(art.path ?? ''))}
+                  onClick={() => void openLocalPath(art.path ?? '')}
                 >
                   打开
                 </button>
@@ -379,6 +372,15 @@ function DeliveryCard({ run }: { run: WorkflowRun }) {
   const newTask = useWorkflow((s) => s.newTask)
   const failed = run.status === 'failed'
   const partial = run.status === 'rework_limit'
+  // 交付时汇总本次真实文件产物（同路径只列一次）
+  const files = Array.from(
+    new Map(
+      run.cards
+        .filter((c) => c.role === 'executor' && !c.demo)
+        .flatMap((c) => (c.artifacts ?? []).filter((a) => a.kind === 'file' && !a.demo && a.path))
+        .map((a) => [a.path as string, a])
+    ).values()
+  )
   return (
     <div className={cls('delivery-card', 'card-enter', partial && 'partial', failed && 'failed')}>
       <div className="dc-head">
@@ -410,6 +412,26 @@ function DeliveryCard({ run }: { run: WorkflowRun }) {
           ))}
         </div>
         <div className="dc-section-title">产物与操作</div>
+        {files.length > 0 && (
+          <div className="artifact-row" style={{ marginBottom: 10 }}>
+            {files.map((art) => (
+              <span key={art.id} className="artifact-chip">
+                <Icon name="file" size={12} />
+                <span title={art.path}>{art.name}</span>
+                <span className="artifact-by">{art.by === 'tool' ? '执行方写盘' : 'AgentHub 保存'}</span>
+                <button onClick={() => void openLocalPath(art.path ?? '')}>打开</button>
+              </span>
+            ))}
+          </div>
+        )}
+        {run.outputDir && !run.demo && (
+          <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, lineHeight: 1.6 }}>
+            产物目录：
+            <span className="word-break" title={run.outputDir}>{run.outputDir}</span>
+            {' '}
+            <button className="link-btn" onClick={() => void openLocalPath(run.outputDir ?? '')}>打开文件夹</button>
+          </div>
+        )}
         <div className="dc-actions">
           <Button variant="secondary" onClick={() => void exportRun()}>
             <Icon name="file" size={13} /> 导出任务记录

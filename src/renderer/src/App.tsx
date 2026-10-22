@@ -3,15 +3,18 @@ import React, { useEffect, useState } from 'react'
 import { useUi } from './stores/ui'
 import { useSettings } from './stores/settings'
 import { useAgents } from './stores/agents'
-import { useWorkflow } from './stores/workflow'
+import { useWorkflow, runBusy } from './stores/workflow'
+import { HOTKEY_DEFAULTS, type HotkeyAction } from '@shared/types'
+import { matchKeyBinding, validateKeyBinding } from './lib/utils'
 import { bridge } from './lib/ipc'
 import { installDebugHooks } from './lib/debug'
 import { Splash } from './features/Splash'
 import { BrandHome } from './features/BrandHome'
 import { Workbench } from './features/Workbench'
+import { Shell } from './features/Shell'
 import { WorkflowHome } from './features/WorkflowHome'
 import { TaskView } from './features/TaskView'
-import { ModeSwitchWarning } from './features/ModeSwitch'
+import { ModeSwitchWarning, requestModeSwitch } from './features/ModeSwitch'
 import { SettingsPage } from './features/SettingsPage'
 import { Toasts } from './components/Toasts'
 import { Button, Spinner } from './components/primitives'
@@ -54,6 +57,55 @@ export function App() {
   const [ready, setReady] = useState(false)
   const [fatal, setFatal] = useState<string | null>(null)
 
+  // 全局快捷键（键位可在设置改）：切模式 / 开设置 / 停任务 / 新建工作流
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const kb = useSettings.getState().prefs?.keybindings ?? {}
+      const hit = (a: HotkeyAction) => matchKeyBinding(kb[a] ?? HOTKEY_DEFAULTS[a], e)
+      const ui = useUi.getState()
+      const wf = useWorkflow.getState()
+      if (hit('modeSwitch')) {
+        if (ui.settingsOpen || (ui.screen !== 'workbench' && ui.screen !== 'workflow')) return
+        e.preventDefault()
+        requestModeSwitch(ui.screen === 'workbench' ? 'workflow' : 'workbench')
+        return
+      }
+      if (hit('openSettings')) {
+        e.preventDefault()
+        if (ui.settingsOpen) ui.closeSettings()
+        else ui.openSettings()
+        return
+      }
+      if (hit('stopTask')) {
+        if (!runBusy(wf.run)) return // 没在跑就不吞掉这个键
+        e.preventDefault()
+        wf.stop('user')
+        return
+      }
+      if (hit('newWorkflow')) {
+        if (ui.settingsOpen) return
+        e.preventDefault()
+        ui.setScreen('workflow')
+        wf.newTask()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // 把"有没有任务在跑"报给主进程：关闭窗口的确认由它决定（主进程不自己猜引擎状态）
+  useEffect(() => {
+    let last = false
+    const push = () => {
+      const b = runBusy(useWorkflow.getState().run)
+      if (b === last) return
+      last = b
+      void bridge.app.setBusy(b)
+    }
+    push()
+    return useWorkflow.subscribe(push)
+  }, [])
+
   useEffect(() => {
     installDebugHooks()
     void (async () => {
@@ -76,22 +128,38 @@ export function App() {
         // 工作流默认配置可能引用已删除的 Agent（历史配置残留）：失效时回退到现有 Agent，不静默留空
         const pick = (savedId: string | undefined, fb: string | undefined) =>
           (savedId && byId(savedId) ? savedId : fb) || ''
-        const mk = (id: string) => {
+        const mk = (savedId: string | undefined, fb: string | undefined, override: string | undefined) => {
+          const id = pick(savedId, fb)
           const a = byId(id)
-          return { agentId: id, agentName: a?.name ?? '未配置', model: a?.model ?? '—' }
+          // 角色仍指向原 Agent 才沿用它的模型覆盖；回退到别的 Agent 时那是另一个连接的模型名
+          const ov = override && savedId && id === savedId ? override : undefined
+          return { agentId: id, agentName: a?.name ?? '未配置', model: ov ?? a?.model ?? '—', ...(ov ? { modelOverride: ov } : {}) }
         }
         useWorkflow.getState().patchConfig({
-          planner: mk(pick(wd?.plannerAgentId, agents[0]?.id)),
-          executor: mk(pick(wd?.executorAgentId, agents[1 % Math.max(agents.length, 1)]?.id ?? agents[0]?.id)),
-          reviewer: mk(pick(wd?.reviewerAgentId, agents[agents.length - 1]?.id)),
+          planner: mk(wd?.plannerAgentId, agents[0]?.id, wd?.plannerModel),
+          executor: mk(wd?.executorAgentId, agents[1 % Math.max(agents.length, 1)]?.id ?? agents[0]?.id, wd?.executorModel),
+          reviewer: mk(wd?.reviewerAgentId, agents[agents.length - 1]?.id, wd?.reviewerModel),
           reviewMode: wd?.reviewMode ?? 'human',
           maxRounds: wd?.maxRounds ?? 3,
           timeoutMin: wd?.timeoutMin ?? 30,
           confirmEveryRound: wd?.confirmEveryRound ?? false,
-          maxTokens: wd?.maxTokens ?? 0
+          maxTokens: wd?.maxTokens ?? 0,
+          outputDir: wd?.outputDir ?? ''
         })
-        // 恢复保存的快捷任务（工作流左上角卡片）
-        useWorkflow.setState({ savedTasks: cfg.savedTasks ?? [] })
+        // 预设（角色 + 模型方案）；工作流任务列表与进度由 restore() 从 runs/ 落盘记录恢复
+        useWorkflow.getState().loadPresets(cfg.presets ?? [])
+        void useWorkflow.getState().restore()
+        // 历史遗留的非法键位（例如把切模式设成 Ctrl+C，会把复制一起吞掉且毫无提示）：启动即剔除并说明
+        const kb = cfg.prefs?.keybindings
+        if (kb) {
+          const bad = (Object.keys(kb) as HotkeyAction[]).filter((a) => !validateKeyBinding(kb[a] ?? '').ok)
+          if (bad.length) {
+            const clean = { ...kb }
+            for (const a of bad) delete clean[a]
+            useSettings.getState().patchPrefs({ keybindings: clean })
+            useUi.getState().toast(`已剔除 ${bad.length} 个占用编辑必需键的快捷键（${bad.join('、')}），已恢复默认键位`, 'warn')
+          }
+        }
         setReady(true)
         // 更新检查：启动后静默检查（3 天节流，失败不打扰）；发现新版本显示顶部横幅
         bridge.update.check(false).then((r) => {
@@ -107,8 +175,7 @@ export function App() {
 
   const onRestore = () => {
     // 规格：点击"开始"固定进入品牌首页（"今天要构建什么"），工作模式由用户自选；
-    // 后台仍恢复运行中任务状态（标记"状态未知"），进入工作流时可见，不盲目重放
-    void useWorkflow.getState().restore()
+    // 工作流任务与进度在启动时已从落盘记录恢复（执行中的标"状态未知"），不自动重放
     useUi.getState().setScreen('brand')
   }
 
@@ -136,7 +203,7 @@ export function App() {
       {screen === 'splash' && <Splash onRestore={onRestore} />}
       {screen === 'brand' && <BrandHome />}
       {screen === 'workbench' && <Workbench />}
-      {screen === 'workflow' && (run ? <TaskView /> : <WorkflowHome />)}
+      {screen === 'workflow' && <Shell>{run ? <TaskView /> : <WorkflowHome />}</Shell>}
       <UpdateBanner />
       <SettingsPage />
       <ModeSwitchWarning />

@@ -5,6 +5,7 @@ import { Icon } from './Icons'
 import { IconButton } from './primitives'
 import { isSendEnter, fmtSize } from '../lib/utils'
 import { bridge } from '../lib/ipc'
+import { useUi } from '../stores/ui'
 import { uid, cls } from '../lib/utils'
 
 export function Composer({
@@ -78,17 +79,20 @@ export function Composer({
     if (!onAttachmentsChange) return
     const files = await bridge.dialogs.pickFiles()
     if (!files.length) return
-    // 文本附件内容由主进程读取；真实模型/CLI 调用会收到内容，演示 Agent 仅展示引用
+    // 文本附件带内容、图片附件带 data URL（真实调用才发送）；其余只记录引用
     const next: Attachment[] = files.map((f) => ({
       id: uid('att'),
       name: f.name,
       path: f.path,
       size: f.size,
-      kind: f.content !== undefined ? 'text' : 'binary',
+      kind: f.image ? 'image' : f.content !== undefined ? 'text' : 'binary',
       status: f.error ? 'error' : 'ok',
-      ...(f.content !== undefined ? { content: f.content } : {})
+      ...(f.content !== undefined ? { content: f.content } : {}),
+      ...(f.dataUrl !== undefined ? { dataUrl: f.dataUrl } : {})
     }))
-    onAttachmentsChange([...attachments, ...next])
+    const bad = next.filter((a) => a.status === 'error')
+    if (bad.length) useUi.getState().toast(`${bad.map((a) => a.name).join('、')} 未能添加（超出大小上限或读取失败）`, 'warn')
+    onAttachmentsChange([...attachments, ...next.filter((a) => a.status === 'ok')])
   }
 
   const removeAttachment = (id: string) => {
@@ -109,8 +113,10 @@ export function Composer({
             </span>
           ))}
           {attachments.map((a) => (
-            <span key={a.id} className={cls('attach-chip', a.status === 'error' && 'error')} title={a.status === 'error' ? `${a.path}\n读取失败或超过大小上限，内容不会发送` : a.path}>
-              <Icon name="file" size={12} />
+            <span key={a.id} className={cls('attach-chip', a.kind === 'image' && 'image', a.status === 'error' && 'error')} title={a.status === 'error' ? `${a.path}\n读取失败或超过大小上限，内容不会发送` : a.kind === 'image' ? `${a.path}\n图片会随本次请求发送给支持视觉的模型；CLI 只拿到文件路径` : a.path}>
+              {a.kind === 'image' && a.dataUrl
+                ? <img className="att-thumb" src={a.dataUrl} alt="" />
+                : <Icon name="file" size={12} />}
               <span className="name">{a.name}</span>
               {a.size > 0 && <span>{fmtSize(a.size)}</span>}
               <button className="rm" onClick={() => removeAttachment(a.id)} aria-label={`移除附件 ${a.name}`}>

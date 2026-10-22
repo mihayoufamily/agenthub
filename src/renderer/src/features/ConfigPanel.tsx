@@ -1,15 +1,21 @@
-// 工作流固定配置面板：三角色 Agent/模型、审核方式、每轮确认、返工上限、超时
-import React from 'react'
+// 工作流固定配置面板：三角色 Agent/模型、审核方式、每轮确认、返工上限、超时、产物目录
+import React, { useEffect, useState } from 'react'
 import { useWorkflow } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { Modal } from '../components/Modal'
 import { Button, Switch } from '../components/primitives'
+import { bridge } from '../lib/ipc'
 
 export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const config = useWorkflow((s) => s.config)
   const patchConfig = useWorkflow((s) => s.patchConfig)
   const agents = useAgents((s) => s.agents)
+  // 生效目录（未设置时为主进程默认值）：留空也要让用户看到实际落盘位置
+  const [effDir, setEffDir] = useState('')
+  useEffect(() => {
+    if (open) void bridge.artifacts.dir().then(setEffDir)
+  }, [open])
 
   const roleSelect = (key: 'planner' | 'executor' | 'reviewer', label: string) => {
     const cur = config[key]
@@ -81,6 +87,36 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
         {roleSelect('planner', '规划 Agent（拆解需求、维护验收标准、判断完成）')}
         {roleSelect('executor', '执行 Agent（产出产物与验证记录）')}
         {roleSelect('reviewer', '审核 Agent（对照标准检查、输出返工建议）')}
+
+        <div className="form-row">
+          <label>产物目录</label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
+            <input
+              value={config.outputDir ?? ''}
+              placeholder={effDir || '（默认：文档目录/AgentHub-artifacts）'}
+              onChange={(e) => patchConfig({ outputDir: e.target.value })}
+              style={{ flex: 1, height: 30, minWidth: 0 }}
+            />
+            <Button
+              variant="ghost"
+              onClick={async () => {
+                const dir = await bridge.tools.pickDir()
+                if (dir) patchConfig({ outputDir: dir })
+              }}
+            >
+              选择文件夹
+            </Button>
+            {!!config.outputDir && (
+              <Button variant="ghost" onClick={() => patchConfig({ outputDir: '' })}>
+                恢复默认
+              </Button>
+            )}
+          </div>
+          <span className="help">
+            本次工作流成果的落盘位置。执行 Agent 已授权文件工具时，其工作根目录在本次任务中临时改为该目录（只换目录，不提升访问级别）；
+            未授权工具时由 AgentHub 把执行成果写成文本产物。留空 = {effDir || '文档目录下的 AgentHub-artifacts'}
+          </span>
+        </div>
 
         <div className="form-row">
           <label>审核方式</label>

@@ -1,6 +1,6 @@
 // 工作流首页：标题 + 中央大输入框 + 配置条（悬停 200ms 打开可选浮层 / 点击固定）+ 开始
 import React, { useEffect, useRef, useState } from 'react'
-import { useWorkflow } from '../stores/workflow'
+import { useWorkflow, runBusy } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
 import { useSettings } from '../stores/settings'
 import { useUi } from '../stores/ui'
@@ -8,6 +8,8 @@ import { Composer } from '../components/Composer'
 import { Icon } from '../components/Icons'
 import { ConfigPanel } from './ConfigPanel'
 import { RolePicker, type RoleKey } from './RolePicker'
+import { OutputDirChip } from '../components/OutputDir'
+import { PresetChip, STATUS_TEXT } from './WfChips'
 import { cls } from '../lib/utils'
 
 export function WorkflowHome() {
@@ -16,15 +18,11 @@ export function WorkflowHome() {
   const config = useWorkflow((s) => s.config)
   const start = useWorkflow((s) => s.start)
   const isDemoRun = useWorkflow((s) => s.isDemoRun)
-  const savedTasks = useWorkflow((s) => s.savedTasks)
-  const saveCurrentTask = useWorkflow((s) => s.saveCurrentTask)
-  const deleteSavedTask = useWorkflow((s) => s.deleteSavedTask)
-  const applySavedTask = useWorkflow((s) => s.applySavedTask)
+  const tasks = useWorkflow((s) => s.tasks)
+  const openTask = useWorkflow((s) => s.openTask)
+  const removeTask = useWorkflow((s) => s.removeTask)
   const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
   const agents = useAgents((s) => s.agents)
-
-  /** 快捷卡片的角色名（按保存的 agentId 反查；Agent 已删除时如实显示） */
-  const agentName = (id: string) => agents.find((a) => a.id === id)?.name ?? '（已移除）'
 
   const [popKey, setPopKey] = useState<RoleKey | null>(null)
   const [pinned, setPinned] = useState(false)
@@ -92,40 +90,7 @@ export function WorkflowHome() {
 
   return (
     <div className="screen workflow">
-        {/* 顶部入口：模式切换 + 设置（工作流界面常驻可达） */}
-        <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', gap: 6, zIndex: 20 }}>
-          <button className="icon-btn" title="切换模式（工作站 / 工作流）" aria-label="切换模式"
-            onClick={() => useUi.getState().setSwitchHud('__switch_ask')}>
-            <Icon name="swap" size={16} />
-          </button>
-          <button className="icon-btn" title="设置" aria-label="设置"
-            onClick={() => useUi.getState().openSettings()}>
-            <Icon name="settings" size={16} />
-          </button>
-        </div>
-
-        {/* 左上角：保存的快捷任务卡片（最多 3 个，点击恢复目标与三角色配置） */}
-        {savedTasks.length > 0 && (
-          <div className="wf-saved">
-            {savedTasks.map((t) => (
-              <div key={t.id} className="wf-saved-card" title={`${t.goal}\n（点击恢复目标与配置后发起）`} onClick={() => applySavedTask(t.id)}>
-                <div className="wf-saved-goal">{t.goal.length > 42 ? t.goal.slice(0, 42) + '…' : t.goal}</div>
-                <div className="wf-saved-meta">
-                  {agentName(t.plannerAgentId)} → {agentName(t.executorAgentId)} · {t.reviewMode === 'human' ? '人工' : '自动'}审核
-                </div>
-                <button
-                  className="wf-saved-rm"
-                  title="删除该快捷任务"
-                  aria-label="删除快捷任务"
-                  onClick={(e) => { e.stopPropagation(); deleteSavedTask(t.id) }}
-                >
-                  <Icon name="close" size={11} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
+        {/* 切换模式与设置统一在左侧栏（与工作站同一处），这里不再放右上角入口 */}
         <div className="wf-home">
         <div className="wf-title">工作流模式</div>
         <div className="wf-desc">规划、执行与审核协作完成任务。</div>
@@ -141,14 +106,6 @@ export function WorkflowHome() {
           />
           <div className="wf-supplement-tip" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <span>Enter 开始（可在设置中改为 Ctrl+Enter）</span>
-            <button
-              className="cfg-chip"
-              style={{ height: 24, fontSize: 11.5 }}
-              title="保存当前目标 + 三角色配置 + 审核方式为快捷任务（左上角卡片，最多 3 个）"
-              onClick={saveCurrentTask}
-            >
-              <Icon name="check" size={11} /> 保存任务{savedTasks.length > 0 ? `（${savedTasks.length}/3）` : ''}
-            </button>
           </div>
         </div>
 
@@ -197,6 +154,9 @@ export function WorkflowHome() {
             审核：<b>{config.reviewMode === 'human' ? '人工确认' : '自动审核'}</b>
           </button>
 
+          <PresetChip />
+          <OutputDirChip />
+
           <button className="cfg-chip" onClick={() => setPanelOpen(true)}>
             <Icon name="settings" size={13} /> 更多设置
           </button>
@@ -209,6 +169,31 @@ export function WorkflowHome() {
         {demo && (
           <div style={{ marginTop: 18 }}>
             <span className="demo-badge">当前配置为演示模式 · 无真实 Agent 也能跑通全流程</span>
+          </div>
+        )}
+
+        {/* 历史区：侧栏只放最近 6 条，这里给全量（点开=回看/继续） */}
+        {tasks.length > 0 && (
+          <div className="wf-history">
+            <div className="wf-history-head">
+              <b>工作流任务（{tasks.length}）</b>
+              <span>不限个数；进度随退出保留，点开可回看卡片、产物与确认门</span>
+            </div>
+            {tasks.map((r) => {
+              const st = r.gate ? '待你确认' : STATUS_TEXT[r.status] ?? r.status
+              return (
+                <div key={r.id} className="wf-history-row">
+                  <button className="wf-history-main" onClick={() => openTask(r.id)} title={r.goal}>
+                    <span className={cls('wf-task-dot', runBusy(r) ? 'busy' : r.gate ? 'gate' : r.status === 'completed' ? 'done' : 'idle')} />
+                    <span className="txt-ellipsis">{r.goal}</span>
+                    <em>{st} · 第 {r.round}/{r.maxRounds} 轮{r.demo ? ' · 演示' : ''}</em>
+                  </button>
+                  <button className="wf-preset-rm" title="删除该任务（连同落盘记录）" aria-label="删除任务" onClick={() => void removeTask(r.id)}>
+                    ×
+                  </button>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>

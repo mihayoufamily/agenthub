@@ -73,6 +73,13 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M12 4v10m0 0l-4-4m4 4l4-4" />
       <path d="M5 19h14" />
     </>
+  ),
+  /* 用量统计：三根柱子的柱状图 */
+  chart: (
+    <>
+      <path d="M4 20h16" />
+      <path d="M7 20v-6M12 20V6M17 20v-9" />
+    </>
   )
 }
 

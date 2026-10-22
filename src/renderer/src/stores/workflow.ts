@@ -4,11 +4,11 @@
 // 演示 Agent 的卡片走脚本内容并逐卡标注"演示"，绝不把脚本内容包装成真实执行。
 import { create } from 'zustand'
 import type {
-  WorkflowRun, WorkflowConfig, RoleCard, Stage, ReviewGate,
-  Attachment, ChecklistItem, ProcessEvent, AgentConfig, SavedTask
+  WorkflowRun, WorkflowConfig, WorkflowRoleConfig, RoleCard, Stage, ReviewGate,
+  Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole
 } from '@shared/types'
 import { bridge } from '../lib/ipc'
-import { uid, chunkText, sleep, clamp } from '../lib/utils'
+import { uid, chunkText, sleep, clamp, safeName } from '../lib/utils'
 import { useUi } from './ui'
 import { useSettings } from './settings'
 import { useAgents } from './agents'
@@ -16,15 +16,20 @@ import {
   demoPlanConclusion, demoPlanChecklist, demoExecuteConclusion, demoExecuteProcess,
   demoArtifacts, demoReviewConclusion, demoReviewChecklist, demoDeliveryConclusion
 } from '../lib/demo'
-import { type RunContext, type WorkflowRole, buildRoleMessages, parseRoleOutput } from '../lib/rolePrompts'
+import { type RunContext, type WorkflowRole, type ExecutorCapability, buildRoleMessages, parseRoleOutput } from '../lib/rolePrompts'
 
 interface WorkflowState {
   draft: string
   attachments: Attachment[]
   config: WorkflowConfig
   run: WorkflowRun | null
-  /** 保存的快捷任务（左上角卡片，最多 3 个） */
-  savedTasks: SavedTask[]
+  /**
+   * 全部工作流任务（含已完成/已停止的历史）：数据源就是 runs/ 落盘记录，
+   * 所以"不限个数 + 退出保留进度 + 历史可回看"是同一件事，不需要另建一套存储。
+   */
+  tasks: WorkflowRun[]
+  /** 预设：三角色用哪个 Agent / 哪个模型，一键套用 */
+  presets: WorkflowPreset[]
   /** 引擎内部控制（不参与渲染） */
   _cancelled: boolean
   _started: boolean
@@ -36,12 +41,18 @@ interface WorkflowState {
   patchConfig: (p: Partial<WorkflowConfig>) => void
   resolveRoles: () => void
   validate: () => string | null
-  /** 保存当前目标 + 三角色配置 + 审核方式为快捷任务（最多 3 个，同配置重复保存会刷新时间置顶） */
-  saveCurrentTask: () => void
-  /** 删除一个已保存任务 */
-  deleteSavedTask: (id: string) => void
-  /** 应用已保存任务：恢复三角色/审核方式配置并把目标填入草稿（不自动发起） */
-  applySavedTask: (id: string) => void
+  /** 把当前三角色（含模型覆盖）存为一个预设；同名即覆盖更新 */
+  savePreset: (name: string) => WorkflowPreset | null
+  /** 套用预设：只改角色与模型，不动目标、产物目录与审核方式 */
+  applyPreset: (id: string) => void
+  deletePreset: (id: string) => void
+  loadPresets: (list: WorkflowPreset[]) => void
+  /** 重新拉取任务列表（落盘后与启动时） */
+  refreshTasks: () => Promise<void>
+  /** 打开某个任务回看/继续；正在执行时不许切 */
+  openTask: (id: string) => void
+  /** 删除任务（连同其落盘记录）；打开中的任务被删则回到新建态 */
+  removeTask: (id: string) => Promise<void>
 
   start: () => Promise<void>
   stop: (reason: 'user' | 'timeout') => void
@@ -57,6 +68,34 @@ interface WorkflowState {
 
 /** 当前进行中的真实模型请求（stop 时取消） */
 let activeModelReqId: string | null = null
+
+/**
+ * 是否"正在执行"：引擎只有一个执行循环，所以跑着的时候不许切任务/新建。
+ * 停在人工确认门（gate 已挂出）不算执行中——那时是空转等人点。
+ */
+export function runBusy(run: WorkflowRun | null): boolean {
+  return !!run && !run.gate && ['preparing', 'running', 'waiting_review'].includes(run.status)
+}
+
+/** 同一次终态只提醒一次（saveRun 会被反复调用） */
+let lastAnnounce = ''
+
+/**
+ * 后台跑完/停下/到确认门时发系统通知：用户可能已经切去别的应用，
+ * 界面内的 toast 看不见。窗口聚焦时主进程自己跳过，不重复打扰。
+ */
+function announce(run: WorkflowRun) {
+  const atGate = run.status === 'waiting_review' && !!run.gate
+  const terminal = ['completed', 'failed', 'cancelled', 'timeout', 'rework_limit', 'token_limit'].includes(run.status)
+  if (!atGate && !terminal) return
+  const key = `${run.id}:${run.status}`
+  if (key === lastAnnounce) return
+  lastAnnounce = key
+  const goal = run.goal.length > 18 ? run.goal.slice(0, 18) + '…' : run.goal
+  const title = atGate ? `等你确认：${goal}` : run.status === 'completed' ? `已完成：${goal}` : run.status === 'failed' ? `失败：${goal}` : `已停止：${goal}`
+  const body = atGate ? '回到 AgentHub 通过确认门，或填返工意见' : '在左侧「工作流」里点开查看结果与产物'
+  void bridge.app.notify(title, body)
+}
 
 function makeCard(role: RoleCard['role'], round: number, cfg: WorkflowConfig, demo: boolean): RoleCard {
   const roleName = role === 'planner' ? cfg.planner : role === 'executor' ? cfg.executor : role === 'reviewer' ? cfg.reviewer : cfg.planner
@@ -82,6 +121,13 @@ function updateCard(cards: RoleCard[], cardId: string, patch: Partial<RoleCard>)
 
 function appendProcess(cards: RoleCard[], cardId: string, ev: ProcessEvent): RoleCard[] {
   return cards.map((c) => (c.id === cardId ? { ...c, process: [...c.process, ev] } : c))
+}
+
+/** 登记真实文件产物（同一路径只登记一次：write 后再 replace 不算新产物） */
+function withFileArtifact(card: RoleCard, path: string, by: 'tool' | 'app'): RoleCard['artifacts'] {
+  const list = card.artifacts ?? []
+  if (list.some((a) => a.path === path)) return list
+  return [...list, { id: uid('art'), name: path.split(/[\\/]/).pop() ?? path, kind: 'file', path, by }]
 }
 
 /** 流式追加文本到卡片结论（演示脚本用；真实流由模型事件直接驱动） */
@@ -123,7 +169,7 @@ function agentChatToCard(
   user: string,
   cardId: string,
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
-  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number }
+  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number; workflow?: boolean; cliWorkDir?: string }
 ): Promise<{ ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }> {
   const reqId = uid('req')
   activeModelReqId = reqId
@@ -143,14 +189,15 @@ function agentChatToCard(
         text += ev.text
         setRun((r) => ({ ...r, cards: updateCard(r.cards, cardId, { conclusion: text }) }))
       } else if (ev.type === 'reasoning' && ev.text) {
-        // 思考增量进入当前角色卡片的过程区（同卡累计为一条"思考"，避免碎片刷屏）
+        // 思考增量进入当前角色卡片的过程区：连续增量并入同一条"思考"，
+        // 一旦中间插入工具/日志（= 换了模型轮次）就另起一条，避免多轮思考黏成一段无法分段
         setRun((r) => {
           const cur = r.cards.find((c) => c.id === cardId)
           if (!cur) return r
           const process = [...cur.process]
-          const i = process.findIndex((p) => p.kind === 'thinking')
-          const entry: ProcessEvent = { kind: 'thinking', text: (i >= 0 ? process[i].text : '') + ev.text, ts: Date.now() }
-          if (i >= 0) process[i] = entry
+          const last = process[process.length - 1]
+          const entry: ProcessEvent = { kind: 'thinking', text: (last?.kind === 'thinking' ? last.text : '') + ev.text, ts: Date.now() }
+          if (last?.kind === 'thinking') process[process.length - 1] = entry
           else process.push(entry)
           return { ...r, cards: updateCard(r.cards, cardId, { process }) }
         })
@@ -171,14 +218,7 @@ function agentChatToCard(
             ...r,
             cards: updateCard(r.cards, cardId, {
               process,
-              ...(ev.writtenPath
-                ? {
-                    artifacts: [
-                      ...cur.artifacts ?? [],
-                      { id: uid('art'), name: ev.writtenPath.split(/[\\/]/).pop() ?? ev.writtenPath, kind: 'file' as const, path: ev.writtenPath }
-                    ]
-                  }
-                : {})
+              ...(ev.writtenPath ? { artifacts: withFileArtifact(cur, ev.writtenPath, 'tool') } : {})
             })
           }
         })
@@ -217,13 +257,25 @@ function agentChatToCard(
     ]
     const launched =
       agent.kind === 'cli' && agent.cliConfig
-        ? bridge.cli.chat(agent.cliConfig.cli, { model: opts?.modelOverride ?? agent.cliConfig.model, exePath: agent.cliConfig.exePath, workDir: agent.cliConfig.workDir, timeoutMs: opts?.cliTimeoutMs }, reqId, messages)
+        ? bridge.cli.chat(
+            agent.cliConfig.cli,
+            {
+              model: opts?.modelOverride ?? agent.cliConfig.model,
+              exePath: agent.cliConfig.exePath,
+              workDir: opts?.cliWorkDir ?? agent.cliConfig.workDir,
+              timeoutMs: opts?.cliTimeoutMs,
+              // 思考强度沿用该 Agent 的配置（工作站已传、工作流此前漏传：漏传时 codex/claude 不产出思考增量）
+              thinkingLevel: agent.cliConfig.thinkingLevel
+            },
+            reqId,
+            messages
+          )
         : agent.modelConfig
           ? bridge.models.chat(
               opts?.modelOverride ? { ...agent.modelConfig, modelId: opts.modelOverride } : agent.modelConfig,
               reqId,
               messages,
-              { agentId: agent.id }
+              { agentId: agent.id, workflow: opts?.workflow }
             )
           : Promise.resolve({ ok: false })
     void launched.then((r: { ok: boolean }) => {
@@ -294,10 +346,24 @@ async function runStage(
     useUi.getState().toast(`Agent「${roleCfg.agentName}」缺少接入配置（模型或 CLI），无法执行`, 'error')
     return null
   }
-  const { system, user } = buildRoleMessages(role, ctx, agent.tools)
+  // 执行/审核角色：本次任务的产物目录即其工作根（只换目录，不提升访问级别；主进程按 workflow 标志裁决）
+  const execCap: ExecutorCapability | undefined =
+    role !== 'executor' || !agent
+      ? undefined
+      : agent.kind === 'cli'
+        ? { kind: 'cli', dir: ctx.outputDir ?? '', hasTools: true }
+        : { kind: 'model', dir: agent.tools ? (ctx.outputDir ?? '') : '', hasTools: !!agent.tools, allowCommands: agent.tools?.allowCommands, allowWeb: agent.tools?.allowWeb }
+  const { system, user } = buildRoleMessages(role, ctx, execCap, agent.systemPrompt)
+  const useOutDir = (role === 'executor' || role === 'reviewer') && !!ctx.outputDir
   // CLI 超时按角色区分：规划 3 分钟 / 审核 5 分钟 / 执行 10 分钟（把无限挂起变有界失败）
   const cliTimeoutMs = role === 'planner' ? 3 * 60_000 : role === 'reviewer' ? 5 * 60_000 : 10 * 60_000
-  const res = await agentChatToCard(agent, system, user, card.id, setRun, { maxTokens: cfg.maxTokens, modelOverride: roleCfg.modelOverride, cliTimeoutMs })
+  const res = await agentChatToCard(agent, system, user, card.id, setRun, {
+    maxTokens: cfg.maxTokens,
+    modelOverride: roleCfg.modelOverride,
+    cliTimeoutMs,
+    workflow: useOutDir,
+    ...(useOutDir ? { cliWorkDir: ctx.outputDir } : {})
+  })
   if (isCancelled()) return null
   if (!res.ok) {
     if (res.tokenLimit) {
@@ -330,15 +396,55 @@ async function runStage(
     return null
   }
   const parsed = parseRoleOutput(res.text)
-  if (parsed) {
-    setRun((r) => ({ ...r, cards: updateCard(r.cards, card.id, { conclusion: parsed.conclusion, ...(parsed.checklist ? { checklist: parsed.checklist } : {}), status: 'done' }) }))
-    get().saveRun()
-    return { conclusion: parsed.conclusion, checklist: parsed.checklist }
-  }
-  // 解析失败：降级为纯文本结论（不伪造结构化清单）
-  setRun((r) => ({ ...r, cards: updateCard(r.cards, card.id, { status: 'done' }) }))
+  const conclusion = parsed?.conclusion ?? res.text
+  setRun((r) => ({
+    ...r,
+    cards: updateCard(r.cards, card.id, {
+      conclusion,
+      ...(parsed?.checklist ? { checklist: parsed.checklist } : {}),
+      status: 'done'
+    })
+  }))
+  if (role === 'executor') await writeTextArtifactIfNone(ctx, card.id, conclusion, agent, setRun, get)
   get().saveRun()
-  return { conclusion: res.text }
+  return { conclusion, ...(parsed?.checklist ? { checklist: parsed.checklist } : {}) }
+}
+
+/**
+ * 执行角色本轮没有产出任何真实文件时，由 AgentHub 把执行结论落盘为一篇文本产物。
+ * 如实标注 by:'app'（模型未写盘，是应用保存的文本），不冒充"模型已执行"。
+ */
+async function writeTextArtifactIfNone(
+  ctx: RunContext,
+  cardId: string,
+  conclusion: string,
+  agent: AgentConfig,
+  setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
+  get: () => WorkflowState
+) {
+  const dir = ctx.outputDir
+  if (!dir || !conclusion.trim()) return
+  const card = get().run?.cards.find((c) => c.id === cardId)
+  if (!card) return
+  if ((card.artifacts ?? []).some((a) => a.kind === 'file' && a.path)) return
+  const fileName = `${safeName(ctx.goal)}_第${ctx.round}轮.md`
+  const body =
+    `# ${ctx.goal}（第 ${ctx.round} 轮执行成果）\n\n` +
+    `> 由 AgentHub 落盘：执行 Agent「${agent.name}」的文本成果原文，该 Agent 本次未直接写盘。\n\n${conclusion}\n`
+  const r = await bridge.artifacts.write(fileName, body)
+  if (!r.ok || !r.path) {
+    setRun((r2) => ({
+      ...r2,
+      notes: [...(r2.notes ?? []), `文本产物落盘失败（${r.message ?? '未知原因'}）：成果仅保存在任务记录中`]
+    }))
+    useUi.getState().toast(`文本产物落盘失败：${r.message ?? '未知原因'}`, 'warn')
+    return
+  }
+  setRun((r2) => {
+    const cur = r2.cards.find((c) => c.id === cardId)
+    if (!cur || !r.path) return r2
+    return { ...r2, cards: updateCard(r2.cards, cardId, { artifacts: withFileArtifact(cur, r.path, 'app') }) }
+  })
 }
 
 /** 真实运行的交付结论（基于任务数据生成，不虚构） */
@@ -350,14 +456,18 @@ function buildDeliveryConclusion(run: WorkflowRun, verdicts: ChecklistItem[], ex
     `\n执行成果见上方执行卡片结论。`
   ]
   if (execWasDemo) lines.push('\n注意：执行角色为演示 Agent，其卡片内容为脚本数据。')
-  // 落盘产物如实报告：有真实文件产物列出路径；没有才说明未产生（不因文案误导）
-  const realFiles = run.cards
+  // 落盘产物如实报告：区分"执行方经工具真实写盘"与"由 AgentHub 保存的文本成果"，来源不混
+  const files = run.cards
     .filter((c) => c.role === 'executor' && !c.demo)
     .flatMap((c) => (c.artifacts ?? []).filter((a) => a.kind === 'file' && !a.demo && a.path))
-  if (realFiles.length > 0) {
-    lines.push(`\n真实落盘产物 ${realFiles.length} 个：${realFiles.map((a) => a.path).join('、')}。`)
-  } else {
-    lines.push('\n说明：当前工作流接入的模型为纯文本对话（无本机工具执行权限），未产生落盘产物；如需真实文件操作，请接入支持工具执行的 Agent。')
+  const byTool = files.filter((a) => a.by === 'tool')
+  const byApp = files.filter((a) => a.by !== 'tool')
+  if (byTool.length > 0) lines.push(`\n执行方写盘文件 ${byTool.length} 个：${byTool.map((a) => a.path).join('、')}。`)
+  if (byApp.length > 0) lines.push(`\n由 AgentHub 保存的文本成果 ${byApp.length} 篇：${byApp.map((a) => a.path).join('、')}。`)
+  if (files.length === 0) {
+    lines.push(`\n说明：本次未产生文件产物${run.outputDir ? `（产物目录：${run.outputDir}）` : ''}；如任务需要真实文件，请为执行角色选择带文件能力的 Agent 或检查产物目录设置。`)
+  } else if (run.outputDir) {
+    lines.push(`\n产物目录：${run.outputDir}`)
   }
   return lines.join('')
 }
@@ -412,7 +522,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     maxTokens: 0
   },
   run: null,
-  savedTasks: [],
+  tasks: [],
+  presets: [],
   _cancelled: false,
   _started: false,
   _carryOver: null,
@@ -425,87 +536,126 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       plannerAgentId: get().config.planner.agentId,
       executorAgentId: get().config.executor.agentId,
       reviewerAgentId: get().config.reviewer.agentId,
+      // 角色级模型覆盖同样要落盘：不落盘时重启后模型悄悄变回 Agent 自带的那个
+      plannerModel: get().config.planner.modelOverride,
+      executorModel: get().config.executor.modelOverride,
+      reviewerModel: get().config.reviewer.modelOverride,
       reviewMode: get().config.reviewMode,
       maxRounds: get().config.maxRounds,
       timeoutMin: get().config.timeoutMin,
       confirmEveryRound: get().config.confirmEveryRound,
-      maxTokens: get().config.maxTokens
+      maxTokens: get().config.maxTokens,
+      outputDir: get().config.outputDir
     })
   },
 
-  saveCurrentTask: () => {
-    const goal = get().draft.trim()
-    if (!goal) {
-      useUi.getState().toast('请先填写任务目标再保存', 'warn')
-      return
+  savePreset: (name) => {
+    const nm = name.trim().slice(0, 24)
+    if (!nm) {
+      useUi.getState().toast('给预设起个名字（最多 24 字）', 'warn')
+      return null
     }
     const c = get().config
-    const task: SavedTask = {
-      id: uid('st'),
-      goal,
-      createdAt: Date.now(),
-      plannerAgentId: c.planner.agentId,
-      executorAgentId: c.executor.agentId,
-      reviewerAgentId: c.reviewer.agentId,
-      reviewMode: c.reviewMode,
-      modelOverrides: {
-        planner: c.planner.modelOverride,
-        executor: c.executor.modelOverride,
-        reviewer: c.reviewer.modelOverride
-      }
+    if (!c.planner.agentId || !c.executor.agentId || !c.reviewer.agentId) {
+      useUi.getState().toast('三角色还没配齐，存不了预设', 'warn')
+      return null
     }
-    // 同目标 + 同三角色视为同一任务：刷新时间置顶；最多保留 3 个（超出淘汰最旧）
-    const rest = get().savedTasks.filter(
-      (t) => !(t.goal === goal && t.plannerAgentId === task.plannerAgentId && t.executorAgentId === task.executorAgentId && t.reviewerAgentId === task.reviewerAgentId)
-    )
-    const next = [task, ...rest].slice(0, 3)
-    set({ savedTasks: next })
-    void bridge.config.setSavedTasks(next)
-    useUi.getState().toast(`已保存快捷任务（${next.length}/3）`, 'ok')
+    const role = (r: WorkflowRoleConfig): PresetRole => ({ agentId: r.agentId, ...(r.modelOverride ? { model: r.modelOverride } : {}) })
+    const now = Date.now()
+    // 同名 = 更新：预设是"方案"，改方案不该堆一堆重复条目
+    const prev = get().presets.find((p) => p.name === nm)
+    const next: WorkflowPreset = {
+      id: prev?.id ?? uid('pre'),
+      name: nm,
+      createdAt: prev?.createdAt ?? now,
+      updatedAt: now,
+      planner: role(c.planner),
+      executor: role(c.executor),
+      reviewer: role(c.reviewer)
+    }
+    const list = [next, ...get().presets.filter((p) => p.name !== nm)]
+    set({ presets: list })
+    void bridge.config.setPresets(list)
+    useUi.getState().toast(prev ? `预设已更新：${nm}` : `已存为预设：${nm}（共 ${list.length} 个）`, 'ok')
+    return next
   },
 
-  deleteSavedTask: (id) => {
-    const next = get().savedTasks.filter((t) => t.id !== id)
-    set({ savedTasks: next })
-    void bridge.config.setSavedTasks(next)
-  },
-
-  applySavedTask: (id) => {
-    const t = get().savedTasks.find((x) => x.id === id)
-    if (!t) return
+  applyPreset: (id) => {
+    const p = get().presets.find((x) => x.id === id)
+    if (!p) return
     const agents = useAgents.getState().agents
-    const byId = (aid: string) => agents.find((a) => a.id === aid)
-    const mk = (aid: string, mo?: string) => {
-      const a = byId(aid)
-      return { agentId: aid, agentName: a?.name ?? '未配置', model: a?.model ?? '—', ...(mo ? { modelOverride: mo } : {}) }
+    let dropped = false
+    const mk = (r: PresetRole): WorkflowRoleConfig => {
+      const a = agents.find((x) => x.id === r.agentId)
+      if (!a) {
+        dropped = true
+        return { agentId: '', agentName: '未配置', model: '—' }
+      }
+      return { agentId: a.id, agentName: a.name, model: r.model ?? a.model, ...(r.model ? { modelOverride: r.model } : {}) }
     }
-    get().patchConfig({
-      planner: mk(t.plannerAgentId, t.modelOverrides?.planner),
-      executor: mk(t.executorAgentId, t.modelOverrides?.executor),
-      reviewer: mk(t.reviewerAgentId, t.modelOverrides?.reviewer),
-      reviewMode: t.reviewMode
-    })
-    set({ draft: t.goal })
-    useUi.getState().toast('已恢复该任务的目标与配置，点击开始任务即可发起', 'ok')
+    // 只套角色与模型：目标、产物目录、审核方式与轮次属于"这次怎么跑"，不该被预设覆盖
+    get().patchConfig({ planner: mk(p.planner), executor: mk(p.executor), reviewer: mk(p.reviewer) })
+    useUi.getState().toast(dropped ? `预设「${p.name}」里有 Agent 已被删除，请重新选择` : `已套用预设：${p.name}`, dropped ? 'warn' : 'ok')
+  },
+
+  deletePreset: (id) => {
+    const list = get().presets.filter((p) => p.id !== id)
+    set({ presets: list })
+    void bridge.config.setPresets(list)
+  },
+
+  loadPresets: (list) => set({ presets: list }),
+
+  refreshTasks: async () => {
+    try {
+      const runs = await bridge.runs.list()
+      set({ tasks: Array.isArray(runs) ? runs : [] })
+    } catch { /* 列表拉不到不打断当前任务；下次落盘会再刷 */ }
+  },
+
+  openTask: (id) => {
+    const s = get()
+    if (runBusy(s.run)) {
+      useUi.getState().toast('当前工作流正在执行，请先停止再切换任务（只有一个执行循环）', 'warn')
+      return
+    }
+    const t = s.tasks.find((r) => r.id === id)
+    if (!t) return
+    // 打开即回看/继续：附件正文不随任务落盘，需要时重新添加
+    set({ run: t, draft: t.goal, attachments: [], _started: false, _cancelled: false, _carryOver: null })
+    useUi.getState().setScreen('workflow')
+  },
+
+  removeTask: async (id) => {
+    const s = get()
+    if (s.run?.id === id) {
+      if (runBusy(s.run)) {
+        useUi.getState().toast('该任务正在执行，请先停止再删除', 'warn')
+        return
+      }
+      set({ run: null, draft: '', attachments: [], _started: false, _cancelled: false })
+    }
+    await bridge.runs.remove(id)
+    await get().refreshTasks()
   },
 
   resolveRoles: () => {
     const agents = useAgents.getState().agents
     const pick = (id: string) => agents.find((a) => a.id === id)
     const s = get().config
-    const resolved: WorkflowConfig = {
-      ...s,
-      planner: s.planner.agentId && pick(s.planner.agentId)
-        ? { agentId: s.planner.agentId, agentName: pick(s.planner.agentId)!.name, model: pick(s.planner.agentId)!.model }
-        : s.planner,
-      executor: s.executor.agentId && pick(s.executor.agentId)
-        ? { agentId: s.executor.agentId, agentName: pick(s.executor.agentId)!.name, model: pick(s.executor.agentId)!.model }
-        : s.executor,
-      reviewer: s.reviewer.agentId && pick(s.reviewer.agentId)
-        ? { agentId: s.reviewer.agentId, agentName: pick(s.reviewer.agentId)!.name, model: pick(s.reviewer.agentId)!.model }
-        : s.reviewer
+    // 只刷新 Agent 侧信息，保留工作流侧的模型覆盖：整对象重建会抹掉 modelOverride，
+    // 表现为"在工作流里选好模型，点开始又变回 Agent 自带模型"（validate() 每次都会调这里）
+    const re = (r: WorkflowRoleConfig): WorkflowRoleConfig => {
+      const a = r.agentId ? pick(r.agentId) : undefined
+      if (!a) return r
+      return {
+        agentId: a.id,
+        agentName: a.name,
+        model: r.modelOverride ?? a.model,
+        ...(r.modelOverride ? { modelOverride: r.modelOverride } : {})
+      }
     }
-    set({ config: resolved })
+    set({ config: { ...s, planner: re(s.planner), executor: re(s.executor), reviewer: re(s.reviewer) } })
   },
 
   validate: () => {
@@ -536,7 +686,10 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
 
   saveRun: () => {
     const run = get().run
-    if (run) void bridge.runs.save(run)
+    if (!run) return
+    void bridge.runs.save(run).then(() => { void get().refreshTasks() })
+    // 后台跑完/停下/到确认门时发通知（界面内 toast 用户可能根本看不见）
+    announce(run)
   },
 
   start: async () => {
@@ -554,6 +707,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
 
     const demo = get().isDemoRun()
     const cfg = { ...get().config }
+    // 生效的产物目录由主进程裁决（配置留空 = 文档目录下的 AgentHub-artifacts）
+    const outputDir = await bridge.artifacts.dir()
     const carryOver = get()._carryOver
     // 文本附件内容（真实调用首轮注入规划角色；读取失败/超限的附件不发送）
     const attachmentText = get().attachments
@@ -570,7 +725,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       reviewMode: cfg.reviewMode,
       startedAt: Date.now(),
       cards: [],
-      demo
+      demo,
+      outputDir
     }
     set({ run, _cancelled: false, _started: true, _carryOver: null })
     useSettings.getState().addMemory('goal', `任务目标：${goal}`, false)
@@ -598,6 +754,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
           goal,
           round,
           maxRounds: cfg.maxRounds,
+          outputDir,
           ...(round === 1 && attachmentText ? { attachmentText } : {}),
           ...(supplements.length ? { supplements } : {}),
           ...(carryOver ? { carryOver } : {}),
@@ -797,7 +954,17 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
   },
 
   newTask: () => {
+    // 新建不会打断已在跑的任务（真跑着的时候必须先停止，否则新任务会抢同一个执行循环）
+    if (runBusy(get().run)) {
+      useUi.getState().toast('当前工作流正在执行，请先停止再新建', 'warn')
+      return
+    }
+    // 本来就是空的新任务：只清状态等于"按了没反应"（实测踩坑），要说一句去哪开始
+    const fresh = !get().run && !get().draft.trim() && get().attachments.length === 0
     set({ draft: '', attachments: [], run: null, _cancelled: false, _carryOver: null })
+    // 侧栏的加号在工作站里也能点：不切界面的话点了确实什么都不会发生
+    useUi.getState().setScreen('workflow')
+    if (fresh) useUi.getState().toast('已经是新任务：在输入框里描述目标即可开始', 'info')
   },
 
   exportRun: async () => {
@@ -815,20 +982,23 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       ...run.cards.map((c) => `## [${c.title} · 第 ${c.round} 轮] ${c.agentName}${c.demo ? '（演示数据）' : ''}\n\n${c.conclusion}\n`)
     ]
     const name = `agenthub-run-${run.id}.md`
-    const r = await bridge.dialogs.saveFile(name, lines.filter(Boolean).join('\n'))
+    // 默认落在本次任务的产物目录（用户仍可在对话框里改）：产物与任务记录同一处，不用事后找
+    const r = await bridge.dialogs.saveFile(name, lines.filter(Boolean).join('\n'), run.outputDir)
     useUi.getState().toast(r.ok ? `已导出到 ${r.message}` : '已取消导出', r.ok ? 'ok' : 'info')
   },
 
   restore: async () => {
     try {
       const runs = await bridge.runs.list()
+      set({ tasks: Array.isArray(runs) ? runs : [] })
       if (runs.length === 0) return
       const latest = runs[0]
-      // 重启后恢复展示；运行中状态无法核对 → 标记 interrupted，绝不盲目重放
-      if (['running', 'preparing', 'waiting_review'].includes(latest.status)) {
-        const restored: WorkflowRun = { ...latest, status: 'interrupted', stage: null }
-        set({ run: restored })
+      // 运行中状态无法核对 → 标记 interrupted，绝不盲目重放；停在确认门的可以接着等
+      if (runBusy(latest)) {
+        set({ run: { ...latest, status: 'interrupted' as const, stage: null } })
         useUi.getState().toast('已恢复上次任务记录；应用重启后执行状态未核对，不会自动继续执行', 'warn')
+      } else if (latest.gate) {
+        set({ run: latest })
       }
     } catch { /* 恢复失败不阻塞 */ }
   }
@@ -850,10 +1020,14 @@ async function resumeRework(
 
   const lastPlan = [...run.cards].reverse().find((c) => c.role === 'planner')
   const lastExec = [...run.cards].reverse().find((c) => c.role === 'executor')
+  // 返工沿用本次任务的产物目录（旧记录未记录时按当前配置解析一次并回填）
+  const outputDir = run.outputDir || (await bridge.artifacts.dir())
+  if (!run.outputDir) setRun((r) => ({ ...r, outputDir }))
   const ctx: RunContext = {
     goal: run.goal,
     round,
     maxRounds: cfg.maxRounds,
+    outputDir,
     ...(feedback ? { reworkFeedback: feedback } : {}),
     supplements: extractSupplements(run),
     ...(lastPlan?.conclusion ? { planConclusion: lastPlan.conclusion } : {}),

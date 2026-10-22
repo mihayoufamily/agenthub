@@ -51,6 +51,15 @@ interface AgentsState {
   addTokens: (id: string, n: number) => void
 }
 
+/**
+ * 'running' / 'awaiting' 只描述"这一次会话正在发生什么"，不是 Agent 的连接结论。
+ * 它们既不能复活到重启后（validate() 只认 available，残留会让该 Agent 永远无法参与工作流），
+ * 也不该写进用户配置。回到进入会话前的状态：available。
+ */
+function settleStatus(a: AgentConfig): AgentConfig {
+  return a.status === 'running' || a.status === 'awaiting' ? { ...a, status: 'available' } : a
+}
+
 export const useAgents = create<AgentsState>()((set, get) => ({
   agents: [],
   selectedId: null,
@@ -63,11 +72,11 @@ export const useAgents = create<AgentsState>()((set, get) => ({
     const colors: Record<string, string> = {}
     list.forEach((a, i) => (colors[a.id] = DEMO_COLORS[i % DEMO_COLORS.length]))
     const selected = list.find((a) => a.id === get().selectedId)?.id ?? null
-    set({ agents: list, colors, selectedId: selected })
+    set({ agents: list.map(settleStatus), colors, selectedId: selected })
   },
 
   persist: () => {
-    void bridge.config.setAgents(get().agents)
+    void bridge.config.setAgents(get().agents.map(settleStatus))
   },
 
   addDemoAgent: () => {

@@ -4,6 +4,8 @@ import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
 import { useSessions } from '../stores/sessions'
+import { useSettings } from '../stores/settings'
+import { bridge } from '../lib/ipc'
 import type { AgentConfig } from '@shared/types'
 
 export function installDebugHooks() {
@@ -24,15 +26,17 @@ export function installDebugHooks() {
       wf.setDraft(goal)
       await wf.start()
     },
-    // 真实 CLI 闭环验证：添加 arkcli Agent 并绑定三角色，启动一个真实工作流任务
+    // 真实 CLI 闭环验证：添加指定 CLI Agent 并绑定三角色，启动一个真实工作流任务
     // reviewMode=human + confirmEveryRound=true：第 1 轮审核后必停人工确认门，便于验证脚本驱动 passGate；
     // start() fire-and-forget：状态经 state() 轮询（await 会阻塞到整个运行结束）
-    startArkcliTask: async (goal = '用一两句话说明什么是工作流模式，并给一条验收标准') => {
+    // 返回 agentId + 是否本次新增（脚本据此决定清理时能不能删——用户原有的 Agent 绝不能删）
+    startCliTask: async (cliName = 'arkcli', goal = '用一两句话说明什么是工作流模式，并给一条验收标准') => {
       const store = useAgents.getState()
-      let agent = store.agents.find((a) => a.kind === 'cli' && a.cliConfig?.cli === 'arkcli')
+      let agent = store.agents.find((a) => a.kind === 'cli' && a.cliConfig?.cli === cliName)
+      const added = !agent
       if (!agent) {
-        const r = await store.addCliAgent('arkcli')
-        if (!r.ok || !r.agent) throw new Error(`arkcli Agent 添加失败：${r.message}`)
+        const r = await store.addCliAgent(cliName as 'arkcli')
+        if (!r.ok || !r.agent) throw new Error(`${cliName} Agent 添加失败：${r.message}`)
         agent = r.agent
       }
       const mk = () => ({ agentId: agent!.id, agentName: agent!.name, model: agent!.model })
@@ -40,10 +44,37 @@ export function installDebugHooks() {
       const wf = useWorkflow.getState()
       wf.setDraft(goal)
       void wf.start()
+      return { agentId: agent.id, name: agent.name, added }
     },
     // 人工确认门：通过并交付
     passGate: () => void useWorkflow.getState().confirmGate('deliver'),
+    /** 应用菜单加速键清单（验证 Ctrl+R 刷新 / Ctrl+Shift+I 这类默认键已不再注册） */
+    menuSummary: async () => await bridge.app.menuSummary(),
+    // 预设与槽位（本轮需求 3/4 验证用）
+    savePreset: (name: string) => {
+      const p = useWorkflow.getState().savePreset(name)
+      return p ? p.id : null
+    },
+    applyPreset: (id: string) => {
+      useWorkflow.getState().applyPreset(id)
+      return useWorkflow.getState().config.planner.agentId
+    },
+    deletePreset: (id: string) => useWorkflow.getState().deletePreset(id),
+    openWfTask: (id: string) => {
+      useWorkflow.getState().openTask(id)
+      return useWorkflow.getState().run?.id ?? null
+    },
     stopTask: () => useWorkflow.getState().stop('user'),
+    // 工作流产物目录（验证用：设置与还原，避免验证后把用户配置留在测试目录）
+    setWorkflowOutputDir: (dir: string) => {
+      useWorkflow.getState().patchConfig({ outputDir: dir })
+      return dir
+    },
+    // 验证脚本清理用：把快照的整份配置原样写回，角色绑定/审核方式不留残留
+    restoreWorkflowConfig: (cfg: Record<string, unknown>) => {
+      useWorkflow.getState().patchConfig(cfg as never)
+      return true
+    },
     // 添加指向本地 mock OpenAI 兼容服务的模型 Agent 并授予工具权限（端到端工具验证专用）
     addMockToolAgent: async (baseUrl: string, dir: string, allowCommands: boolean) => {
       const store = useAgents.getState()
@@ -102,7 +133,18 @@ export function installDebugHooks() {
     // 状态读取（校验用）
     state: () => ({
       screen: useUi.getState().screen,
+      // 当前生效的自定义键位（验证脚本据此合成按键事件，不硬编码 Ctrl+M）
+      keybindings: useSettings.getState().prefs?.keybindings ?? {},
       selectedId: useAgents.getState().selectedId,
+      configOutputDir: useWorkflow.getState().config.outputDir ?? '',
+      // 完整工作流配置快照（验证脚本据此还原用户原有绑定，不留残留）
+      config: { ...useWorkflow.getState().config },
+      // 任务列表与预设摘要（不限个数 + 历史回看）
+      wf: {
+        openRunId: useWorkflow.getState().run?.id ?? null,
+        tasks: useWorkflow.getState().tasks.map((r) => ({ id: r.id, goal: r.goal.slice(0, 20), status: r.status, gate: !!r.gate })),
+        presets: useWorkflow.getState().presets.map((p) => ({ id: p.id, name: p.name, executor: p.executor.agentId, executorModel: p.executor.model ?? null }))
+      },
       // 运行中的流（E2E 等待流式结束用）：chat:<agentId> 键列表
       streamKeys: Object.keys(useSessions.getState().activeStreams),
       agents: useAgents.getState().agents.map((a: AgentConfig) => ({ id: a.id, name: a.name, kind: a.kind, status: a.status })),
@@ -126,11 +168,14 @@ export function installDebugHooks() {
             round: useWorkflow.getState().run!.round,
             cards: useWorkflow.getState().run!.cards.length,
             demo: useWorkflow.getState().run!.demo,
-            // 卡片级摘要（工具过程与产物断言用）
+            outputDir: useWorkflow.getState().run!.outputDir ?? null,
+            // 失败原因（含 CLI 进程启动失败）落在 notes，断言时要用
+            notes: useWorkflow.getState().run!.notes ?? [],
+            // 卡片级摘要（工具过程与产物断言用；产物带来源 tool/app）
             cardDetails: useWorkflow.getState().run!.cards.map((c) => ({
               role: c.role,
               process: c.process.map((p) => `${p.kind}:${p.text.slice(0, 60)}`),
-              artifacts: c.artifacts?.map((a) => `${a.kind}:${a.name}${a.path ? `(${a.path})` : ''}`)
+              artifacts: c.artifacts?.map((a) => `${a.kind}:${a.name}${a.path ? `(${a.path})` : ''}[${a.by ?? '-'}]`)
             }))
           }
         : null

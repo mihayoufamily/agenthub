@@ -1,22 +1,25 @@
-// 设置页：七分区（外观 / Agent 与模型 / Skill / 工作流 / 快捷键 / 数据 / 关于）
+// 设置页：八分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 快捷键 / 数据 / 关于）
 import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
-import type { Skill } from '@shared/types'
+import type { Skill, HotkeyAction } from '@shared/types'
+import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
+import { UsagePanel } from '../components/UsagePanel'
 import { bridge } from '../lib/ipc'
-import { fmtTime, fmtTokens, uid, cls } from '../lib/utils'
+import { fmtTime, fmtTokens, uid, cls, formatKeyBinding, validateKeyBinding } from '../lib/utils'
 
-type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'shortcuts' | 'data' | 'about'
+type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'shortcuts' | 'data' | 'about'
 
 const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'appearance', label: '外观', icon: 'info' },
   { key: 'agents', label: 'Agent 与模型', icon: 'file' },
   { key: 'skills', label: 'Skill', icon: 'file' },
   { key: 'workflow', label: '工作流', icon: 'reorder' },
+  { key: 'usage', label: '用量统计', icon: 'file' },
   { key: 'shortcuts', label: '快捷键', icon: 'send' },
   { key: 'data', label: '数据', icon: 'folder' },
   { key: 'about', label: '关于', icon: 'info' }
@@ -60,6 +63,7 @@ export function SettingsPage() {
             {section === 'agents' && <AgentsSection />}
             {section === 'skills' && <SkillsSection />}
             {section === 'workflow' && <WorkflowSection />}
+            {section === 'usage' && <UsageSection />}
             {section === 'shortcuts' && <ShortcutsSection />}
             {section === 'data' && <DataSection />}
             {section === 'about' && <AboutSection />}
@@ -212,11 +216,18 @@ function SkillsSection() {
       useUi.getState().toast('名称与内容不能为空', 'warn')
       return
     }
+    const prev = editing && editing !== 'new' ? editing : undefined
     const r = await bridge.skills.save({
-      id: editing && editing !== 'new' ? editing.id : undefined,
+      id: prev?.id,
       name: name.trim(),
       desc: desc.trim(),
-      content
+      content,
+      // 编辑正文不能顺手丢掉来源目录/开关/格式（标准 skill 改一个字就退化成私有包了）
+      createdAt: prev?.createdAt,
+      enabled: prev?.enabled,
+      dir: prev?.dir,
+      files: prev?.files,
+      format: prev?.format
     }).catch(() => null)
     if (r?.ok) {
       useUi.getState().toast(editing && editing !== 'new' ? 'Skill 已更新' : 'Skill 已创建', 'ok')
@@ -224,6 +235,22 @@ function SkillsSection() {
       reload()
     } else {
       useUi.getState().toast(r?.message ?? '保存失败', 'error')
+    }
+  }
+
+  const toggleEnabled = async (sk: Skill) => {
+    const r = await bridge.skills.save({ ...sk, enabled: sk.enabled === false }).catch(() => null)
+    if (r?.ok) reload()
+    else useUi.getState().toast(r?.message ?? '操作失败', 'error')
+  }
+
+  const importSkillDir = async () => {
+    const r = await bridge.skills.importDir().catch(() => null)
+    if (r?.ok && r.skill) {
+      useUi.getState().toast(`已导入标准 Skill：${r.skill.name}${r.skill.files?.length ? `（附带 ${r.skill.files.length} 个文件）` : ''}`, 'ok')
+      reload()
+    } else if (r && !(r.message ?? '').includes('已取消')) {
+      useUi.getState().toast(r.message ?? '导入失败', 'error')
     }
   }
 
@@ -249,6 +276,9 @@ function SkillsSection() {
       <div className="group-title" style={{ display: 'flex', alignItems: 'center' }}>
         Skill 提示包（{skills?.length ?? 0}）
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          <Button variant="secondary" style={{ height: 28 }} onClick={() => void importSkillDir()} title="选择包含 SKILL.md 的目录（Agent Skills 开放标准）">
+            <Icon name="folder" size={13} /> 导入 Skill 目录
+          </Button>
           <Button variant="secondary" style={{ height: 28 }} onClick={importMd}>
             <Icon name="attach" size={13} /> 导入 .md
           </Button>
@@ -290,22 +320,46 @@ function SkillsSection() {
 
       {skills === null && <Spinner />}
       {skills?.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>还没有 Skill。点"新建 Skill"或"导入 .md"创建第一个。</div>}
-      {skills?.map((sk) => (
-        <div key={sk.id} className="agent-manage-row">
-          <div className="info">
-            <div className="nm">{sk.name}</div>
-            <div className="md">
-              {sk.desc || '（无简介）'} · {sk.content.length} 字 · {fmtTime(sk.updatedAt ?? sk.createdAt)}
+      {skills?.map((sk) => {
+        const on = sk.enabled !== false
+        return (
+          <div key={sk.id} className="agent-manage-row" style={on ? undefined : { opacity: 0.55 }}>
+            <label className="skill-switch" title={on ? '已启用：可被引用，未引用时也会以一行清单告知模型' : '已禁用：不出现在引用列表，也不会被注入'}>
+              <input type="checkbox" checked={on} onChange={() => void toggleEnabled(sk)} />
+            </label>
+            <div className="info">
+              <div className="nm">
+                {sk.name}
+                {sk.format === 'agentskills' && <span className="skill-tag" title="来自 SKILL.md 的标准技能包">标准</span>}
+              </div>
+              <div className="md">
+                {sk.desc || '（无简介）'} · {sk.content.length} 字 · {fmtTime(sk.updatedAt ?? sk.createdAt)}
+                {sk.dir ? ` · ${sk.dir}${sk.files?.length ? `（附带 ${sk.files.length} 个文件）` : ''}` : ''}
+              </div>
             </div>
+            <Button variant="ghost" style={{ height: 26 }} onClick={() => openEdit(sk)}>编辑</Button>
+            <Button variant="ghost" style={{ height: 26, color: 'var(--danger)' }} onClick={async () => {
+              await bridge.skills.remove(sk.id).catch(() => null)
+              useUi.getState().toast(`已删除 Skill：${sk.name}`, 'ok')
+              reload()
+            }}>删除</Button>
           </div>
-          <Button variant="ghost" style={{ height: 26 }} onClick={() => openEdit(sk)}>编辑</Button>
-          <Button variant="ghost" style={{ height: 26, color: 'var(--danger)' }} onClick={async () => {
-            await bridge.skills.remove(sk.id).catch(() => null)
-            useUi.getState().toast(`已删除 Skill：${sk.name}`, 'ok')
-            reload()
-          }}>删除</Button>
-        </div>
-      ))}
+        )
+      })}
+    </div>
+  )
+}
+
+/* ---- 用量统计（按 harness × 模型；数据源是调用账本） ---- */
+function UsageSection() {
+  return (
+    <div className="set-group">
+      <div className="group-title">用量统计</div>
+      <div className="desc" style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 10 }}>
+        按接入方（harness）与模型统计真实调用量。CLI 侧只有它自己上报 usage 时才有 token 数，
+        未上报的调用会标出次数而不是估一个数；无公开单价的模型不折算金额。
+      </div>
+      <UsagePanel />
     </div>
   )
 }
@@ -314,6 +368,11 @@ function SkillsSection() {
 function WorkflowSection() {
   const config = useWorkflow((s) => s.config)
   const patch = useWorkflow((s) => s.patchConfig)
+  // 留空时展示主进程实际生效的默认目录，避免"看不到落在哪"
+  const [effDir, setEffDir] = useState('')
+  useEffect(() => {
+    void bridge.artifacts.dir().then(setEffDir)
+  }, [config.outputDir])
   return (
     <div className="set-group">
       <Row label="默认审核方式" desc="新任务沿用的审核方式">
@@ -333,6 +392,21 @@ function WorkflowSection() {
         <input type="number" min={1} max={720} value={config.timeoutMin} style={{ width: 70, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)' }}
           onChange={(e) => patch({ timeoutMin: Math.max(1, Math.min(720, Number(e.target.value) || 30)) })} />
       </Row>
+      <Row label="产物目录" desc="执行 Agent 已授权文件工具时，本次任务的工作根目录临时改为该目录（只换目录，不提升访问级别）；未授权时由 AgentHub 把成果写成文本产物">
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 340 }}>
+          <input
+            value={config.outputDir ?? ''}
+            placeholder={effDir || '文档目录/AgentHub-artifacts'}
+            title={effDir || ''}
+            onChange={(e) => patch({ outputDir: e.target.value })}
+            style={{ flex: 1, minWidth: 0, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 8px' }}
+          />
+          <Button variant="ghost" style={{ height: 30 }} onClick={async () => {
+            const dir = await bridge.tools.pickDir()
+            if (dir) patch({ outputDir: dir })
+          }}>选择</Button>
+        </div>
+      </Row>
     </div>
   )
 }
@@ -341,7 +415,37 @@ function WorkflowSection() {
 function ShortcutsSection() {
   const prefs = useSettings((s) => s.prefs)
   const patch = useSettings((s) => s.patchPrefs)
+  const [recording, setRecording] = useState<HotkeyAction | null>(null)
   if (!prefs) return null
+  const kb = prefs.keybindings ?? {}
+  const bindingOf = (a: HotkeyAction) => kb[a] ?? HOTKEY_DEFAULTS[a]
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (!recording) return
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.key === 'Escape') {
+      setRecording(null)
+      return
+    }
+    const b = formatKeyBinding(e.nativeEvent)
+    if (!b) return // 只按了修饰键：继续等主键
+    const legal = validateKeyBinding(b)
+    if (!legal.ok) {
+      useUi.getState().toast(legal.message ?? '该键位不可用', 'warn')
+      return
+    }
+    const all = Object.keys(HOTKEY_DEFAULTS) as HotkeyAction[]
+    const clash = all.find((o) => o !== recording && bindingOf(o).toLowerCase() === b.toLowerCase())
+    if (clash) {
+      useUi.getState().toast(`与「${HOTKEY_LABELS[clash]}」的 ${b} 冲突，换一个组合`, 'warn')
+      return
+    }
+    patch({ keybindings: { ...kb, [recording]: b } })
+    useUi.getState().toast(`「${HOTKEY_LABELS[recording]}」已设为 ${b}`, 'ok')
+    setRecording(null)
+  }
+
   return (
     <div className="set-group">
       <Row label="Enter 发送" desc="关闭后 Enter 换行、Ctrl+Enter 发送（两种模式均受影响）">
@@ -350,9 +454,36 @@ function ShortcutsSection() {
       <Row label="Shift + 滚轮切换 Agent" desc="工作站内使用；带节流、到列表边界停止、显示当前 Agent">
         <Switch label="Shift+滚轮" on={prefs.shiftWheelSwitch} onChange={(v) => patch({ shiftWheelSwitch: v })} />
       </Row>
-      <div className="desc" style={{ lineHeight: 1.8 }}>
-        <span className="kbd">Shift</span> + <span className="kbd">滚轮</span>：切到上/下一个 Agent
-        <br />
+      <div className="desc" style={{ lineHeight: 1.8, marginBottom: 6 }}>
+        下面四个是窗口内全局快捷键（输入框聚焦时也生效）。点「改键」后直接按下新组合，Esc 取消；
+        必须带 Ctrl/Alt/Shift 之一，不给裸键设全局键（会吃掉正常输入）。
+      </div>
+      <div onKeyDown={onKey}>
+        {(Object.keys(HOTKEY_DEFAULTS) as HotkeyAction[]).map((a) => (
+          <Row key={a} label={HOTKEY_LABELS[a]} desc={recording === a ? '请按下新的组合键…' : '窗口内全局生效'}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span className={cls('kbd', recording === a && 'kbd-rec')}>{recording === a ? '…' : bindingOf(a)}</span>
+              <Button variant="ghost" style={{ height: 26 }} onClick={() => setRecording(recording === a ? null : a)}>
+                {recording === a ? '取消' : '改键'}
+              </Button>
+              {(kb[a] ?? null) && (
+                <Button
+                  variant="ghost"
+                  style={{ height: 26 }}
+                  onClick={() => {
+                    const next = { ...kb }
+                    delete next[a]
+                    patch({ keybindings: next })
+                  }}
+                >
+                  默认
+                </Button>
+              )}
+            </span>
+          </Row>
+        ))}
+      </div>
+      <div className="desc" style={{ lineHeight: 1.8, marginTop: 6 }}>
         <span className="kbd">Enter</span> / <span className="kbd">Shift+Enter</span>：发送 / 换行（可配置）
         <br />
         <span className="kbd">Esc</span>：关闭浮层与弹窗（关键确认除外）

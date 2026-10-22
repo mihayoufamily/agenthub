@@ -194,14 +194,17 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       set((s) => ({ activeStreams: { ...s.activeStreams, [streamKey]: agentId } }))
 
       // CLI Agent 工作目录兜底（存量 Agent 未设 workDir 时）：默认文档工作区并持久化告知——
-      // 不拦截对话，但绝不能让 CLI 在应用安装目录里执行（会污染程序文件）
+      // 不拦截对话，但绝不能让 CLI 在应用安装目录里执行（会污染程序文件）。
+      // 目录由主进程创建：渲染层自己拼路径但不建目录，CLI 拿它当 cwd 会直接 ENOENT
       let cliWorkDir = agent.cliConfig?.workDir
       if (agent.kind === 'cli' && agent.cliConfig && !cliWorkDir) {
-        const docs = useSettings.getState().appInfo?.documentsPath
-        if (docs) {
-          cliWorkDir = `${docs}\\AgentHub-workspaces\\${agent.cliConfig.cli}`
+        const r = await bridge.app.ensureWorkspaceDir(agent.cliConfig.cli)
+        if (r.ok && r.path) {
+          cliWorkDir = r.path
           useAgents.getState().updateAgent(agent.id, { cliConfig: { ...agent.cliConfig, workDir: cliWorkDir } })
           useUi.getState().toast(`该 Agent 未设工作目录，已默认使用 ${cliWorkDir}（可在顶栏"目录"修改）`, 'warn')
+        } else {
+          useUi.getState().toast(`未能准备默认工作目录（${r.message ?? '未知原因'}），请在顶栏"目录"先选一个已存在的目录`, 'warn')
         }
       }
 
@@ -212,37 +215,73 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
         .map((a) => `\n\n[附件：${a.name}]\n${a.content}`)
         .join('')
-      // Skill 提示包：以 system 消息注入本次对话（CLI 由主进程 mergeMessages 折叠进 prompt 前缀）
-      const skillBlock = skills?.length
-        ? `【以下为本次对话引用的 Skill 提示包，请遵循其指令】\n\n${skills.map((s) => `### ${s.name}\n${s.content}`).join('\n\n')}`
+      // 图片：模型走多模态消息的 data URL；CLI 没有统一的多模态入参格式，只给本机路径让它自己读
+      const imageAtts = attachments.filter((a) => a.status === 'ok' && a.kind === 'image' && a.dataUrl)
+      const cliImageText = agent.kind === 'cli' && imageAtts.length
+        ? `\n\n[图片附件在本机，需要时用文件工具自行读取]：${imageAtts.map((a) => a.path).join('、')}`
         : ''
+      // 注入分三层（CLI 由主进程 mergeMessages 折叠进 prompt 前缀）：
+      // ① 该 Agent 的常驻提示词；② 本次引用的 Skill 正文；③ 已启用但未引用的 Skill 只给一行清单
+      // —— 第三层就是渐进式加载：让模型知道有什么可用，又不必每次把整包塞进上下文
+      const usedSkills = (skills ?? []).filter((s) => s.enabled !== false)
+      const systemBlocks: string[] = []
+      if (agent.systemPrompt?.trim()) systemBlocks.push(`【该执行者的常驻要求，请始终遵守】\n${agent.systemPrompt.trim()}`)
+      if (usedSkills.length) {
+        systemBlocks.push(
+          `【以下为本次对话引用的 Skill 提示包，请遵循其指令】\n\n${usedSkills
+            .map((s) =>
+              `### ${s.name}\n${s.content}` +
+              (s.dir && s.files?.length
+                ? `\n（该技能目录 ${s.dir} 下附带文件，需要时用文件工具读取，不要凭空引用其内容）：${s.files.join('、')}`
+                : '')
+            )
+            .join('\n\n')}`
+        )
+      }
+      try {
+        const all = await bridge.skills.list()
+        const rest = all.filter((s) => s.enabled !== false && !usedSkills.some((u) => u.id === s.id))
+        if (rest.length > 0 && rest.length <= 30) {
+          systemBlocks.push(`【本机已启用的 Skill（本次未引用；需要时可要求使用其内容）】\n${rest.map((s) => `- ${s.name}：${s.desc || '（无描述）'}`).join('\n')}`)
+        }
+      } catch { /* 清单拉不到不影响本次对话 */ }
       const history = [
-        ...(skillBlock ? [{ role: 'system', content: skillBlock }] : []),
+        ...systemBlocks.map((content) => ({ role: 'system', content })),
         ...(activeOf(get(), agentId)?.messages ?? [])
         // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位）
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.error && !m.demo && !m.streaming && m.id !== msgId)
         .slice(-HISTORY_WINDOW)
         .map((m) => ({
           role: m.role,
-          content: m.id === userMsg.id ? m.text + attachmentText : m.text,
+          content: m.id === userMsg.id ? m.text + attachmentText + cliImageText : m.text,
+          // 图片只随本轮 user 消息发出（历史消息里的图片不重复发，避免每轮都驮着 base64）
+          ...(m.id === userMsg.id && agent.kind !== 'cli' && imageAtts.length
+            ? { images: imageAtts.map((a) => ({ name: a.name, dataUrl: a.dataUrl!, path: a.path })) }
+            : {}),
           // 思考内容单独携带；是否以 reasoning_content 回传接口由主进程按
           // AGENTHUB_PASS_REASONING 裁决（严格接口回传会 400，渲染层不硬编码协议）
           ...(m.role === 'assistant' && m.reasoning ? { reasoning: m.reasoning } : {})
         }))
       ]
 
+      // 工具循环会产生多段思考：正文/工具事件之后再来的思考要另起一段，
+      // 否则上一轮的过场句会和这一轮的结论句粘连成一段，重点筛选形同不存在
+      let reasoningOpen = false
       let off = bridge.models.onEvent((ev) => {
         if (ev.reqId !== reqId) return
         if (ev.type === 'delta' && ev.text) {
+          reasoningOpen = false
           set((s) => withActive(s, agentId, (ses) => ({
             ...ses,
             messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + ev.text } : m))
           })))
         } else if (ev.type === 'reasoning' && ev.text) {
           // 思考模型的思考过程：追加到消息 reasoning 字段（UI 折叠展示；多轮对话回传协议）
+          const sep = reasoningOpen ? '' : '\n\n'
+          reasoningOpen = true
           set((s) => withActive(s, agentId, (ses) => ({
             ...ses,
-            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, reasoning: (m.reasoning ?? '') + ev.text } : m))
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, reasoning: (m.reasoning ?? '') + sep + ev.text } : m))
           })))
         } else if (ev.type === 'notice' && ev.text) {
           // CLI 心跳提示（如 90 秒无输出可能卡在权限审批）：toast 一次，不打断消息
@@ -259,6 +298,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         } else if (ev.type === 'tool' && ev.toolCall) {
           // 工具调用执行记录：合并进当前回复消息（同 id 更新状态与结果，新 id 追加）
           const tc = ev.toolCall
+          reasoningOpen = false
           set((s) => withActive(s, agentId, (ses) => ({
             ...ses,
             messages: ses.messages.map((m) => {

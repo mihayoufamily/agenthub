@@ -11,8 +11,11 @@ import { Composer } from '../components/Composer'
 import { Modal } from '../components/Modal'
 import { Icon } from '../components/Icons'
 import { CliModelOptions } from '../components/CliModels'
+import { ThinkingText } from '../components/Thinking'
+import { UsagePanel } from '../components/UsagePanel'
+import { digestThinking } from '../lib/thinking'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
-import { contextWindowOf, estimateTokens, estimateCost, fmtCost } from '@shared/pricing'
+import { contextWindowOf, estimateTokens, estimateCost, fmtCost, visionOf } from '@shared/pricing'
 
 /** 稳定空数组：避免 selector 每次返回新引用导致多余渲染 */
 const EMPTY_MSGS: ChatMessage[] = []
@@ -110,6 +113,16 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 
   const doSend = () => {
     if (!draft.trim()) return
+    // 图片要先过模型能力：明确不支持的直接拦下，未登记的提示后放行（不替服务端下结论）
+    const imgs = atts.filter((a) => a.kind === 'image' && a.status === 'ok')
+    if (imgs.length && agent.kind === 'model') {
+      const v = visionOf(agent.modelConfig?.modelId ?? agent.model)
+      if (v === 'no') {
+        useUi.getState().toast(`当前模型（${agent.modelConfig?.modelId ?? agent.model}）不支持图片输入，请移除图片后再发送`, 'warn')
+        return
+      }
+      if (v === 'unknown') useUi.getState().toast(`未登记「${agent.modelConfig?.modelId ?? agent.model}」是否支持图片，仍按多模态发送；若服务端报错请换支持视觉的模型`, 'info')
+    }
     void sendMessage(agent.id, draft.trim(), atts, pickedSkills)
     setAtts([])
     setPickedSkills([])
@@ -134,24 +147,8 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           >
             <Icon name="file" size={11} /> {act ? act.title : '会话'} <Icon name="chevron" size={10} />
           </button>
-          {canSwitchModel ? (
-            <button
-              className="model-chip"
-              onClick={() => setMgmtOpen(true)}
-              title="模型管理：切换模型、思考强度（支持的 harness）、上下文窗口"
-            >
-              {agent.model} <Icon name="settings" size={11} />
-            </button>
-          ) : (
-            agent.model
-          )}
           {agent.tools?.access === 'full' && (
             <span className="full-access-badge" title="完全访问：文件工具不限目录、命令不限工作目录">完全访问</span>
-          )}
-          {balance && (
-            <span className="model-chip" title={`来自 ${agent.modelConfig?.baseUrl} 的账户余额（DeepSeek 官方接口）`}>
-              余额 {balance.currency === 'CNY' ? '¥' : ''}{balance.balance.toFixed(2)}
-            </span>
           )}
           {agent.kind === 'model' && agent.modelConfig && (
             <button
@@ -241,7 +238,17 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
       )}
 
       <div className="wb-composer-wrap">
-        <ContextUsageBar messages={messages} modelId={agent.modelConfig?.modelId ?? agent.model} contextWindow={contextWindowOf(agent.modelConfig?.modelId ?? agent.model, agent.modelConfig?.contextWindow ?? agent.cliConfig?.contextWindow)} />
+        <ContextUsageBar
+          agentId={agent.id}
+          messages={messages}
+          modelId={agent.modelConfig?.modelId ?? agent.model}
+          contextWindow={contextWindowOf(agent.modelConfig?.modelId ?? agent.model, agent.modelConfig?.contextWindow ?? agent.cliConfig?.contextWindow)}
+          agentName={agent.name}
+          isDemo={!!agent.isDemo}
+          onPickModel={canSwitchModel ? () => setMgmtOpen(true) : undefined}
+          balance={balance}
+          balanceSource={agent.modelConfig?.baseUrl}
+        />
         <Composer
           value={draft}
           onChange={(v) => setDraft(agent.id, v)}
@@ -260,8 +267,29 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   )
 }
 
-/** 上下文用量条（WorkBuddy 风格）：当前会话估算 token ÷ 模型上下文窗口 */
-function ContextUsageBar({ messages, modelId, contextWindow }: { messages: ChatMessage[]; modelId?: string; contextWindow: number }) {
+/** 对话栏底部条：模型选择 + 上下文用量 + 本会话消耗费用（用户要求这些信息离输入框最近） */
+function ContextUsageBar({
+  agentId,
+  messages,
+  modelId,
+  contextWindow,
+  agentName,
+  isDemo,
+  onPickModel,
+  balance,
+  balanceSource
+}: {
+  agentId: string
+  messages: ChatMessage[]
+  modelId?: string
+  contextWindow: number
+  agentName: string
+  isDemo: boolean
+  onPickModel?: () => void
+  balance?: { balance: number; currency: string } | null
+  balanceSource?: string
+}) {
+  const [usageOpen, setUsageOpen] = useState(false)
   // 有接口 usage 时以最后一条真实用量为准；否则按消息文本估算（含附件与思考内容）
   const lastUsage = [...messages].reverse().find((m) => m.usage?.tokens)?.usage
   const textTokens = messages.reduce((sum, m) => sum + estimateTokens(m.text ?? '') + estimateTokens(m.reasoning ?? '') + estimateTokens(m.toolCalls?.map((t) => (t.result ?? '')).join('') ?? ''), 0)
@@ -269,15 +297,39 @@ function ContextUsageBar({ messages, modelId, contextWindow }: { messages: ChatM
   const pct = Math.min(100, Math.round((used / contextWindow) * 1000) / 10)
   const tone = pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warn)' : 'var(--ok)'
   const sessionCost = messages.reduce((s, m) => s + (m.cost ?? 0), 0)
+  const sessionTokens = messages.reduce((s, m) => s + (m.usage?.tokens ?? 0), 0)
   return (
     <div className="ctx-bar" title={`上下文用量：当前会话约 ${fmtTokens(used)} / ${fmtTokens(contextWindow)} tokens${modelId ? `（${modelId}）` : ''}。实际计费以接口返回为准。`}>
+      {onPickModel ? (
+        <button className="model-chip" onClick={onPickModel} title="模型管理：切换模型、思考强度（支持的 harness）、上下文窗口">
+          {modelId ?? agentName} <Icon name="chevron" size={10} />
+        </button>
+      ) : (
+        <span className="model-chip" title="该 Agent 的模型由接入方自身决定">{modelId ?? agentName}</span>
+      )}
       <div className="ctx-track">
         <div className="ctx-fill" style={{ width: `${Math.max(pct, used > 0 ? 1.5 : 0)}%`, background: tone }} />
       </div>
       <span className="ctx-text" style={{ color: tone }}>
         上下文 {fmtTokens(used)} / {fmtTokens(contextWindow)}（{pct}%）
-        {sessionCost > 0 && <> · 本会话 {fmtCost(sessionCost)}</>}
       </span>
+      <span className="ctx-text" title={isDemo ? '演示数据：费用为脚本内容，不代表真实计费' : '本会话累计消耗（有接口 usage 时按真实用量折算）'}>
+        本会话 {sessionTokens > 0 ? `${fmtTokens(sessionTokens)} tokens · ` : ''}{fmtCost(sessionCost)}
+      </span>
+      {/* 用量快捷入口：一个图标点开本 Agent 的调用账本，不用跑去设置页翻 */}
+      <button className="icon-btn usage-open" title="用量统计（本 Agent 的调用与费用）" aria-label="用量统计" onClick={() => setUsageOpen(true)}>
+        <Icon name="chart" size={15} />
+      </button>
+      {usageOpen && (
+        <Modal open onClose={() => setUsageOpen(false)} title={`用量统计 · ${agentName}`} width={720}>
+          <UsagePanel agentId={agentId} />
+        </Modal>
+      )}
+      {balance && (
+        <span className="model-chip" title={`来自 ${balanceSource} 的账户余额（DeepSeek 官方接口）`}>
+          余额 {balance.currency === 'CNY' ? '¥' : ''}{balance.balance.toFixed(2)}
+        </span>
+      )}
     </div>
   )
 }
@@ -539,14 +591,19 @@ function WelcomePanel({ agent }: { agent: AgentConfig }) {
 function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean }) {
   const [open, setOpen] = useState(false)
   const lines = text.split('\n').filter((l) => l.trim()).length
+  const digest = digestThinking(text)
   return (
     <div className="reasoning-block">
       <button className="rb-head" onClick={() => setOpen((v) => !v)} title="思考模型的思考过程（随消息保存；工具循环默认不回传给接口，避免严格接口报 400，可用 AGENTHUB_PASS_REASONING=1 开启）">
         <Icon name={open ? 'chevron' : 'up'} size={11} />
         <span>{streaming ? '思考中…' : '思考过程'}</span>
-        <span className="rb-meta">{streaming ? `${text.length} 字` : `${lines} 行 · ${text.length} 字`}</span>
+        <span className="rb-meta">
+          {streaming
+            ? `${text.length} 字`
+            : `${lines} 行 · ${text.length} 字${digest.restCount > 0 ? ` · 默认只显重点（其余 ${digest.restCount} 段可展开）` : ''}`}
+        </span>
       </button>
-      {open && <pre className="rb-body">{text}</pre>}
+      {open && <div className="rb-body"><ThinkingText text={text} streaming={streaming} /></div>}
     </div>
   )
 }
@@ -767,7 +824,7 @@ function WorkDirModal({ agent, onClose }: { agent: AgentConfig; onClose: () => v
     updateAgent(agent.id, {
       cliConfig: { ...agent.cliConfig!, workDir: v || undefined }
     })
-    useUi.getState().toast(v ? `工作目录已设置：${v}（CLI 的文件操作将发生在此目录内）` : '已恢复默认（跟随应用进程目录）', 'ok')
+    useUi.getState().toast(v ? `工作目录已设置：${v}（CLI 的文件操作将发生在此目录内）` : '已恢复默认（文档目录下的 AgentHub-workspaces，首次使用时自动创建）', 'ok')
     onClose()
   }
 
@@ -977,6 +1034,28 @@ function ModelManageModal({ agent, onClose }: { agent: AgentConfig; onClose: () 
           </div>
         )}
 
+        {/* 常驻提示词：该执行者每次被调用都自动带上的长期要求 */}
+        {!agent.isDemo && (
+          <div className="form-row">
+            <label>常驻提示词（每次调用自动注入）</label>
+            <textarea
+              defaultValue={agent.systemPrompt ?? ''}
+              onBlur={(e) => {
+                const v = e.target.value.trim()
+                if (v === (agent.systemPrompt ?? '').trim()) return
+                updateAgent(agent.id, { systemPrompt: v || undefined })
+                useUi.getState().toast(v ? '常驻提示词已保存（工作站对话与工作流角色都会注入）' : '已清空常驻提示词', 'ok')
+              }}
+              placeholder="例如：始终用中文回答；改代码前先跑测试；不要输出解释性前言。"
+              rows={4}
+              style={{ width: '100%', fontSize: 12.5, lineHeight: 1.6, fontFamily: 'inherit' }}
+            />
+            <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4, lineHeight: 1.5 }}>
+              失焦即保存。工作流里它排在角色协议之后，不会覆盖输出格式与能力边界；与 Skill 的区别是"我对这个执行者的长期要求"，不是可复用的方法包。
+            </div>
+          </div>
+        )}
+
         {/* 用量与费用说明 */}
         <div style={{ fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.6, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
           每条回复下方显示该轮 token 用量（入/出）与估算费用；输入框上方显示上下文用量条。
@@ -1001,7 +1080,8 @@ function SkillPicker({ anchorRef, picked, onToggle, onManage, onClose }: {
   const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null)
 
   useEffect(() => {
-    void bridge.skills.list().then(setSkills).catch(() => setSkills([]))
+    // 只列已启用的：设置页里关掉开关的 Skill 不出现在引用列表，也不会被注入
+    void bridge.skills.list().then((l) => setSkills(l.filter((s) => s.enabled !== false))).catch(() => setSkills([]))
   }, [])
 
   useEffect(() => {
