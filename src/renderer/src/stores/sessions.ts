@@ -5,6 +5,7 @@ import type { AgentSession, ChatMessage, Attachment, Skill } from '@shared/types
 import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
 import { estimateCost } from '@shared/pricing'
+import { renderConventionsBlock } from '@shared/conventions'
 import { useAgents } from './agents'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -220,12 +221,21 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       const cliImageText = agent.kind === 'cli' && imageAtts.length
         ? `\n\n[图片附件在本机，需要时用文件工具自行读取]：${imageAtts.map((a) => a.path).join('、')}`
         : ''
-      // 注入分三层（CLI 由主进程 mergeMessages 折叠进 prompt 前缀）：
-      // ① 该 Agent 的常驻提示词；② 本次引用的 Skill 正文；③ 已启用但未引用的 Skill 只给一行清单
-      // —— 第三层就是渐进式加载：让模型知道有什么可用，又不必每次把整包塞进上下文
+      // 注入分四层（CLI 由主进程 mergeMessages 折叠进 prompt 前缀）：
+      // ① 该 Agent 的常驻提示词；② 工作目录里的项目约定原文；③ 本次引用的 Skill 正文；
+      // ④ 已启用但未引用的 Skill 只给一行清单
+      // —— 最后一层就是渐进式加载：让模型知道有什么可用，又不必每次把整包塞进上下文
       const usedSkills = (skills ?? []).filter((s) => s.enabled !== false)
       const systemBlocks: string[] = []
       if (agent.systemPrompt?.trim()) systemBlocks.push(`【该执行者的常驻要求，请始终遵守】\n${agent.systemPrompt.trim()}`)
+      // 项目约定按该 Agent 实际的工作目录取：CLI 用 workDir，模型 Agent 用工具沙箱根
+      const convDir = agent.kind === 'cli' ? cliWorkDir : agent.tools?.dir
+      if (convDir) {
+        try {
+          const block = renderConventionsBlock(await bridge.conv.read(convDir))
+          if (block) systemBlocks.push(block)
+        } catch { /* 约定文件读不到不影响本次对话（多数目录本来就没有） */ }
+      }
       if (usedSkills.length) {
         systemBlocks.push(
           `【以下为本次对话引用的 Skill 提示包，请遵循其指令】\n\n${usedSkills

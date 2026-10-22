@@ -230,6 +230,39 @@ console.log('\n[H] decideClose（正在执行工作流时关闭必须弹确认�
   ok('busy 由渲染层上报而非主进程猜测', readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf-8').includes('app:setBusy'))
 }
 
+// ---------- I. 项目约定自动读取（AGENTS.md / CLAUDE.md） ----------
+console.log('\n[I] readConventions（进目录自动读约定，不用手抄进常驻提示词）')
+{
+  const cv = await import('../out/main/conventions.js')
+  const dir = mkdtempSync(join(tmpdir(), 'ahub-conv-'))
+  ok('空目录返回空数组（不是异常）', (await cv.readConventions(dir)).length === 0)
+  ok('未设目录返回空数组', (await cv.readConventions(undefined)).length === 0 && (await cv.readConventions('  ')).length === 0)
+  writeFileSync(join(dir, 'AGENTS.md'), '构建用 npm run build，禁止直接改 out/。\n')
+  writeFileSync(join(dir, 'CLAUDE.md'), '回复保持中文。\n')
+  writeFileSync(join(dir, 'README.md'), '不该被读取\n')
+  const list = await cv.readConventions(dir)
+  ok('两个约定文件都读到且按声明顺序', list.length === 2 && list[0].name === 'AGENTS.md' && list[1].name === 'CLAUDE.md', JSON.stringify(list.map((f) => f.name)))
+  ok('只读约定文件，不误吞 README', !list.some((f) => f.content.includes('不该被读取')))
+  ok('子目录不放约定就不算（不递归）', (await cv.readConventions(join(dir, 'nope'))).length === 0)
+  const big = mkdtempSync(join(tmpdir(), 'ahub-conv-big-'))
+  writeFileSync(join(big, 'AGENTS.md'), 'x'.repeat(40 * 1024))
+  const [trunc] = await cv.readConventions(big)
+  ok('超长文件截断并如实标记', trunc?.truncated === true && trunc.content.length === 16 * 1024, `${trunc?.content?.length}`)
+  const block = cv.renderConventionsBlock(list)
+  ok('注入段落标出来源文件名', block.includes('AGENTS.md') && block.includes('CLAUDE.md') && block.includes('自动读取'), block.slice(0, 80))
+  ok('空清单不产生段落', cv.renderConventionsBlock([]) === '')
+  ok('截断段落写明已截断', cv.renderConventionsBlock([trunc]).includes('已截断'))
+  // 注入顺序：角色协议 → 项目约定 → 常驻要求（协议不能被仓库文字覆盖）
+  const rp = readFileSync(new URL('../src/renderer/src/lib/rolePrompts.ts', import.meta.url), 'utf-8')
+  ok('工作流三角色都带约定（约定进 RunContext 拼装）', /ctx\.conventions\?\.trim\(\)/.test(rp))
+  ok('常驻要求排在项目约定之后（后写的更贴近执行者）', rp.indexOf('ctx.conventions') < rp.indexOf('agentSystemPrompt?.trim()'))
+  // 两条链路都要接上：工作站对话 + 工作流角色
+  ok('工作站对话接了约定注入', readFileSync(new URL('../src/renderer/src/stores/sessions.ts', import.meta.url), 'utf-8').includes('renderConventionsBlock'))
+  ok('工作流引擎接了约定注入', readFileSync(new URL('../src/renderer/src/stores/workflow.ts', import.meta.url), 'utf-8').includes('conventionsBlock(outputDir)'))
+  rmSync(dir, { recursive: true, force: true })
+  rmSync(big, { recursive: true, force: true })
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

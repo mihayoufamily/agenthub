@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
-  LedgerEntry, LedgerUsageRow
+  LedgerEntry, LedgerUsageRow, ConventionFile
 } from '../shared/types'
 
 /**
@@ -126,10 +126,13 @@ const api = {
   },
   artifacts: {
     /** 当前生效的工作流产物目录（用户在执行设置里选的；未选为主进程默认值） */
-    dir: () => ipcRenderer.invoke('artifact:dir') as Promise<string>,
-    /** 由 AgentHub 落盘一篇文本产物：固定写入工作流产物目录，渲染层只能给文件名 */
+    dir: () => ipcRenderer.invoke('artifact:dir') as Promise<string>,    /** 由 AgentHub 落盘一篇文本产物：固定写入工作流产物目录，渲染层只能给文件名 */
     write: (fileName: string, content: string) =>
       ipcRenderer.invoke('artifact:write', fileName, content) as Promise<{ ok: boolean; path?: string; message?: string }>
+  },
+  /** 项目约定自动读取（AGENTS.md / CLAUDE.md 原文，主进程只读不写） */
+  conv: {
+    read: (dir?: string) => ipcRenderer.invoke('conv:read', dir) as Promise<ConventionFile[]>
   },
   dialogs: {
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<Array<{ name: string; path: string; size: number; content?: string; dataUrl?: string; image?: boolean; error?: boolean; message?: string }>>,

@@ -24,8 +24,10 @@ export interface RunContext {
   planChecklist?: ChecklistItem[]
   /** 本轮执行结论（审核角色使用） */
   execConclusion?: string
-  /** 本次任务生效的产物目录（执行角色使用：真实文件产物应落在此目录） */
+  /** 本次任务生效的产物目录（执行/审核角色使用：真实文件产物应落在此目录） */
   outputDir?: string
+  /** 产物目录下自动读取到的项目约定段落（AGENTS.md / CLAUDE.md 原文，含来源标题） */
+  conventions?: string
 }
 
 export type WorkflowRole = 'planner' | 'executor' | 'reviewer'
@@ -132,8 +134,12 @@ export function buildRoleMessages(
     lines.push(`\n产物目录：${ctx.outputDir}（执行方声称的文件成果应在此目录，可据此核实）`)
   }
   const base = role === 'executor' ? buildExecutorSystem(exec ?? { kind: 'model', dir: '', hasTools: false }) : role === 'planner' ? PLANNER_PROMPT : REVIEWER_PROMPT
-  // 常驻提示词排在角色协议之后：协议（输出格式、能力边界）不能被用户提示词覆盖掉
-  const system = agentSystemPrompt?.trim() ? `${base}\n\n【该执行者的常驻要求，请始终遵守】\n${agentSystemPrompt.trim()}` : base
+  // 追加顺序固定：角色协议 → 项目约定 → 该执行者的常驻要求。
+  // 协议（输出格式、能力边界）在最前，不能被仓库里的文字或用户提示词覆盖掉
+  const extras: string[] = []
+  if (ctx.conventions?.trim()) extras.push(ctx.conventions.trim())
+  if (agentSystemPrompt?.trim()) extras.push(`【该执行者的常驻要求，请始终遵守】\n${agentSystemPrompt.trim()}`)
+  const system = extras.length ? `${base}\n\n${extras.join('\n\n')}` : base
   return { system, user: lines.join('\n') }
 }
 

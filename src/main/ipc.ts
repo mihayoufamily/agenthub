@@ -8,6 +8,7 @@ import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill } from '../shared/types'
 import { execTool } from './tools'
+import { readConventions } from './conventions'
 import { checkUpdate } from './updater'
 import * as ledger from './ledger'
 import { setBusy } from './lifecycle'
@@ -419,6 +420,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     }
     return dir
   })
+
+  /** 读取某工作目录下的项目约定文件（AGENTS.md / CLAUDE.md）；目录为空或不存在返回空数组 */
+  ipcMain.handle('conv:read', (_e, dir?: string) => readConventions(typeof dir === 'string' ? dir : undefined))
 
   /**
    * 确保并返回 AgentHub 自建工作区目录：<文档>/AgentHub-workspaces/<name>。

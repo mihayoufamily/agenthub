@@ -413,6 +413,16 @@ export interface LedgerUsageRow {
   ms: number
 }
 
+/** 自动读取到的项目约定文件（AGENTS.md / CLAUDE.md 原文，注入上下文用） */
+export interface ConventionFile {
+  /** 文件名（AGENTS.md / CLAUDE.md） */
+  name: string
+  path: string
+  content: string
+  /** 超过注入上限时主进程截断，界面与提示词都要如实标出 */
+  truncated?: boolean
+}
+
 /** 长期记忆条目（区别于单次任务记录） */export interface MemoryEntry {
   id: string
   kind: 'goal' | 'constraint' | 'decision' | 'progress' | 'review' | 'confirm' | 'summary'

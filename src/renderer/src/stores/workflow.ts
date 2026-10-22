@@ -8,6 +8,7 @@ import type {
   Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole
 } from '@shared/types'
 import { bridge } from '../lib/ipc'
+import { renderConventionsBlock } from '@shared/conventions'
 import { uid, chunkText, sleep, clamp, safeName } from '../lib/utils'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -17,6 +18,16 @@ import {
   demoArtifacts, demoReviewConclusion, demoReviewChecklist, demoDeliveryConclusion
 } from '../lib/demo'
 import { type RunContext, type WorkflowRole, type ExecutorCapability, buildRoleMessages, parseRoleOutput } from '../lib/rolePrompts'
+
+/** 读产物目录下的项目约定（AGENTS.md / CLAUDE.md）并拼成注入段落；读不到就返回空串不干扰流程 */
+async function conventionsBlock(dir?: string): Promise<string> {
+  if (!dir) return ''
+  try {
+    return renderConventionsBlock(await bridge.conv.read(dir))
+  } catch {
+    return ''
+  }
+}
 
 interface WorkflowState {
   draft: string
@@ -715,6 +726,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
       .map((a) => `\n[附件：${a.name}]\n${a.content}`)
       .join('')
+    // 产物目录里若放着项目约定文件，整轮任务自动带上（三个角色都带：规划要按约定定验收标准）
+    const conventions = await conventionsBlock(outputDir)
     const run: WorkflowRun = {
       id: uid('run'),
       goal,
@@ -755,6 +768,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
           round,
           maxRounds: cfg.maxRounds,
           outputDir,
+          ...(conventions ? { conventions } : {}),
           ...(round === 1 && attachmentText ? { attachmentText } : {}),
           ...(supplements.length ? { supplements } : {}),
           ...(carryOver ? { carryOver } : {}),
@@ -1023,11 +1037,13 @@ async function resumeRework(
   // 返工沿用本次任务的产物目录（旧记录未记录时按当前配置解析一次并回填）
   const outputDir = run.outputDir || (await bridge.artifacts.dir())
   if (!run.outputDir) setRun((r) => ({ ...r, outputDir }))
+  const reworkConventions = await conventionsBlock(outputDir)
   const ctx: RunContext = {
     goal: run.goal,
     round,
     maxRounds: cfg.maxRounds,
     outputDir,
+    ...(reworkConventions ? { conventions: reworkConventions } : {}),
     ...(feedback ? { reworkFeedback: feedback } : {}),
     supplements: extractSupplements(run),
     ...(lastPlan?.conclusion ? { planConclusion: lastPlan.conclusion } : {}),
