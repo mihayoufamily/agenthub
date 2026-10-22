@@ -34,12 +34,40 @@ export interface AgentConfig {
  * dir 为沙箱根：read/write/list/delete/move/search/glob/replace 全部限制在其内（路径规范化后逃逸即拒绝）；
  * allowCommands 单独开关（默认关）：开启后 run_command 以 dir 为工作目录执行，超时与输出有上限；
  * allowWeb 单独开关（默认关）：开启后 web_fetch/web_search 可访问外网（http/https）。
+ * access 单独开关（默认 'sandbox'）：'full' = 完全访问——文件工具不再限制目录（全盘），命令不限工作目录；
+ *   开启需用户在授权面板勾选红色风险确认，界面持续显示"完全访问"红标。
  */
 export interface ToolGrant {
   dir: string
   allowCommands?: boolean
   /** 联网工具（web_fetch/web_search）授权；默认关，用户在授权面板单独开启 */
   allowWeb?: boolean
+  /** 访问模式：sandbox（默认，沙箱内）/ full（完全访问，全盘文件 + 不限目录命令） */
+  access?: 'sandbox' | 'full'
+}
+
+/** 思考强度（仅对官方支持的 harness 显示与透传；不支持的模型不显示该设置） */
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high'
+
+/** Skill：可复用提示包（Markdown），聊天中引用后注入本次对话上下文 */
+export interface Skill {
+  id: string
+  name: string
+  desc: string
+  /** Markdown 内容（注入时的正文） */
+  content: string
+  createdAt: number
+  updatedAt?: number
+}
+
+/** 单次请求的用量（usage 事件；CLI 与模型 Agent 通用） */
+export interface UsageInfo {
+  /** 总 tokens（尽力解析；拿不到明细时仅有此字段） */
+  tokens?: number
+  /** 输入 tokens（prompt_tokens） */
+  prompt?: number
+  /** 输出 tokens（completion_tokens） */
+  completion?: number
 }
 
 /** 一次工具调用的执行记录（随消息保存，可追溯） */
@@ -66,6 +94,10 @@ export interface CliAgentConfig {
    * 不填 = 跟随应用进程目录（默认行为）。目录不存在时执行会如实报错，不悄悄创建。
    */
   workDir?: string
+  /** 思考强度（仅 codex/claude 等官方支持的 CLI 显示；透传到各自参数） */
+  thinkingLevel?: ThinkingLevel
+  /** 上下文窗口大小（tokens；仅用于上下文用量条显示，不传给 CLI） */
+  contextWindow?: number
 }
 
 export interface CustomModelConfig {
@@ -76,6 +108,10 @@ export interface CustomModelConfig {
   keyId: string
   hasKey: boolean
   temperature?: number
+  /** 思考强度（仅对官方支持的模型显示：o 系列/方舟思考模型等；不支持的模型不显示） */
+  thinkingLevel?: ThinkingLevel
+  /** 上下文窗口大小（tokens；用于上下文用量条；留空按内置对照表推断） */
+  contextWindow?: number
 }
 
 export interface Attachment {
@@ -107,6 +143,12 @@ export interface ChatMessage {
   reasoning?: string
   /** 本次回复中的工具调用记录（文件读写/命令执行，随消息可追溯） */
   toolCalls?: ToolCall[]
+  /** 本条回复的 token 用量（usage 事件；CLI 与模型 Agent 通用） */
+  usage?: UsageInfo
+  /** 本条回复的估算费用（元；按官方单价折算，无单价数据时缺省） */
+  cost?: number
+  /** 本条消息引用的 Skill（注入对话的提示包，仅记录名称） */
+  skills?: string[]
 }
 
 export interface AgentSession {
@@ -259,6 +301,8 @@ export interface AppConfig {
   }
   /** 工作流保存的快捷任务（最多 3 个，超出淘汰最旧） */
   savedTasks?: SavedTask[]
+  /** Skill 提示包（Markdown 可复用；聊天引用注入，设置页管理） */
+  skills?: Skill[]
 }
 
 /** 保存的任务：目标 + 三角色完整配置 + 审核方式（点击卡片直接恢复整套配置发起新任务） */

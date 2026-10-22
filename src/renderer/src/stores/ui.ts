@@ -20,6 +20,8 @@ interface UiState {
   homeAttachments: Attachment[]
   pendingMode: WorkMode | null
   settingsOpen: boolean
+  /** 设置页打开时定位的分区（如 'skills'；关闭时清除） */
+  settingsSection: string | null
   toasts: ToastItem[]
   switchHud: string | null
   bootError: string | null
@@ -31,7 +33,7 @@ interface UiState {
   setHomeDraft: (t: string) => void
   setHomeAttachments: (a: Attachment[]) => void
   setPendingMode: (m: WorkMode | null) => void
-  openSettings: () => void
+  openSettings: (section?: string) => void
   closeSettings: () => void
   toast: (text: string, kind?: ToastItem['kind']) => void
   dismissToast: (id: string) => void
@@ -47,6 +49,7 @@ export const useUi = create<UiState>()((set) => ({
   homeAttachments: [],
   pendingMode: null,
   settingsOpen: false,
+  settingsSection: null,
   toasts: [],
   switchHud: null,
   bootError: null,
@@ -57,8 +60,7 @@ export const useUi = create<UiState>()((set) => ({
   setHomeDraft: (t) => set({ homeDraft: t }),
   setHomeAttachments: (a) => set({ homeAttachments: a }),
   setPendingMode: (m) => set({ pendingMode: m }),
-  openSettings: () => set({ settingsOpen: true }),
-  closeSettings: () => set({ settingsOpen: false }),
+  openSettings: (section?: string) => set({ settingsOpen: true, settingsSection: section ?? null }),  closeSettings: () => set({ settingsOpen: false, settingsSection: null }),
   toast: (text, kind = 'info') => {
     const id = uid('toast')
     set((s) => ({ toasts: [...s.toasts, { id, text, kind }] }))

@@ -149,6 +149,31 @@ export function TaskView() {
               </div>
               <div className="gate-actions">
                 <Button variant="secondary" onClick={() => useWorkflow.getState().continueModify()}>以此为目标开新任务</Button>
+                <Button variant="ghost" onClick={() => useWorkflow.getState().newTask()}>新建任务</Button>
+                <Button variant="ghost" onClick={() => void exportRun()}>导出任务记录</Button>
+              </div>
+            </div>
+          )}
+          {/* 终态操作卡：已取消/失败/超时——此前这些终态没有任何出口，
+              用户被留在死任务界面（补充输入无效、无法新建任务），实测修复 */}
+          {(['cancelled', 'failed'] as const).includes(run.status as 'cancelled' | 'failed') && (
+            <div className="gate-card" style={{ borderColor: 'rgba(220,38,38,.4)', background: 'var(--danger-bg, rgba(220,38,38,.06))' }}>
+              <div className="gate-title" style={{ color: 'var(--danger)' }}>
+                <Icon name="warn" size={16} />{run.status === 'cancelled' ? '任务已停止' : '任务失败'}
+              </div>
+              <div className="gate-review">
+                {run.status === 'cancelled'
+                  ? '任务已被手动停止（或超时）。已产生的卡片与记录均已保留，不会盲目重放可能产生副作用的操作。'
+                  : '执行过程中出现错误（原因见下方记录/提示）。已产生的卡片与记录均已保留。'}
+                {run.notes && run.notes.length > 0 && (
+                  <div style={{ marginTop: 6, color: 'var(--text-2)', lineHeight: 1.6 }}>
+                    {run.notes.map((n, i) => <div key={i}>· {n}</div>)}
+                  </div>
+                )}
+              </div>
+              <div className="gate-actions">
+                <Button variant="primary" onClick={() => useWorkflow.getState().newTask()}>新建任务</Button>
+                <Button variant="secondary" onClick={() => useWorkflow.getState().continueModify()}>以此为目标开新任务</Button>
                 <Button variant="ghost" onClick={() => void exportRun()}>导出任务记录</Button>
               </div>
             </div>
@@ -170,11 +195,15 @@ export function TaskView() {
         </div>
       </div>
 
-      <div className="wb-composer-wrap">
-        <div style={{ width: 'min(860px, 100%)' }}>
-          <TaskComposer />
+      {/* 终态（已停止/失败/返工上限/中断）不展示补充输入——补充要求只在执行中有效，
+          终态保留输入会让用户误以为还能推进任务；出口统一由终态操作卡提供 */}
+      {!['cancelled', 'failed', 'rework_limit', 'interrupted'].includes(run.status) && (
+        <div className="wb-composer-wrap">
+          <div style={{ width: 'min(860px, 100%)' }}>
+            <TaskComposer />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -323,6 +352,7 @@ function GateCard({ run }: { run: WorkflowRun }) {
 function ReworkLimitCard({ run }: { run: WorkflowRun }) {
   const exportRun = useWorkflow((s) => s.exportRun)
   const continueModify = useWorkflow((s) => s.continueModify)
+  const newTask = useWorkflow((s) => s.newTask)
   return (
     <div className="gate-card card-enter" style={{ background: 'var(--warn-bg)' }}>
       <div className="gate-title">
@@ -336,6 +366,7 @@ function ReworkLimitCard({ run }: { run: WorkflowRun }) {
       </div>
       <div className="gate-actions">
         <Button variant="secondary" onClick={() => void exportRun()}>导出任务记录</Button>
+        <Button variant="ghost" onClick={newTask}>新建任务</Button>
         <Button variant="primary" onClick={continueModify}>以此为目标开新任务</Button>
       </div>
     </div>

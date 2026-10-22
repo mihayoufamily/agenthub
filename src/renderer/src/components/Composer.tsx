@@ -1,6 +1,6 @@
-// 输入组件：自适应增高、IME 安全、附件、发送状态
+// 输入组件：自适应增高、IME 安全、附件、Skill 引用、发送状态
 import React, { useEffect, useRef } from 'react'
-import type { Attachment } from '@shared/types'
+import type { Attachment, Skill } from '@shared/types'
 import { Icon } from './Icons'
 import { IconButton } from './primitives'
 import { isSendEnter, fmtSize } from '../lib/utils'
@@ -18,7 +18,11 @@ export function Composer({
   disabled = false,
   autoFocusOnMount = false,
   hint,
-  maxHeightVh = 40
+  maxHeightVh = 40,
+  pickedSkills = [],
+  onOpenSkills,
+  onSkillButtonRef,
+  onRemoveSkill
 }: {
   value: string
   onChange: (v: string) => void
@@ -31,6 +35,11 @@ export function Composer({
   autoFocusOnMount?: boolean
   hint?: React.ReactNode
   maxHeightVh?: number
+  /** 已引用的 Skill（发送时注入对话） */
+  pickedSkills?: Skill[]
+  onOpenSkills?: () => void
+  onSkillButtonRef?: React.RefObject<HTMLButtonElement>
+  onRemoveSkill?: (id: string) => void
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null)
   const composingRef = useRef(false)
@@ -88,8 +97,17 @@ export function Composer({
 
   return (
     <div className="composer">
-      {attachments.length > 0 && (
+      {(attachments.length > 0 || pickedSkills.length > 0) && (
         <div className="attach-row">
+          {pickedSkills.map((sk) => (
+            <span key={`sk-${sk.id}`} className="attach-chip skill-chip" title={`Skill：${sk.desc || sk.name}\n引用后随本条消息注入对话`}>
+              <Icon name="file" size={12} />
+              <span className="name">{sk.name}</span>
+              <button className="rm" onClick={() => onRemoveSkill?.(sk.id)} aria-label={`移除 Skill ${sk.name}`}>
+                <Icon name="close" size={11} />
+              </button>
+            </span>
+          ))}
           {attachments.map((a) => (
             <span key={a.id} className={cls('attach-chip', a.status === 'error' && 'error')} title={a.status === 'error' ? `${a.path}\n读取失败或超过大小上限，内容不会发送` : a.path}>
               <Icon name="file" size={12} />
@@ -116,9 +134,21 @@ export function Composer({
       />
       <div className="composer-bar">
         {onAttachmentsChange && (
-          <IconButton title="添加附件" onClick={pickFiles} disabled={disabled}>
+          <IconButton title="添加附件（引用文件）" onClick={pickFiles} disabled={disabled}>
             <Icon name="attach" size={16} />
           </IconButton>
+        )}
+        {onOpenSkills && (
+          <button
+            ref={onSkillButtonRef}
+            className="icon-btn"
+            title="引用 Skill（提示包，随消息注入）"
+            onClick={onOpenSkills}
+            disabled={disabled}
+            aria-label="引用 Skill"
+          >
+            <Icon name="file" size={16} />
+          </button>
         )}
         <span className="composer-hint">
           {hint ?? (enterToSend ? <span>Enter 发送 · Shift+Enter 换行</span> : <span>Ctrl+Enter 发送</span>)}

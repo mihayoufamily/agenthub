@@ -331,3 +331,23 @@
   background: var(--surface, #fff); color: var(--text); font-size: 12.5px; outline: none;
 }
 .model-chip.open { border-color: var(--brand-amber, #b45309); }
+
+/* ---- 模型管理 / 完全访问标识 / 上下文用量条 / Skill 引用 ---- */
+.full-access-badge {
+  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--r-pill, 999px);
+  background: rgba(210, 59, 59, 0.12); border: 1px solid rgba(210, 59, 59, 0.45);
+  color: var(--danger, #c0392b); font-size: 11px; font-weight: 700;
+}
+/* 上下文用量条（WorkBuddy 风格）：输入框上方细条 + 文本 */
+.ctx-bar {
+  display: flex; align-items: center; gap: 8px; padding: 0 2px 6px;
+}
+.ctx-track {
+  flex: 1; height: 4px; border-radius: 999px; overflow: hidden;
+  background: var(--border, rgba(0,0,0,0.12));
+}
+.ctx-fill { height: 100%; border-radius: 999px; transition: width 0.25s ease; }
+.ctx-text { flex: none; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Skill 引用 chip（与附件 chip 同风格，主题色区分） */
+.skill-chip { border-color: rgba(180, 83, 9, 0.4); color: var(--brand-amber, #b45309); }
+.skill-picker { width: 300px; }

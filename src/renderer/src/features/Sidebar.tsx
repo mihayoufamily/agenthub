@@ -221,7 +221,7 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
         <button className="foot-btn" onClick={() => useUi.getState().setSwitchHud('__switch_ask')} title="切换模式">
           <Icon name="swap" size={15} /> <span>切换模式</span>
         </button>
-        <button className="foot-btn" onClick={openSettings} title="设置">
+        <button className="foot-btn" onClick={() => openSettings()} title="设置">
           <Icon name="settings" size={15} /> <span>设置</span>
         </button>
       </div>

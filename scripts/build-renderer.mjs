@@ -21,9 +21,21 @@ rmSync(`${cwd}/.tmp`, { recursive: true, force: true })
 run('npx', ['tsc', '-p', 'tsconfig.build-web.json'])
 
 // 2) rollup 打包（react/react-dom 为 CJS，需 commonjs 插件；NODE_ENV 置 production）
+// @shared/* 别名：tsconfig 的 paths 只用于类型解析，不会改写 tsc 产物里的 import 说明符，
+// 因此值导入（如 @shared/pricing）必须在此映射到 .tmp/renderer/shared/*（rootDir=src 的产物布局）
+const sharedAlias = {
+  name: 'agenthub-shared-alias',
+  resolveId(source) {
+    if (source.startsWith('@shared/')) {
+      return `${cwd}/.tmp/renderer/shared/${source.slice('@shared/'.length)}.js`
+    }
+    return null
+  }
+}
 const bundle = await rollup({
   input: `${cwd}/.tmp/renderer/renderer/src/main.js`,
   plugins: [
+    sharedAlias,
     replace({ preventAssignment: true, values: { 'process.env.NODE_ENV': JSON.stringify('production') } }),
     resolve(),
     commonjs()

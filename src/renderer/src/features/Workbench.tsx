@@ -84,7 +84,7 @@ export function Workbench() {
                 <Button variant="primary" onClick={() => setModal('add')}>
                   <Icon name="plus" size={14} /> 添加 Agent
                 </Button>
-                <Button variant="ghost" onClick={openSettings}>设置</Button>
+                <Button variant="ghost" onClick={() => openSettings()}>设置</Button>
               </div>
             }
           />

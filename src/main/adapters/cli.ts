@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import type { ChatChunkEvent } from './openai'
 import { humanizeError } from './openai'
 import { killTree } from '../tools'
+import type { ThinkingLevel } from '../../shared/types'
 
 /**
  * 本机 Agent CLI 执行适配层（接入"现成 Agent"而非"模型 API"，规格 §10）。
@@ -38,10 +39,20 @@ export interface CliChatOptions {
   workDir?: string
   /** 单次调用超时（毫秒）：超时 kill 进程并 emit error，已产出内容保留；不填默认 10 分钟 */
   timeoutMs?: number
+  /** 思考强度（仅对官方支持的 CLI 生效：codex=reasoning effort，claude=MAX_THINKING_TOKENS） */
+  thinkingLevel?: ThinkingLevel
 }
 
 /** Windows 命令行长度硬上限（UTF-16 code units）附近的安全值 */
 const MAX_PROMPT_CHARS = 28000
+
+/** Claude Code 思考预算（MAX_THINKING_TOKENS，官方文档档位） */
+const THINKING_BUDGET: Record<string, number> = { low: 4000, medium: 16000, high: 31999 }
+
+/** 各 CLI 是否官方支持思考强度（UI"支持才显示"的依据） */
+export function cliSupportsThinking(name: CliName): boolean {
+  return name === 'codex' || name === 'claude'
+}
 
 /** 一个可启动目标：真正的可执行文件 + 固定前置参数 + 需要的环境变量 */
 export interface CliTarget {
@@ -73,6 +84,8 @@ interface CliSpec {
   makeParser?(): (obj: Record<string, unknown>, emit: (e: Omit<ChatChunkEvent, 'reqId'>) => void) => void
   /** 进程正常退出即视为完成 */
   doneOnExit: boolean
+  /** 思考强度的环境变量映射（可选；codex 用 -c 参数在 buildArgs 内处理，不需要此字段） */
+  thinkingEnv?: (level: ThinkingLevel | undefined) => Record<string, string>
 }
 
 // ---------------------------------------------------------------- 工具事件（执行卡片透传）
@@ -150,7 +163,7 @@ function makeStreamJsonParser(): (obj: Record<string, unknown>, emit: (e: Omit<C
     } else if (type === 'result') {
       const usage = obj.usage as { total_tokens?: number; input_tokens?: number; output_tokens?: number } | undefined
       const tokens = usage?.total_tokens ?? (usage?.input_tokens != null && usage?.output_tokens != null ? usage.input_tokens + usage.output_tokens : undefined)
-      if (tokens) emit({ type: 'usage', usage: { tokens } })
+      if (tokens) emit({ type: 'usage', usage: { tokens, prompt: usage?.input_tokens, completion: usage?.output_tokens } })
       if (obj.is_error === true) {
         const errs = Array.isArray(obj.errors) ? obj.errors.map(String) : []
         emit({ type: 'error', message: (errs[0] ?? String(obj.result ?? 'CLI 返回错误')).slice(0, 300) })
@@ -327,7 +340,9 @@ const SPECS: Record<CliName, CliSpec> = {
     },
     format: 'ndjson',
     makeParser: makeStreamJsonParser,
-    doneOnExit: false // 以 result 事件为准；无 result 的正常退出也兜底 done
+    doneOnExit: false, // 以 result 事件为准；无 result 的正常退出也兜底 done
+    /** 思考强度：Claude Code 官方用 MAX_THINKING_TOKENS 环境变量控制思考预算 */
+    thinkingEnv: (level) => (level && level !== 'off' ? { MAX_THINKING_TOKENS: String(THINKING_BUDGET[level] ?? 0) } : {} as Record<string, string>)
   },
 
   // 实测：codex exec --json JSONL（thread.started / item.completed / turn.completed / turn.failed）
@@ -355,6 +370,10 @@ const SPECS: Record<CliName, CliSpec> = {
       const full = system ? `【系统指令】${system}\n\n【任务】${prompt}` : prompt
       const args = ['exec', '--json', '--skip-git-repo-check', full.slice(0, MAX_PROMPT_CHARS)]
       if (opts.model) args.push('-m', opts.model)
+      // 思考强度：codex 官方用 model_reasoning_effort 配置项（-c 覆盖）
+      if (opts.thinkingLevel && opts.thinkingLevel !== 'off') {
+        args.push('-c', `model_reasoning_effort=${opts.thinkingLevel}`)
+      }
       return args
     },
     format: 'ndjson',
@@ -398,7 +417,7 @@ const SPECS: Record<CliName, CliSpec> = {
         } else if (type === 'turn.completed') {
           const usage = obj.usage as { total_tokens?: number; input_tokens?: number; output_tokens?: number } | undefined
           const tokens = usage?.total_tokens ?? (usage?.input_tokens != null && usage?.output_tokens != null ? usage.input_tokens + usage.output_tokens : undefined)
-          if (tokens) emit({ type: 'usage', usage: { tokens } })
+          if (tokens) emit({ type: 'usage', usage: { tokens, prompt: usage?.input_tokens, completion: usage?.output_tokens } })
           emit({ type: 'done' })
         } else if (type === 'error') {
           // 顶层错误（如 429）：直接作为错误事件，避免只看到"退出码 1"
@@ -784,7 +803,8 @@ export async function cliChatStream(
     const proc = spawn(target.exe, args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      ...(target.env ? { env: { ...process.env, ...target.env } } : {}),
+      // 思考强度环境变量（claude 的 MAX_THINKING_TOKENS 等）叠加在目标 env 之上
+      ...(spec.thinkingEnv ? { env: { ...process.env, ...(target.env ?? {}), ...spec.thinkingEnv(opts.thinkingLevel) } } : (target.env ? { env: { ...process.env, ...target.env } } : {})),
       ...(cwdDir ? { cwd: cwdDir } : {})
     })
     activeChats.set(reqId, proc)

@@ -1,9 +1,10 @@
 // 会话状态：每个 Agent 独立的多会话（列表/切换/重命名/删除）+ 草稿随会话保留；
 // 演示回复引擎 + 真实模型流式接入；磁盘为 v2 多会话格式（旧单会话文件由主进程自动迁移）
 import { create } from 'zustand'
-import type { AgentSession, ChatMessage, Attachment } from '@shared/types'
+import type { AgentSession, ChatMessage, Attachment, Skill } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
+import { estimateCost } from '@shared/pricing'
 import { useAgents } from './agents'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -25,7 +26,8 @@ interface SessionsState {
   messagesOf: (agentId: string) => ChatMessage[]
   draftOf: (agentId: string) => string
   setDraft: (agentId: string, text: string) => void
-  sendMessage: (agentId: string, text: string, attachments: Attachment[]) => Promise<void>
+  /** 发送消息；skills 为本次引用的 Skill 提示包（注入对话上下文，仅记录名称） */
+  sendMessage: (agentId: string, text: string, attachments: Attachment[], skills?: Skill[]) => Promise<void>
   newSession: (agentId: string) => void
   switchSession: (agentId: string, sessionId: string) => void
   renameSession: (agentId: string, sessionId: string, title: string) => void
@@ -116,7 +118,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
     persistAgent(agentId)
   },
 
-  sendMessage: async (agentId, text, attachments) => {
+  sendMessage: async (agentId, text, attachments, skills) => {
     const agents = useAgents.getState()
     const agent = agents.agents.find((a) => a.id === agentId)
     if (!agent) return
@@ -133,7 +135,8 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       text,
       ts: Date.now(),
       model: agent.model,
-      attachments: attachments.length ? attachments : undefined
+      attachments: attachments.length ? attachments : undefined,
+      skills: skills?.length ? skills.map((s) => s.name) : undefined
     }
     set((s) => withActive(s, agentId, (ses) => ({
       ...ses,
@@ -209,7 +212,13 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
         .map((a) => `\n\n[附件：${a.name}]\n${a.content}`)
         .join('')
-      const history = (activeOf(get(), agentId)?.messages ?? [])
+      // Skill 提示包：以 system 消息注入本次对话（CLI 由主进程 mergeMessages 折叠进 prompt 前缀）
+      const skillBlock = skills?.length
+        ? `【以下为本次对话引用的 Skill 提示包，请遵循其指令】\n\n${skills.map((s) => `### ${s.name}\n${s.content}`).join('\n\n')}`
+        : ''
+      const history = [
+        ...(skillBlock ? [{ role: 'system', content: skillBlock }] : []),
+        ...(activeOf(get(), agentId)?.messages ?? [])
         // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位——
         // 思考模型+tools 协议要求所有 assistant 带 reasoning_content，空占位会导致 400）
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.error && !m.demo && !m.streaming && m.id !== msgId)
@@ -221,6 +230,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           // （无思考内容时为空串；非思考模型服务端会忽略该字段）
           ...(m.role === 'assistant' ? { reasoning_content: m.reasoning ?? '' } : {})
         }))
+      ]
 
       let off = bridge.models.onEvent((ev) => {
         if (ev.reqId !== reqId) return
@@ -238,9 +248,15 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         } else if (ev.type === 'notice' && ev.text) {
           // CLI 心跳提示（如 90 秒无输出可能卡在权限审批）：toast 一次，不打断消息
           useUi.getState().toast(ev.text, 'warn')
-        } else if (ev.type === 'usage' && ev.usage?.tokens) {
-          // Token 用量累计到 Agent（侧栏/设置展示；演示 Agent 不计）
-          useAgents.getState().addTokens(agentId, ev.usage.tokens)
+        } else if (ev.type === 'usage' && ev.usage) {
+          // Token 用量：累计到 Agent（侧栏/设置展示）+ 明细落到本条消息（含估算费用）
+          const usage = { tokens: ev.usage.tokens, prompt: ev.usage.prompt, completion: ev.usage.completion }
+          if (ev.usage.tokens) useAgents.getState().addTokens(agentId, ev.usage.tokens)
+          const cost = estimateCost(agent.modelConfig?.modelId ?? agent.model, usage)
+          set((s) => withActive(s, agentId, (ses) => ({
+            ...ses,
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, usage, ...(cost != null ? { cost } : {}) } : m))
+          })))
         } else if (ev.type === 'tool' && ev.toolCall) {
           // 工具调用执行记录：合并进当前回复消息（同 id 更新状态与结果，新 id 追加）
           const tc = ev.toolCall
@@ -292,7 +308,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       })
 
       const r = agent.kind === 'cli'
-        ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath, workDir: cliWorkDir }, reqId, history)
+        ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath, workDir: cliWorkDir, thinkingLevel: agent.cliConfig!.thinkingLevel }, reqId, history)
         : await bridge.models.chat(agent.modelConfig!, reqId, history, agent.tools ? { tools: agent.tools } : undefined)
       if (!r.ok) {
         set((s) => {

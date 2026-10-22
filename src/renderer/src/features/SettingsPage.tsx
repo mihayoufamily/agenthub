@@ -1,19 +1,21 @@
-// 设置页：六分区（外观 / Agent 与模型 / 工作流 / 快捷键 / 数据 / 关于）
+// 设置页：七分区（外观 / Agent 与模型 / Skill / 工作流 / 快捷键 / 数据 / 关于）
 import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
+import type { Skill } from '@shared/types'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
 import { bridge } from '../lib/ipc'
-import { fmtTime, fmtTokens } from '../lib/utils'
+import { fmtTime, fmtTokens, uid, cls } from '../lib/utils'
 
-type Section = 'appearance' | 'agents' | 'workflow' | 'shortcuts' | 'data' | 'about'
+type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'shortcuts' | 'data' | 'about'
 
 const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'appearance', label: '外观', icon: 'info' },
   { key: 'agents', label: 'Agent 与模型', icon: 'file' },
+  { key: 'skills', label: 'Skill', icon: 'file' },
   { key: 'workflow', label: '工作流', icon: 'reorder' },
   { key: 'shortcuts', label: '快捷键', icon: 'send' },
   { key: 'data', label: '数据', icon: 'folder' },
@@ -23,7 +25,17 @@ const NAV: { key: Section; label: string; icon: string }[] = [
 export function SettingsPage() {
   const open = useUi((s) => s.settingsOpen)
   const close = useUi((s) => s.closeSettings)
+  const jumpTo = useUi((s) => s.settingsSection)
   const [section, setSection] = useState<Section>('appearance')
+
+  // 外部跳转（如聊天输入框 Skill 面板的"管理…"）指定分区
+  useEffect(() => {
+    if (open && jumpTo && (NAV.some((n) => n.key === jumpTo))) setSection(jumpTo as Section)
+  }, [open, jumpTo])
+  // 打开时重置为默认分区（无跳转参数时）
+  useEffect(() => {
+    if (open && !jumpTo) setSection('appearance')
+  }, [open, jumpTo])
 
   if (!open) return null
   return (
@@ -46,6 +58,7 @@ export function SettingsPage() {
           <div className="settings-body">
             {section === 'appearance' && <AppearanceSection />}
             {section === 'agents' && <AgentsSection />}
+            {section === 'skills' && <SkillsSection />}
             {section === 'workflow' && <WorkflowSection />}
             {section === 'shortcuts' && <ShortcutsSection />}
             {section === 'data' && <DataSection />}
@@ -171,6 +184,128 @@ function AgentsSection() {
       <div className="desc" style={{ fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.7 }}>
         API Key 使用系统安全凭据存储加密；不写入 Git 仓库、普通日志或导出文件。发现 ≠ 接入：CLI 候选在完成连接验证前不能执行任务。
       </div>
+    </div>
+  )
+}
+
+/* ---- Skill 管理 ----
+ * Skill = 可复用提示包（Markdown）：聊天输入框引用后随消息注入对话。
+ * 数据存 userData/skills.json（主进程持久化）；不涉及凭据，导入导出走配置导出不含 skill。 */
+function SkillsSection() {
+  const [skills, setSkills] = useState<Skill[] | null>(null)
+  const [editing, setEditing] = useState<Skill | 'new' | null>(null)
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+  const [content, setContent] = useState('')
+
+  const reload = () => { void bridge.skills.list().then(setSkills).catch(() => setSkills([])) }
+  useEffect(reload, [])
+
+  const openEdit = (sk: Skill | 'new') => {
+    setEditing(sk)
+    if (sk === 'new') { setName(''); setDesc(''); setContent('') }
+    else { setName(sk.name); setDesc(sk.desc); setContent(sk.content) }
+  }
+
+  const save = async () => {
+    if (!name.trim() || !content.trim()) {
+      useUi.getState().toast('名称与内容不能为空', 'warn')
+      return
+    }
+    const r = await bridge.skills.save({
+      id: editing && editing !== 'new' ? editing.id : undefined,
+      name: name.trim(),
+      desc: desc.trim(),
+      content
+    }).catch(() => null)
+    if (r?.ok) {
+      useUi.getState().toast(editing && editing !== 'new' ? 'Skill 已更新' : 'Skill 已创建', 'ok')
+      setEditing(null)
+      reload()
+    } else {
+      useUi.getState().toast(r?.message ?? '保存失败', 'error')
+    }
+  }
+
+  const importMd = async () => {
+    // 导入 .md 文件作为 Skill（文件名作为名称，全文作为内容）
+    const files = await bridge.dialogs.pickFiles().catch(() => [])
+    const md = files.find((f) => /\.(md|markdown|txt)$/i.test(f.name) && f.content !== undefined)
+    if (!md) {
+      useUi.getState().toast('请选择 .md / .txt 文件（内容需为文本）', 'warn')
+      return
+    }
+    const r = await bridge.skills.save({
+      name: md.name.replace(/\.(md|markdown|txt)$/i, ''),
+      desc: `导入自 ${md.name}`,
+      content: md.content!
+    }).catch(() => null)
+    if (r?.ok) { useUi.getState().toast(`已导入 Skill：${md.name}`, 'ok'); reload() }
+    else useUi.getState().toast(r?.message ?? '导入失败', 'error')
+  }
+
+  return (
+    <div className="set-group">
+      <div className="group-title" style={{ display: 'flex', alignItems: 'center' }}>
+        Skill 提示包（{skills?.length ?? 0}）
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          <Button variant="secondary" style={{ height: 28 }} onClick={importMd}>
+            <Icon name="attach" size={13} /> 导入 .md
+          </Button>
+          <Button variant="primary" style={{ height: 28 }} onClick={() => openEdit('new')}>
+            <Icon name="plus" size={13} /> 新建 Skill
+          </Button>
+        </span>
+      </div>
+      <div className="desc" style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 8 }}>
+        Skill 是一段可复用的提示词/领域知识（Markdown）。在聊天输入框点"引用 Skill"选择后，内容会随该条消息注入对话上下文（模型与 CLI 均生效）。引用记录随消息保存，可追溯。
+      </div>
+
+      {editing && (
+        <div style={{ border: '1px solid var(--border-strong)', borderRadius: 'var(--r-sm)', padding: 12, marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div className="form-row">
+            <label>名称</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：登录页设计规范" maxLength={60} />
+          </div>
+          <div className="form-row">
+            <label>简介（可选，列表中展示）</label>
+            <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="一句话说明用途" maxLength={200} />
+          </div>
+          <div className="form-row">
+            <label>内容（Markdown，注入对话）</label>
+            <textarea
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              placeholder={'# 技能名称\n\n## 触发场景\n…\n\n## 执行要求\n…'}
+              rows={10}
+              style={{ width: '100%', fontSize: 12.5, lineHeight: 1.6, fontFamily: 'var(--font-mono, monospace)' }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+            <Button variant="ghost" onClick={() => setEditing(null)}>取消</Button>
+            <Button variant="primary" onClick={() => void save()}>保存</Button>
+          </div>
+        </div>
+      )}
+
+      {skills === null && <Spinner />}
+      {skills?.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>还没有 Skill。点"新建 Skill"或"导入 .md"创建第一个。</div>}
+      {skills?.map((sk) => (
+        <div key={sk.id} className="agent-manage-row">
+          <div className="info">
+            <div className="nm">{sk.name}</div>
+            <div className="md">
+              {sk.desc || '（无简介）'} · {sk.content.length} 字 · {fmtTime(sk.updatedAt ?? sk.createdAt)}
+            </div>
+          </div>
+          <Button variant="ghost" style={{ height: 26 }} onClick={() => openEdit(sk)}>编辑</Button>
+          <Button variant="ghost" style={{ height: 26, color: 'var(--danger)' }} onClick={async () => {
+            await bridge.skills.remove(sk.id).catch(() => null)
+            useUi.getState().toast(`已删除 Skill：${sk.name}`, 'ok')
+            reload()
+          }}>删除</Button>
+        </div>
+      ))}
     </div>
   )
 }

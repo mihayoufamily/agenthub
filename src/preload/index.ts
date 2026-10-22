@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
-  ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall
+  ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel
 } from '../shared/types'
 
 /**
@@ -65,11 +65,11 @@ const api = {
     test: (name: CliName) => ipcRenderer.invoke('cli:test', name) as Promise<{ ok: boolean; message: string; version?: string; exePath?: string }>,
     /** 可枚举的模型清单（不可枚举时 ok=false，界面回退到手填） */
     models: (name: CliName) => ipcRenderer.invoke('cli:models', name) as Promise<{ ok: boolean; models?: string[]; message?: string; source?: string }>,
-    chat: (name: CliName, opts: { model?: string; exePath?: string; workDir?: string; timeoutMs?: number }, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[]) =>
+    chat: (name: CliName, opts: { model?: string; exePath?: string; workDir?: string; timeoutMs?: number; thinkingLevel?: ThinkingLevel }, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[]) =>
       ipcRenderer.invoke('cli:chat', name, opts, reqId, messages) as Promise<{ ok: boolean; message?: string }>,
     cancel: (reqId: string) => ipcRenderer.invoke('cli:cancel', reqId),
     /** 流式事件与 models 共用 model:event 通道（reqId 路由） */
-    onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number } }) => void) => {
+    onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number; prompt?: number; completion?: number } }) => void) => {
       const handler = (_e: unknown, data: Parameters<typeof cb>[0]) => cb(data)
       ipcRenderer.on('model:event', handler)
       return () => ipcRenderer.removeListener('model:event', handler)
@@ -79,15 +79,23 @@ const api = {
     test: (cfg: CustomModelConfig, apiKey: string) => ipcRenderer.invoke('model:test', cfg, apiKey) as Promise<ModelTestResult>,
     /** 列出接口真实可用的模型（切换模型用；凭据在主进程取，渲染层不经手） */
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
+    /** 余额查询（DeepSeek 官方 /user/balance；其他接口 ok=false） */
+    balance: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:balance', cfg) as Promise<{ ok: boolean; message?: string; balance?: number; currency?: string }>,
     chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[], opts?: { tools?: ToolGrant }) =>
       ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts),
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
     /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */
-    onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number }; toolCall?: ToolCall; writtenPath?: string }) => void) => {
+    onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number; prompt?: number; completion?: number }; toolCall?: ToolCall; writtenPath?: string }) => void) => {
       const handler = (_e: unknown, data: Parameters<typeof cb>[0]) => cb(data)
       ipcRenderer.on('model:event', handler)
       return () => ipcRenderer.removeListener('model:event', handler)
     }
+  },
+  skills: {
+    list: () => ipcRenderer.invoke('skills:list') as Promise<Skill[]>,
+    save: (skill: Partial<Skill> & { name: string; content: string }) =>
+      ipcRenderer.invoke('skills:save', skill) as Promise<{ ok: boolean; skill?: Skill; message?: string }>,
+    remove: (id: string) => ipcRenderer.invoke('skills:remove', id) as Promise<{ ok: true }>
   },
   tools: {
     /** 直接执行一次沙箱工具（验证与高级用途；参数不合法/越界会被拒） */

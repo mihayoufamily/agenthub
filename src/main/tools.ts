@@ -243,10 +243,12 @@ export function toolDefs(allowCommands: boolean, allowWeb: boolean): unknown[] {
   return defs
 }
 
-/** 沙箱校验：路径规范化后必须仍在沙箱根内（防 ../ 逃逸与绝对路径注入）；返回原始大小写路径 */
+/** 沙箱校验：路径规范化后必须仍在沙箱根内（防 ../ 逃逸与绝对路径注入）；返回原始大小写路径。
+ *  access='full'（完全访问）时跳过目录限制：路径仍规范化（防相对歧义），但允许全盘。 */
 function sandboxPath(grant: ToolGrant, rel: unknown): string | null {
   if (typeof rel !== 'string' || rel.length === 0) return null
-  const abs = resolvePath(grant.dir, rel)
+  const abs = resolvePath(grant.dir || '.', rel)
+  if (grant.access === 'full') return abs
   const root = resolvePath(grant.dir)
   const rootLow = root.toLowerCase()
   const low = abs.toLowerCase()
@@ -516,10 +518,14 @@ export async function execTool(
         if (!grant.allowCommands) return { ok: false, output: '拒绝：该 Agent 未授权执行命令' }
         const command = typeof args.command === 'string' ? args.command : ''
         if (!command.trim()) return { ok: false, output: '拒绝：命令为空' }
+        // 完全访问：命令不限工作目录（dir 仅作默认 cwd，失效时不强制）；沙箱模式：cwd 固定为沙箱根
+        const full = grant.access === 'full'
+        const cwdRoot = grant.dir?.trim() ? resolvePath(grant.dir) : ''
+        if (!full && !cwdRoot) return { ok: false, output: '拒绝：未配置沙箱目录' }
         return await new Promise<ToolExecResult>((res) => {
           const child = spawn(command, {
             shell: true,
-            cwd: resolvePath(grant.dir),
+            ...(cwdRoot ? { cwd: cwdRoot } : {}),
             windowsHide: true
             // 注意：不用 spawn 的 timeout 选项——它只终止 cmd.exe 外壳，
             // 外壳启动的孙子进程会继续运行。超时/取消统一走 killTree 杀整棵树。

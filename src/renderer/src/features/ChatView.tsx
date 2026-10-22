@@ -1,6 +1,6 @@
-// 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型切换
+// 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型管理、用量显示
 import React, { useEffect, useRef, useState } from 'react'
-import type { ChatMessage, AgentConfig, AgentSession, ToolCall } from '@shared/types'
+import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel } from '@shared/types'
 import { useSessions } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
@@ -11,7 +11,8 @@ import { Composer } from '../components/Composer'
 import { Modal } from '../components/Modal'
 import { Icon } from '../components/Icons'
 import { CliModelOptions } from '../components/CliModels'
-import { fmtTime, fmtSize, cls } from '../lib/utils'
+import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
+import { contextWindowOf, estimateTokens, estimateCost, fmtCost } from '@shared/pricing'
 
 /** 稳定空数组：避免 selector 每次返回新引用导致多余渲染 */
 const EMPTY_MSGS: ChatMessage[] = []
@@ -49,11 +50,30 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [nearBottom, setNearBottom] = useState(true)
   const [newCount, setNewCount] = useState(0)
-  const [switchOpen, setSwitchOpen] = useState(false)
+  const [mgmtOpen, setMgmtOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [dirOpen, setDirOpen] = useState(false)
   const [sesOpen, setSesOpen] = useState(false)
+  const [skillOpen, setSkillOpen] = useState(false)
+  const skillBtnRef = useRef<HTMLButtonElement>(null)
   const sesBtnRef = useRef<HTMLButtonElement>(null)
+  // 附件与 Skill 引用（随草稿所在会话；发送后清空）
+  const [atts, setAtts] = useState<Attachment[]>([])
+  const [pickedSkills, setPickedSkills] = useState<Skill[]>([])
+  // 模型 Agent 余额（DeepSeek 官方接口；其他 provider 无余额接口时不显示）
+  const [balance, setBalance] = useState<{ balance: number; currency: string } | null>(null)
+  useEffect(() => {
+    setAtts([])
+    setPickedSkills([])
+  }, [selectedId, activeSesId])
+  useEffect(() => {
+    setBalance(null)
+    if (agent?.kind === 'model' && agent.modelConfig && /deepseek/i.test(agent.modelConfig.baseUrl)) {
+      void bridge.models.balance(agent.modelConfig).then((r) => {
+        if (r.ok && r.balance != null) setBalance({ balance: r.balance, currency: r.currency ?? 'CNY' })
+      }).catch(() => { /* 余额查询失败静默：仅不显示 */ })
+    }
+  }, [agent?.id, agent?.modelConfig?.keyId])
 
   const scrollToBottom = (smooth = false) => {
     const el = scrollRef.current
@@ -90,7 +110,9 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 
   const doSend = () => {
     if (!draft.trim()) return
-    void sendMessage(agent.id, draft.trim(), [])
+    void sendMessage(agent.id, draft.trim(), atts, pickedSkills)
+    setAtts([])
+    setPickedSkills([])
   }
 
   return (
@@ -102,7 +124,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
             {agent.name}
             {agent.isDemo && <span className="demo-badge">演示模式</span>}
           </div>
-          <div className="sub" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <div className="sub" style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
           <StatusDot status={agent.status} /> {statusText(agent.status)} ·{' '}
           <button
             ref={sesBtnRef}
@@ -115,21 +137,29 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           {canSwitchModel ? (
             <button
               className="model-chip"
-              onClick={() => setSwitchOpen(true)}
-              title={agent.kind === 'model' ? '切换此 Agent 使用的模型（列表来自真实接口）' : '修改传给 CLI 的模型参数（留空用 CLI 默认）'}
+              onClick={() => setMgmtOpen(true)}
+              title="模型管理：切换模型、思考强度（支持的 harness）、上下文窗口"
             >
-              {agent.model} <Icon name="swap" size={11} />
+              {agent.model} <Icon name="settings" size={11} />
             </button>
           ) : (
             agent.model
+          )}
+          {agent.tools?.access === 'full' && (
+            <span className="full-access-badge" title="完全访问：文件工具不限目录、命令不限工作目录">完全访问</span>
+          )}
+          {balance && (
+            <span className="model-chip" title={`来自 ${agent.modelConfig?.baseUrl} 的账户余额（DeepSeek 官方接口）`}>
+              余额 {balance.currency === 'CNY' ? '¥' : ''}{balance.balance.toFixed(2)}
+            </span>
           )}
           {agent.kind === 'model' && agent.modelConfig && (
             <button
               className="model-chip"
               onClick={() => setToolsOpen(true)}
-              title="文件/命令/联网工具授权（沙箱目录、命令执行开关、联网开关）"
+              title="文件/命令/联网工具授权（沙箱或完全访问、命令执行开关、联网开关）"
             >
-              <Icon name="file" size={11} /> 工具{agent.tools ? `·${[agent.tools.allowCommands && '命令', agent.tools.allowWeb && '联网'].filter(Boolean).join('·') || '文件'}` : ''}
+              <Icon name="file" size={11} /> 工具{agent.tools ? `·${[agent.tools.access === 'full' ? '完全访问' : '沙箱', agent.tools.allowCommands && '命令', agent.tools.allowWeb && '联网'].filter(Boolean).join('·')}` : ''}
             </button>
           )}
           {agent.kind === 'cli' && agent.cliConfig && (
@@ -152,9 +182,18 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
         </Button>
       </div>
 
-      {switchOpen && <ModelSwitchModal agent={agent} onClose={() => setSwitchOpen(false)} />}
+      {mgmtOpen && <ModelManageModal agent={agent} onClose={() => setMgmtOpen(false)} />}
       {toolsOpen && <ToolsGrantModal agent={agent} onClose={() => setToolsOpen(false)} />}
       {dirOpen && <WorkDirModal agent={agent} onClose={() => setDirOpen(false)} />}
+      {skillOpen && (
+        <SkillPicker
+          anchorRef={skillBtnRef}
+          picked={pickedSkills}
+          onToggle={(sk) => setPickedSkills((cur) => (cur.some((x) => x.id === sk.id) ? cur.filter((x) => x.id !== sk.id) : [...cur, sk]))}
+          onManage={() => { setSkillOpen(false); useUi.getState().openSettings('skills') }}
+          onClose={() => setSkillOpen(false)}
+        />
+      )}
       {sesOpen && (
         <SessionPanel
           list={sessionList ?? []}
@@ -202,14 +241,43 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
       )}
 
       <div className="wb-composer-wrap">
+        <ContextUsageBar messages={messages} modelId={agent.modelConfig?.modelId ?? agent.model} contextWindow={contextWindowOf(agent.modelConfig?.modelId ?? agent.model, agent.modelConfig?.contextWindow ?? agent.cliConfig?.contextWindow)} />
         <Composer
           value={draft}
           onChange={(v) => setDraft(agent.id, v)}
           onSend={doSend}
           enterToSend={enterToSend}
           placeholder={`给 ${agent.name} 发送消息…`}
+          attachments={atts}
+          onAttachmentsChange={setAtts}
+          pickedSkills={pickedSkills}
+          onSkillButtonRef={skillBtnRef}
+          onOpenSkills={() => setSkillOpen((v) => !v)}
+          onRemoveSkill={(id) => setPickedSkills((cur) => cur.filter((s) => s.id !== id))}
         />
       </div>
+    </div>
+  )
+}
+
+/** 上下文用量条（WorkBuddy 风格）：当前会话估算 token ÷ 模型上下文窗口 */
+function ContextUsageBar({ messages, modelId, contextWindow }: { messages: ChatMessage[]; modelId?: string; contextWindow: number }) {
+  // 有接口 usage 时以最后一条真实用量为准；否则按消息文本估算（含附件与思考内容）
+  const lastUsage = [...messages].reverse().find((m) => m.usage?.tokens)?.usage
+  const textTokens = messages.reduce((sum, m) => sum + estimateTokens(m.text ?? '') + estimateTokens(m.reasoning ?? '') + estimateTokens(m.toolCalls?.map((t) => (t.result ?? '')).join('') ?? ''), 0)
+  const used = Math.max(lastUsage?.prompt != null ? lastUsage.prompt + (lastUsage.completion ?? 0) : 0, textTokens)
+  const pct = Math.min(100, Math.round((used / contextWindow) * 1000) / 10)
+  const tone = pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warn)' : 'var(--ok)'
+  const sessionCost = messages.reduce((s, m) => s + (m.cost ?? 0), 0)
+  return (
+    <div className="ctx-bar" title={`上下文用量：当前会话约 ${fmtTokens(used)} / ${fmtTokens(contextWindow)} tokens${modelId ? `（${modelId}）` : ''}。实际计费以接口返回为准。`}>
+      <div className="ctx-track">
+        <div className="ctx-fill" style={{ width: `${Math.max(pct, used > 0 ? 1.5 : 0)}%`, background: tone }} />
+      </div>
+      <span className="ctx-text" style={{ color: tone }}>
+        上下文 {fmtTokens(used)} / {fmtTokens(contextWindow)}（{pct}%）
+        {sessionCost > 0 && <> · 本会话 {fmtCost(sessionCost)}</>}
+      </span>
     </div>
   )
 }
@@ -221,6 +289,9 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
         <div>
           <div className="bubble word-break">
             {msg.text}
+            {msg.skills && msg.skills.length > 0 && (
+              <div className="att-line">Skill：{msg.skills.join('、')}</div>
+            )}
             {msg.attachments && msg.attachments.length > 0 && (
               <div className="att-line">
                 附件：{msg.attachments.map((a) => a.name).join('、')}
@@ -260,6 +331,7 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
         <div className="msg-time">
           {fmtTime(msg.ts)}
           {msg.model && ` · ${msg.model}`}
+          {msg.usage?.tokens ? ` · ${fmtTokens(msg.usage.tokens)} tk${msg.usage.prompt != null ? `（入 ${fmtTokens(msg.usage.prompt)}/出 ${fmtTokens(msg.usage.completion ?? 0)}）` : ''}${msg.cost != null ? ` · ${fmtCost(msg.cost)}` : ''}` : ''}
           {msg.attachments && msg.attachments.length > 0 && ` · 附件 ${msg.attachments.length} 个${msg.attachments[0].size ? `（${fmtSize(msg.attachments[0].size)}）` : ''}`}
         </div>
       </div>
@@ -550,14 +622,33 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   const [dir, setDir] = useState(agent.tools?.dir ?? '')
   const [allowCommands, setAllowCommands] = useState(!!agent.tools?.allowCommands)
   const [allowWeb, setAllowWeb] = useState(!!agent.tools?.allowWeb)
+  const [fullAccess, setFullAccess] = useState(agent.tools?.access === 'full')
+  const [riskAck, setRiskAck] = useState(false)
 
   const save = () => {
-    const tools = enabled && dir.trim() ? { dir: dir.trim(), allowCommands, allowWeb } : undefined
+    if (!enabled) {
+      updateAgent(agent.id, { tools: undefined })
+      useUi.getState().toast('已关闭文件工具，恢复纯对话', 'ok')
+      onClose()
+      return
+    }
+    if (!dir.trim() && !fullAccess) return
+    // 完全访问必须勾选风险确认才允许保存
+    if (fullAccess && !riskAck) {
+      useUi.getState().toast('请先勾选确认"我已知晓完全访问的风险"', 'warn')
+      return
+    }
+    const tools = {
+      dir: dir.trim(),
+      allowCommands,
+      allowWeb,
+      ...(fullAccess ? { access: 'full' as const } : {})
+    }
     updateAgent(agent.id, { tools })
     useUi.getState().toast(
-      tools
-        ? `已启用工具（沙箱：${tools.dir}${tools.allowCommands ? '，命令' : ''}${tools.allowWeb ? '，联网' : ''}）`
-        : '已关闭文件工具，恢复纯对话',
+      fullAccess
+        ? `已启用完全访问（文件全盘 + 命令不限目录${allowCommands ? '' : '；命令未授权'}${allowWeb ? '，联网' : ''}）`
+        : `已启用工具（沙箱：${tools.dir}${allowCommands ? '，命令' : ''}${allowWeb ? '，联网' : ''}）`,
       'ok'
     )
     onClose()
@@ -568,11 +659,11 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
       open
       onClose={onClose}
       title={`${agent.name} · 文件/命令工具`}
-      width={500}
+      width={520}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button variant="primary" onClick={save} disabled={enabled && !dir.trim()}>保存</Button>
+          <Button variant="primary" onClick={save} disabled={enabled && !dir.trim() && !fullAccess}>保存</Button>
         </>
       }
     >
@@ -582,19 +673,48 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
           <span style={{ lineHeight: 1.6 }}>
             <b>启用文件工具</b>
             <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
-              开启即授权该模型在沙箱目录内：读/写/列出/删除（回收站）/移动文件，以及文本搜索、通配符查找、精准替换。未开启时为纯对话（如实无文件能力）。所有调用过程在对话中如实展示并随记录保存。
+              开启即授权该模型进行文件操作与（可选）命令/联网。未开启时为纯对话（如实无文件能力）。所有调用过程在对话中如实展示并随记录保存。
             </div>
           </span>
         </label>
         {enabled && (
           <>
+            {/* 权限两档：沙箱 / 完全访问 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '10px 12px' }}>
+                <input type="radio" name="access-mode" checked={!fullAccess} onChange={() => { setFullAccess(false); setRiskAck(false) }} style={{ marginTop: 3 }} />
+                <span style={{ lineHeight: 1.6 }}>
+                  <b>沙箱模式</b>（默认，推荐）
+                  <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                    文件操作全部限制在下方目录内（路径规范化后越界即拒绝）；命令以该目录为工作目录执行。删除走系统回收站可恢复。
+                  </div>
+                </span>
+              </label>
+              <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', border: fullAccess ? '1px solid var(--danger)' : '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '10px 12px', background: fullAccess ? 'rgba(220,38,38,.06)' : 'transparent' }}>
+                <input type="radio" name="access-mode" checked={fullAccess} onChange={() => setFullAccess(true)} style={{ marginTop: 3 }} />
+                <span style={{ lineHeight: 1.6 }}>
+                  <b style={{ color: fullAccess ? 'var(--danger)' : undefined }}>完全访问</b>
+                  <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                    文件工具不再限制目录（可读写<b>全盘</b>任意路径）；命令不限工作目录。适用于你充分信任该模型/任务的场景；开启后顶栏持续显示红色"完全访问"标识。
+                  </div>
+                </span>
+              </label>
+              {fullAccess && (
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', border: '1px solid var(--danger)', borderRadius: 'var(--r-sm)', padding: '10px 12px', background: 'rgba(220,38,38,.08)' }}>
+                  <input type="checkbox" checked={riskAck} onChange={(e) => setRiskAck(e.target.checked)} style={{ marginTop: 3 }} />
+                  <span style={{ lineHeight: 1.6, color: 'var(--danger)', fontSize: 12.5 }}>
+                    <b>我已知晓风险：</b>完全访问下模型可读写全盘文件、执行不限目录的命令，可能修改或删除本机任意数据。请仅对可信模型开启，并自行承担后果。
+                  </span>
+                </label>
+              )}
+            </div>
             <div className="form-row">
-              <label>沙箱目录（产物根）</label>
+              <label>{fullAccess ? '工作目录（命令默认 cwd，可留空）' : '沙箱目录（产物根）'}</label>
               <div style={{ display: 'flex', gap: 6 }}>
                 <input
                   value={dir}
                   onChange={(e) => setDir(e.target.value)}
-                  placeholder="例如 D:\AgentHub\产物\该Agent名"
+                  placeholder={fullAccess ? '例如 D:\\工作区（留空则不固定 cwd）' : '例如 D:\\AgentHub\\产物\\该Agent名'}
                   style={{ flex: 1 }}
                 />
                 <Button
@@ -613,7 +733,7 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
               <span style={{ lineHeight: 1.6 }}>
                 <b>允许执行命令</b>（默认关）
                 <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
-                  开启后模型可在沙箱目录内执行 shell 命令（工作目录固定为沙箱根，超时 60 秒、输出有上限）。用于构建/测试产物；每条命令与输出都会在对话中展示。风险高于文件读写，请谨慎开启。
+                  开启后模型可执行 shell 命令（{fullAccess ? '完全访问下不限制工作目录' : '工作目录固定为上方目录'}，超时 60 秒、输出有上限）。用于构建/测试产物；每条命令与输出都会在对话中展示。风险高于文件读写，请谨慎开启。
                 </div>
               </span>
             </label>
@@ -627,7 +747,9 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
               </span>
             </label>
             <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6 }}>
-              安全边界：路径规范化后越出沙箱目录的调用一律拒绝；删除走系统回收站可恢复；工具调用轮数有上限（16 轮）。
+              {fullAccess
+                ? '完全访问：文件读写/删除/移动不限目录；命令不限工作目录；删除仍走系统回收站；工具调用轮数上限 16 轮。搜索/查找类工具仍以上方目录为范围（避免全盘扫描）。'
+                : '沙箱模式：路径规范化后越出沙箱目录的调用一律拒绝；删除走系统回收站可恢复；工具调用轮数有上限（16 轮）。'}
             </div>
           </>
         )}
@@ -693,12 +815,18 @@ function WorkDirModal({ agent, onClose }: { agent: AgentConfig; onClose: () => v
   )
 }
 
-/** 模型切换弹窗：模型 Agent 列表来自真实 /models 接口；CLI Agent 手动指定模型参数 */
-function ModelSwitchModal({ agent, onClose }: { agent: AgentConfig; onClose: () => void }) {
+/** 模型管理弹窗：全部 Agent 类型统一入口——切换模型、思考强度（支持的 harness 才显示）、上下文窗口 */
+function ModelManageModal({ agent, onClose }: { agent: AgentConfig; onClose: () => void }) {
   const updateAgent = useAgents((s) => s.updateAgent)
   const [models, setModels] = useState<string[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [manual, setManual] = useState(agent.cliConfig?.model ?? '')
+  const thinkingSupported =
+    (agent.kind === 'model' && !!agent.modelConfig && (/^(o1|o3|gpt-5)/i.test(agent.modelConfig.modelId) || /ark/i.test(agent.modelConfig.baseUrl)))
+    || (agent.kind === 'cli' && (agent.cliConfig?.cli === 'codex' || agent.cliConfig?.cli === 'claude'))
+  const thinking: ThinkingLevel | undefined = agent.kind === 'model' ? agent.modelConfig?.thinkingLevel : agent.cliConfig?.thinkingLevel
+  const ctxWindow = agent.kind === 'model' ? agent.modelConfig?.contextWindow : agent.cliConfig?.contextWindow
+  const [ctxText, setCtxText] = useState(ctxWindow ? String(Math.round(ctxWindow / 1024)) : '')
 
   useEffect(() => {
     if (agent.kind === 'model' && agent.modelConfig) {
@@ -709,88 +837,219 @@ function ModelSwitchModal({ agent, onClose }: { agent: AgentConfig; onClose: () 
     }
   }, [agent])
 
-  if (agent.kind === 'cli' && agent.cliConfig) {
-    return (
-      <Modal
-        open
-        onClose={onClose}
-        title={`修改 ${agent.name} 的模型参数`}
-        width={460}
-        footer={
-          <>
-            <Button variant="ghost" onClick={onClose}>取消</Button>
-            <Button
-              variant="primary"
-              onClick={() => {
-                const v = manual.trim()
-                updateAgent(agent.id, {
-                  model: v || '默认（CLI 自身配置）',
-                  cliConfig: { ...agent.cliConfig!, model: v || undefined }
-                })
-                useUi.getState().toast(v ? `已切换模型参数：${v}（后续请求生效）` : '已恢复为 CLI 默认模型', 'ok')
-                onClose()
-              }}
-            >
-              保存
-            </Button>
-          </>
-        }
-      >
-        <div style={{ paddingBottom: 6 }}>
-          <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, lineHeight: 1.6 }}>
-            该值作为 --model 参数传给 CLI；留空则使用 CLI 自身配置的默认模型。下面列出的是该 CLI 自己能枚举出的清单（不可枚举时只能手填）。
-          </div>
-          <CliModelOptions cli={agent.cliConfig.cli} current={manual} onPick={setManual} />
-          <div className="form-row">
-            <label>模型参数（可选）</label>
-            <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="留空使用 CLI 默认模型" />
-          </div>
-        </div>
-      </Modal>
-    )
+  const patch = (p: Partial<Pick<AgentConfig, 'model'>> & { modelConfig?: AgentConfig['modelConfig']; cliConfig?: AgentConfig['cliConfig'] }) => {
+    updateAgent(agent.id, p)
   }
 
+  const THINK_LEVELS: { v: ThinkingLevel; label: string }[] = [
+    { v: 'off', label: '关闭（默认）' },
+    { v: 'low', label: '低' },
+    { v: 'medium', label: '中' },
+    { v: 'high', label: '高' }
+  ]
+
   return (
-    <Modal open onClose={onClose} title={`切换 ${agent.name} 的模型`} width={460}>
-      <div style={{ paddingBottom: 6 }}>
-        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, lineHeight: 1.6 }}>
-          列表来自该连接的真实 /models 接口。切换后<b>沿用当前对话上下文</b>，后续请求实际使用新模型；若新模型上下文长度不足，会由接口如实报错。配置按 Agent 分别保存，重启后保留。
-        </div>
-        {err && <div style={{ color: 'var(--danger)', fontSize: 12.5, lineHeight: 1.5 }}>{err}</div>}
-        {!models && !err && (
-          <div style={{ padding: 12, fontSize: 12.5, color: 'var(--text-3)' }}>正在获取模型列表…</div>
-        )}
-        {models && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 300, overflowY: 'auto' }}>
-            {models.map((m) => {
-              const cur = m === agent.modelConfig?.modelId
-              return (
-                <button
-                  key={m}
-                  disabled={cur}
-                  className="btn"
-                  style={{
-                    justifyContent: 'flex-start', height: 32, fontSize: 12.5,
-                    ...(cur
-                      ? { border: '1px solid var(--brand-yellow)', color: 'var(--text-2)', background: 'var(--surface-2)', cursor: 'default' }
-                      : { border: '1px solid var(--border)', background: 'var(--surface)' })
-                  }}
-                  onClick={() => {
-                    updateAgent(agent.id, {
-                      model: m,
-                      modelConfig: { ...agent.modelConfig!, modelId: m }
-                    })
-                    useUi.getState().toast(`已切换模型：${m}（后续请求生效）`, 'ok')
-                    onClose()
-                  }}
-                >
-                  {m} {cur && '· 当前'}
-                </button>
-              )
-            })}
+    <Modal
+      open
+      onClose={onClose}
+      title={`${agent.name} · 模型管理`}
+      width={520}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>完成</Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingBottom: 6 }}>
+        {agent.isDemo && (
+          <div style={{ fontSize: 12.5, color: 'var(--warn)', lineHeight: 1.6 }}>
+            演示 Agent 使用脚本化回复，不涉及真实模型，无模型参数可调。
           </div>
         )}
+
+        {/* 模型切换（自定义模型走真实 /models 列表；CLI 走可枚举清单+手填） */}
+        {agent.kind === 'model' && agent.modelConfig && (
+          <div>
+            <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginBottom: 8, lineHeight: 1.6 }}>
+              列表来自该连接的真实 /models 接口；切换后<b>沿用当前对话上下文</b>。
+            </div>
+            {err && <div style={{ color: 'var(--danger)', fontSize: 12.5, marginBottom: 6 }}>{err}</div>}
+            {!models && !err && <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>正在获取模型列表…</div>}
+            {models && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+                {models.map((m) => {
+                  const cur = m === agent.modelConfig!.modelId
+                  return (
+                    <button
+                      key={m}
+                      disabled={cur}
+                      className="btn"
+                      style={{
+                        justifyContent: 'flex-start', height: 30, fontSize: 12.5,
+                        ...(cur ? { border: '1px solid var(--brand-yellow)', color: 'var(--text-2)', background: 'var(--surface-2)', cursor: 'default' } : { border: '1px solid var(--border)', background: 'var(--surface)' })
+                      }}
+                      onClick={() => { patch({ model: m, modelConfig: { ...agent.modelConfig!, modelId: m } }); useUi.getState().toast(`已切换模型：${m}（后续请求生效）`, 'ok') }}
+                    >
+                      {m} {cur && '· 当前'}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+        {agent.kind === 'cli' && agent.cliConfig && (
+          <div>
+            <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginBottom: 8, lineHeight: 1.6 }}>
+              作为 --model 参数传给 CLI；留空使用 CLI 自身配置的默认模型。
+            </div>
+            <CliModelOptions cli={agent.cliConfig.cli} current={manual} onPick={setManual} />
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="留空使用 CLI 默认模型" style={{ flex: 1 }} />
+              <Button variant="primary" onClick={() => {
+                const v = manual.trim()
+                patch({ model: v || '默认（CLI 自身配置）', cliConfig: { ...agent.cliConfig!, model: v || undefined } })
+                useUi.getState().toast(v ? `已切换模型参数：${v}` : '已恢复为 CLI 默认模型', 'ok')
+              }}>保存模型</Button>
+            </div>
+          </div>
+        )}
+
+        {/* 思考强度：仅官方支持的 harness 显示 */}
+        {!agent.isDemo && (
+          <div>
+            <label style={{ fontSize: 12.5, fontWeight: 600 }}>思考强度</label>
+            {thinkingSupported ? (
+              <>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  {THINK_LEVELS.map((t) => (
+                    <button
+                      key={t.v}
+                      className={`btn ${thinking === t.v ? 'btn-primary' : ''}`}
+                      style={{ flex: 1, height: 28, fontSize: 12 }}
+                      onClick={() => {
+                        if (agent.kind === 'model' && agent.modelConfig) patch({ modelConfig: { ...agent.modelConfig, thinkingLevel: t.v } })
+                        else if (agent.kind === 'cli' && agent.cliConfig) patch({ cliConfig: { ...agent.cliConfig, thinkingLevel: t.v } })
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 5, lineHeight: 1.5 }}>
+                  {agent.kind === 'cli' && agent.cliConfig?.cli === 'codex'
+                    ? '透传为 codex 的 model_reasoning_effort 配置项。'
+                    : agent.kind === 'cli' && agent.cliConfig?.cli === 'claude'
+                      ? '透传为 Claude Code 的 MAX_THINKING_TOKENS 思考预算。'
+                      : '透传为接口的 reasoning_effort 参数（该模型官方支持）。'}
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4, lineHeight: 1.5 }}>
+                当前接入不提供思考强度参数（不显示假选项）。如需思考能力，可换用支持该参数的模型或 CLI。
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 上下文窗口：用于上方上下文用量条的分母 */}
+        {!agent.isDemo && (
+          <div className="form-row">
+            <label>上下文窗口（K tokens，用于用量显示）</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                value={ctxText}
+                onChange={(e) => setCtxText(e.target.value.replace(/[^\d]/g, ''))}
+                placeholder={`默认 ${Math.round(contextWindowOf(agent.modelConfig?.modelId ?? agent.model) / 1024)}`}
+                style={{ flex: 1 }}
+              />
+              <Button variant="primary" onClick={() => {
+                const k = Number(ctxText)
+                const v = Number.isFinite(k) && k > 0 ? k * 1024 : undefined
+                if (agent.kind === 'model' && agent.modelConfig) patch({ modelConfig: { ...agent.modelConfig, contextWindow: v } })
+                else if (agent.kind === 'cli' && agent.cliConfig) patch({ cliConfig: { ...agent.cliConfig, contextWindow: v } })
+                useUi.getState().toast(v ? `上下文窗口已设为 ${Math.round(v / 1024)}K` : '已恢复按模型自动推断', 'ok')
+              }}>保存</Button>
+            </div>
+            <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4, lineHeight: 1.5 }}>
+              留空按内置对照表自动推断（如 deepseek 64K、claude 200K）。仅影响用量条显示，不改变接口实际能力。
+            </div>
+          </div>
+        )}
+
+        {/* 用量与费用说明 */}
+        <div style={{ fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.6, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+          每条回复下方显示该轮 token 用量（入/出）与估算费用；输入框上方显示上下文用量条。
+          费用按官方单价折算（如 DeepSeek：输入 ¥1~4/百万、输出 ¥8~16/百万），无公开单价的模型只显示 token。
+          {agent.kind === 'model' && agent.modelConfig && /deepseek/i.test(agent.modelConfig.baseUrl) && '余额来自 DeepSeek 官方 /user/balance 接口（顶栏显示）。'}
+        </div>
       </div>
     </Modal>
+  )
+}
+
+/** Skill 选择面板：引用后随下一条消息注入对话（可多选） */
+function SkillPicker({ anchorRef, picked, onToggle, onManage, onClose }: {
+  anchorRef: React.RefObject<HTMLButtonElement | null>
+  picked: Skill[]
+  onToggle: (sk: Skill) => void
+  onManage: () => void
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [skills, setSkills] = useState<Skill[] | null>(null)
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null)
+
+  useEffect(() => {
+    void bridge.skills.list().then(setSkills).catch(() => setSkills([]))
+  }, [])
+
+  useEffect(() => {
+    const anchor = anchorRef.current
+    if (!anchor) return
+    const r = anchor.getBoundingClientRect()
+    setPos({ left: Math.max(12, Math.min(r.left, window.innerWidth - 320)), bottom: window.innerHeight - r.top + 8 })
+  }, [anchorRef])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (ref.current?.contains(t) || anchorRef.current?.contains(t)) return
+      onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('mousedown', onDown)
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('mousedown', onDown) }
+  }, [anchorRef, onClose])
+
+  if (!pos) return null
+  return (
+    <div ref={ref} className="ses-panel skill-picker" style={pos} role="menu" aria-label="Skill 列表">
+      <div className="ses-head">
+        <span>引用 Skill（{picked.length}）</span>
+        <button className="ses-new" onClick={onManage}>管理…</button>
+      </div>
+      <div className="ses-list">
+        {skills === null && <div style={{ padding: 12, fontSize: 12.5, color: 'var(--text-3)' }}>加载中…</div>}
+        {skills?.length === 0 && (
+          <div style={{ padding: 12, fontSize: 12.5, color: 'var(--text-3)', lineHeight: 1.6 }}>
+            还没有 Skill。Skill 是可复用的提示包（Markdown），引用后随消息注入对话。<br />点右上角"管理…"创建。
+          </div>
+        )}
+        {skills?.map((sk) => {
+          const on = picked.some((x) => x.id === sk.id)
+          return (
+            <div key={sk.id} className={`ses-item ${on ? 'active' : ''}`} onClick={() => onToggle(sk)}>
+              <div className="ses-meta">
+                <div className="ses-title">{sk.name}</div>
+                <div className="ses-sub">{sk.desc || `${sk.content.length} 字`}</div>
+              </div>
+              <span style={{ fontSize: 11.5, color: on ? 'var(--brand-yellow)' : 'var(--text-3)' }}>{on ? '已引用' : '引用'}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }

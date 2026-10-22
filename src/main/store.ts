@@ -1,7 +1,7 @@
 import { app, safeStorage } from 'electron'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs'
-import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs } from '../shared/types'
+import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
 
 const CURRENT_SCHEMA_VERSION = 1
 
@@ -12,6 +12,7 @@ interface StoreDirs {
   memory: string
   credentials: string
   logs: string
+  skills: string
 }
 
 export class Store {
@@ -31,7 +32,8 @@ export class Store {
       runs: runsDir,
       memory: join(base, 'memory.json'),
       credentials: join(base, 'credentials.enc'),
-      logs: logsDir
+      logs: logsDir,
+      skills: join(base, 'skills.json')
     }
   }
 
@@ -192,6 +194,27 @@ export class Store {
 
   setMemory(entries: MemoryEntry[]) {
     this.writeJson(this.dirs.memory, entries)
+  }
+
+  // ---------- Skill 提示包（Markdown 可复用；聊天引用注入） ----------
+  getSkills(): Skill[] {
+    const list = this.readJson<Skill[]>(this.dirs.skills, [])
+    return Array.isArray(list) ? list : []
+  }
+
+  /** 保存（新增或更新同 id）；返回保存后的 Skill */
+  saveSkill(skill: Skill): Skill {
+    const list = this.getSkills()
+    const i = list.findIndex((s) => s.id === skill.id)
+    const next = { ...skill, updatedAt: Date.now() }
+    if (i >= 0) list[i] = next
+    else list.push(next)
+    this.writeJson(this.dirs.skills, list)
+    return next
+  }
+
+  removeSkill(id: string) {
+    this.writeJson(this.dirs.skills, this.getSkills().filter((s) => s.id !== id))
   }
 
   // ---------- 凭据（safeStorage 加密，绝不进日志/导出） ----------

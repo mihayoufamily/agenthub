@@ -1,4 +1,4 @@
-import type { CustomModelConfig, ModelTestResult, ToolGrant, ToolCall } from '../../shared/types'
+import type { CustomModelConfig, ModelTestResult, ToolGrant, ToolCall, UsageInfo } from '../../shared/types'
 import { execTool, toolDefs, MAX_OUTPUT } from '../tools'
 
 /**
@@ -18,7 +18,7 @@ export interface ChatChunkEvent {
   type: 'delta' | 'reasoning' | 'done' | 'error' | 'usage' | 'tool' | 'notice'
   text?: string
   message?: string
-  usage?: { tokens?: number }
+  usage?: UsageInfo
   /** type === 'tool' 时的调用记录（含执行状态与结果） */
   toolCall?: ToolCall
   /** type === 'tool' 且 write_file 成功时的绝对路径（登记产物用） */
@@ -110,13 +110,41 @@ export async function listModels(cfg: CustomModelConfig, apiKey: string): Promis
   }
 }
 
+/**
+ * 余额查询：目前仅 DeepSeek 官方提供 /user/balance 接口（返回各币种余额）。
+ * 其他 provider（中转站/自建网关）没有标准余额接口——返回 ok=false，界面转为"仅显示消耗"。
+ */
+export async function queryBalance(cfg: CustomModelConfig, apiKey: string): Promise<{ ok: boolean; message?: string; balance?: number; currency?: string }> {
+  if (!/deepseek/i.test(cfg.baseUrl)) return { ok: false, message: '该接口不提供余额查询（将仅显示消耗）' }
+  try {
+    const url = joinUrl(cfg.baseUrl, '/user/balance')
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000)
+    })
+    if (!res.ok) return { ok: false, message: `HTTP ${res.status}` }
+    const data = (await res.json()) as {
+      is_available?: boolean
+      balance_infos?: { currency?: string; total_balance?: string | number }[]
+    }
+    if (data.is_available === false) return { ok: false, message: '账户余额不足' }
+    const info = data.balance_infos?.[0]
+    if (!info || info.total_balance == null) return { ok: false, message: '接口未返回余额信息' }
+    const balance = Number(info.total_balance)
+    if (!Number.isFinite(balance)) return { ok: false, message: '余额数据无法解析' }
+    return { ok: true, balance, currency: info.currency || 'CNY' }
+  } catch (e) {
+    return { ok: false, message: `查询失败：${(e as Error).message}` }
+  }
+}
+
 /** 累积中的工具调用（流式分片按 index 拼接） */
 interface AccToolCall { id: string; name: string; args: string }
 
 interface RoundResult {
   finish: 'stop' | 'tool_calls' | null
   toolCalls: AccToolCall[]
-  usage?: { tokens?: number }
+  usage?: UsageInfo
   /** 思考模型本轮的思考内容（仅 UI 展示；是否随 assistant 消息回传由 PASS_REASONING 控制） */
   reasoning: string
 }
@@ -137,6 +165,9 @@ async function chatRound(
     messages,
     stream: true,
     ...(tools ? { tools, tool_choice: 'auto' } : {}),
+    // 思考强度：仅当界面显式设置时透传（UI 已按 harness 支持情况决定是否显示；
+    // off = 不传参数，用接口默认行为）
+    ...(cfg.thinkingLevel && cfg.thinkingLevel !== 'off' ? { reasoning_effort: cfg.thinkingLevel } : {}),
     ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {})
   }
   const res = await fetch(url, {
@@ -154,7 +185,7 @@ async function chatRound(
   let buffer = ''
   const acc = new Map<number, AccToolCall>()
   let finish: RoundResult['finish'] = null
-  let usage: { tokens?: number } | undefined
+  let usage: UsageInfo | undefined
   let reasoning = ''
   for (;;) {
     const { done, value } = await reader.read()
@@ -191,7 +222,17 @@ async function chatRound(
         }
         if (choice?.finish_reason === 'stop') finish = 'stop'
         else if (choice?.finish_reason === 'tool_calls' || choice?.finish_reason === 'function_call') finish = 'tool_calls'
-        if (json.usage) usage = { tokens: json.usage.total_tokens }
+        // 用量明细（尽力解析：total/prompt/completion；部分接口只在末帧带 usage）
+        if (json.usage) {
+          const u = json.usage as Record<string, number | undefined>
+          const prompt = typeof u.prompt_tokens === 'number' ? u.prompt_tokens : undefined
+          const completion = typeof u.completion_tokens === 'number' ? u.completion_tokens : undefined
+          usage = {
+            tokens: typeof u.total_tokens === 'number' ? u.total_tokens : (prompt != null && completion != null ? prompt + completion : undefined),
+            prompt,
+            completion
+          }
+        }
       } catch { /* 忽略不完整 JSON 行 */ }
     }
   }

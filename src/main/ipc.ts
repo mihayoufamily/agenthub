@@ -5,7 +5,7 @@ import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
-import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant } from '../shared/types'
+import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill } from '../shared/types'
 import { execTool } from './tools'
 import { checkUpdate } from './updater'
 import type { ChatMsg } from './adapters/openai'
@@ -153,6 +153,32 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   ipcMain.handle('model:cancel', (_e, reqId: string) => {
     openai.cancelStream(reqId)
+    return { ok: true }
+  })
+
+  // 余额查询（DeepSeek 官方 /user/balance；其他 provider 返回 ok=false 由界面转"仅显示消耗"）
+  ipcMain.handle('model:balance', async (_e, cfg: CustomModelConfig) => {
+    const key = getStore().getCredential(cfg.keyId)
+    if (!key) return { ok: false, message: '未找到 API Key，请重新添加连接' }
+    return openai.queryBalance(cfg, key)
+  })
+
+  // ---------- Skill 提示包（Markdown 可复用；聊天引用注入，设置页管理） ----------
+  ipcMain.handle('skills:list', () => getStore().getSkills())
+  ipcMain.handle('skills:save', (_e, skill: Skill) => {
+    if (!skill || typeof skill.name !== 'string' || !skill.name.trim()) return { ok: false, message: 'Skill 名称不能为空' }
+    if (typeof skill.content !== 'string' || !skill.content.trim()) return { ok: false, message: 'Skill 内容不能为空' }
+    const saved = getStore().saveSkill({
+      id: typeof skill.id === 'string' && skill.id ? skill.id : `skill_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      name: skill.name.trim().slice(0, 60),
+      desc: String(skill.desc ?? '').slice(0, 200),
+      content: skill.content,
+      createdAt: typeof skill.createdAt === 'number' ? skill.createdAt : Date.now()
+    })
+    return { ok: true, skill: saved }
+  })
+  ipcMain.handle('skills:remove', (_e, id: string) => {
+    getStore().removeSkill(id)
     return { ok: true }
   })
 
