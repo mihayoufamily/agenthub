@@ -17,6 +17,9 @@
     "build:renderer": "node scripts/build-renderer.mjs",
     "build": "npm run typecheck && npm run build:main && npm run build:renderer",
     "test:e2e": "node tests/e2e/local.mjs",
+    "verify": "node verify/run-all.mjs",
+    "verify:gui": "node verify/run-all.mjs --gui",
+    "verify:all": "node verify/run-all.mjs --gui --with-cli",
     "pack:portable": "node scripts/pack-portable.mjs",
     "push:api": "node scripts/push-via-api.mjs",
     "dist": "npm run build && electron-builder --win"

@@ -8,7 +8,9 @@ release/
 .DS_Store
 Thumbs.db
 .vite/
-verify/
+# 验证脚本本身进仓库（换台机器也留得下回归能力），但截图与产物包不入库
+verify/shots*/
+verify/*.zip
 
 .workbuddy/
 
