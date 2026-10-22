@@ -276,7 +276,8 @@ async function runStage(
 
   // ---- 真实 Agent（自定义模型 / 本机 CLI）：流式调用 + 结构化解析 ----
   if (!(agent?.modelConfig || agent?.cliConfig)) {
-    setRun((r) => ({ ...r, status: 'failed', stage: null, endedAt: Date.now() }))
+    // 失败原因持久化到运行记录：事后回看也能知道当时为什么失败（不只依赖转瞬的 toast）
+    setRun((r) => ({ ...r, status: 'failed', stage: null, endedAt: Date.now(), notes: [...(r.notes ?? []), `任务失败（${roleCfg.agentName || '未配置'}）：缺少接入配置（模型或 CLI），无法执行`] }))
     get().saveRun()
     useUi.getState().toast(`Agent「${roleCfg.agentName}」缺少接入配置（模型或 CLI），无法执行`, 'error')
     return null
@@ -307,6 +308,8 @@ async function runStage(
       status: 'failed',
       stage: null,
       endedAt: Date.now(),
+      // 失败原因持久化到运行记录：事后回看也能知道当时为什么失败（不只依赖转瞬的 toast）
+      notes: [...(r.notes ?? []), `任务失败（${agent.name}）：${res.message}`],
       cards: updateCard(r.cards, card.id, { status: 'error' })
     }))
     get().saveRun()

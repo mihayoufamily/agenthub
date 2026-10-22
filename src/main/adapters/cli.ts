@@ -5,6 +5,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import type { ChatChunkEvent } from './openai'
 import { humanizeError } from './openai'
+import { killTree } from '../tools'
 
 /**
  * 本机 Agent CLI 执行适配层（接入"现成 Agent"而非"模型 API"，规格 §10）。
@@ -746,6 +747,8 @@ function mergeMessages(messages: { role: string; content: string }[]): {
 }
 
 const activeChats = new Map<string, ChildProcess>()
+/** 用户主动取消的 reqId：close 时据此走"已取消"而非"错误"分支 */
+const pendingCancels = new Set<string>()
 
 /**
  * 发起一次 CLI 流式对话。事件经 onEvent 回调（reqId 路由），与 openai 适配器同构。
@@ -800,10 +803,10 @@ export async function cliChatStream(
       }
       onEvent({ ...e, reqId })
     }
-    // 超时（把"无限挂起"变"有界失败"）：kill 进程并 emit error，已产出内容保留在消息里
+    // 超时（把"无限挂起"变"有界失败"）：kill 进程树并 emit error，已产出内容保留在消息里
     const timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 10 * 60 * 1000
     const killTimer = setTimeout(() => {
-      try { proc.kill() } catch { /* noop */ }
+      killTree(proc)
       if (!doneEmitted && !errored) {
         emit({ type: 'error', message: `CLI 超时被终止（${Math.round(timeoutMs / 60000)} 分钟，可按需放宽）。超时前已产出的内容已保留。` })
       }
@@ -851,6 +854,7 @@ export async function cliChatStream(
     })
     proc.on('error', (e) => {
       activeChats.delete(reqId)
+      pendingCancels.delete(reqId)
       emit({ type: 'error', message: `进程启动失败：${e.message}` })
     })
     proc.on('close', (code) => {
@@ -863,6 +867,12 @@ export async function cliChatStream(
       }
       activeChats.delete(reqId)
       if (errored) return
+      // 用户主动取消：优雅完成（与 openai 适配器行为一致），不再走"退出码 null"错误分支
+      if (pendingCancels.has(reqId)) {
+        pendingCancels.delete(reqId)
+        emit({ type: 'done', message: '已取消' })
+        return
+      }
       if (code === 0) {
         if (!doneEmitted) emit({ type: 'done' })
       } else {
@@ -883,9 +893,11 @@ export async function cliChatStream(
 }
 
 export function cancelChat(reqId: string) {
+  // 先标记：close 事件据此走"已取消"分支，避免用户看到"退出码 null"之类的错误
+  pendingCancels.add(reqId)
   const proc = activeChats.get(reqId)
   if (proc) {
-    try { proc.kill() } catch { /* noop */ }
+    killTree(proc)
     activeChats.delete(reqId)
   }
 }

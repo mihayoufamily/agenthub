@@ -31,6 +31,13 @@ const activeStreams = new Map<string, AbortController>()
 const MAX_TOOL_ROUNDS = 16
 
 /**
+ * 思考增量（reasoning_content）是否回传给接口：默认不回传——
+ * DeepSeek 官方建议不在后续请求回传该字段，OpenAI o 系列等接口也不接受，
+ * 多轮工具循环时回传可能直接 400。确需回传可设 AGENTHUB_PASS_REASONING=1。
+ */
+const PASS_REASONING = process.env.AGENTHUB_PASS_REASONING === '1'
+
+/**
  * 错误信息中文化：常见 CLI / 模型接口错误 → 人话 + 原文（未命中时原样返回）。
  * 只做提示语转换，不吞掉任何原始信息。
  */
@@ -41,6 +48,7 @@ export function humanizeError(raw: string): string {
     [/authentication required|not logged in|请先登录|未登录/i, 'CLI 未登录：请在终端运行该 CLI 并完成登录（如 codebuddy 后输入 /login）'],
     [/MISSING_CREDENTIAL|missing.{0,20}credential/i, '缺少模型凭据：请设置对应环境变量（如 DEEPSEEK_API_KEY）或先在该 CLI 中完成配置'],
     [/permission.{0,30}denied|权限.{0,10}拒绝/i, 'CLI 拒绝了工具权限：非交互模式下没有审批界面（可调整其 permission-mode 设置）'],
+    [/EADDRINUSE|address already in use|EADDRNOTAVAIL/i, '本地端口被占用：可能有其他 CLI 或 IDE 实例正在运行，请关闭后重试（或换一个工作目录）'],
     [/\b401\b|unauthorized|invalid.{0,10}api.?key/i, '认证失败：API Key 无效或已过期，请检查后重新填写'],
     [/\b404\b|not found/i, '接口地址或模型不存在：请检查 Base URL 与模型 ID'],
     [/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|network/i, '网络连接失败：请检查网络或服务地址']
@@ -109,7 +117,7 @@ interface RoundResult {
   finish: 'stop' | 'tool_calls' | null
   toolCalls: AccToolCall[]
   usage?: { tokens?: number }
-  /** 思考模型本轮的思考内容（DeepSeek/方舟等协议：多轮须随 assistant 消息传回 reasoning_content） */
+  /** 思考模型本轮的思考内容（仅 UI 展示；是否随 assistant 消息回传由 PASS_REASONING 控制） */
   reasoning: string
 }
 
@@ -251,17 +259,25 @@ export function chatStream(
           activeStreams.delete(reqId)
           return
         }
-        // 记录 assistant 的工具调用消息（思考模型的 reasoning_content 随消息传回），逐个执行并回传结果
+        // 记录 assistant 的工具调用消息（思考增量默认不回传，见 PASS_REASONING），逐个执行并回传结果
         convo.push({
           role: 'assistant',
           content: null,
-          ...(r.reasoning ? { reasoning_content: r.reasoning } : {}),
+          ...(r.reasoning && PASS_REASONING ? { reasoning_content: r.reasoning } : {}),
           tool_calls: r.toolCalls.map((t) => ({ id: t.id, type: 'function' as const, function: { name: t.name, arguments: t.args } }))
         })
         for (const tc of r.toolCalls) {
+          // 取消后不再发起新的工具执行（已取消的请求由下方统一收尾）
+          if (ctrl.signal.aborted) {
+            if (tokens) onEvent({ reqId, type: 'usage', usage: { tokens } })
+            onEvent({ reqId, type: 'done', message: '已取消' })
+            activeStreams.delete(reqId)
+            return
+          }
           const call: ToolCall = { id: uid('tool'), tool: tc.name, args: argsSummary(tc.args), status: 'running', ts: Date.now() }
           onEvent({ reqId, type: 'tool', toolCall: call })
-          const res = await execTool(grant, tc.name, tc.args)
+          // 取消信号透传：正在执行的命令/联网可被立即中断
+          const res = await execTool(grant, tc.name, tc.args, ctrl.signal)
           const done: ToolCall = {
             ...call,
             status: res.ok ? 'done' : 'error',

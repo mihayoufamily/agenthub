@@ -2,9 +2,9 @@
 // 所有文件路径在沙箱根（ToolGrant.dir）内规范化校验，逃逸即拒绝；
 // 命令以沙箱根为工作目录运行，超时与输出有上限，全程记录可追溯。
 // 联网工具（web_fetch/web_search）需用户在授权面板单独开启（allowWeb）。
-import { promises as fs } from 'node:fs'
+import { promises as fs, realpathSync } from 'node:fs'
 import { resolve as resolvePath, dirname, sep, relative } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import type { ToolGrant } from '../shared/types'
 
 const MAX_READ = 200 * 1024 // 读文件上限
@@ -247,10 +247,43 @@ export function toolDefs(allowCommands: boolean, allowWeb: boolean): unknown[] {
 function sandboxPath(grant: ToolGrant, rel: unknown): string | null {
   if (typeof rel !== 'string' || rel.length === 0) return null
   const abs = resolvePath(grant.dir, rel)
-  const root = resolvePath(grant.dir).toLowerCase()
+  const root = resolvePath(grant.dir)
+  const rootLow = root.toLowerCase()
   const low = abs.toLowerCase()
-  if (low !== root && !low.startsWith(root + sep)) return null
+  if (low !== rootLow && !low.startsWith(rootLow + sep)) return null
+  // 符号链接解析校验：词法前缀校验发现不了沙箱内的 symlink/junction 指向外部，
+  // 解析最近已存在祖先的真实路径后再校验一次（write_file 等新建场景祖先不存在时跳过）
+  try {
+    let real = abs
+    for (;;) {
+      try {
+        real = realpathSync(real)
+        break
+      } catch {
+        const parent = dirname(real)
+        if (parent === real) break // 已到卷根仍不存在：纯新建路径，无链接可逃逸
+        real = parent
+      }
+    }
+    const realLow = real.toLowerCase()
+    if (realLow !== rootLow && !realLow.startsWith(rootLow + sep)) return null
+  } catch { /* realpath 异常不阻塞：词法校验已通过 */ }
   return abs
+}
+
+/** 字面量替换首个匹配（不走 String.replace 的 $ 模式解释，避免 $&/$1 被当作替换模式） */
+function replaceFirstLiteral(text: string, find: string, replace: string): string {
+  const i = text.indexOf(find)
+  if (i < 0) return text
+  return text.slice(0, i) + replace + text.slice(i + find.length)
+}
+
+/** Windows 杀进程树：taskkill /T /F（含所有孙子进程）；不可用时退回普通 kill */
+export function killTree(proc: ChildProcess): void {
+  try {
+    if (proc.pid) spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+  } catch { /* taskkill 缺失时退回普通 kill */ }
+  try { proc.kill() } catch { /* noop */ }
 }
 
 export interface ToolExecResult {
@@ -261,11 +294,12 @@ export interface ToolExecResult {
   writtenPath?: string
 }
 
-/** 执行一次工具调用。argsJson 为模型输出的 JSON 字符串（解析失败按参数错误处理）。 */
+/** 执行一次工具调用。argsJson 为模型输出的 JSON 字符串（解析失败按参数错误处理）。signal 为外部取消信号（可中断命令/联网）。 */
 export async function execTool(
   grant: ToolGrant,
   tool: string,
-  argsJson: string
+  argsJson: string,
+  signal?: AbortSignal
 ): Promise<ToolExecResult> {
   let args: Record<string, unknown> = {}
   try {
@@ -273,6 +307,7 @@ export async function execTool(
   } catch {
     return { ok: false, output: `参数不是合法 JSON：${argsJson.slice(0, 200)}` }
   }
+  if (signal?.aborted) return { ok: false, output: '已取消：工具执行被用户停止' }
   try {
     switch (tool) {
       case 'read_file': {
@@ -328,6 +363,8 @@ export async function execTool(
       case 'search_files': {
         const pattern = typeof args.pattern === 'string' ? args.pattern : ''
         if (!pattern) return { ok: false, output: '拒绝：搜索内容为空' }
+        // 长度上限：模型可控正则 + 大文件是 ReDoS 的温床，超长模式一律拒绝
+        if (pattern.length > 200) return { ok: false, output: '拒绝：搜索模式过长（超过 200 字符）' }
         let matcher: RegExp
         try {
           matcher = args.is_regex === true
@@ -335,6 +372,10 @@ export async function execTool(
             : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
         } catch (e) {
           return { ok: false, output: `拒绝：非法正则（${(e as Error).message}）` }
+        }
+        // 星高 >1 的典型结构（组内带量词、整体再带量词）在长行上会灾难性回溯，直接拒绝
+        if (args.is_regex === true && /\((?:[^()]*[+*?])[^()]*\)[+*?]|\[[^\]]+\][+*?]{2,}|[+*?]{3,}/.test(pattern)) {
+          return { ok: false, output: '拒绝：正则存在嵌套量词（可能灾难性回溯），请拆分为多个简单搜索' }
         }
         const root = resolvePath(grant.dir)
         const gfilter = typeof args.glob === 'string' && args.glob.trim() ? globToRegex(args.glob) : null
@@ -400,7 +441,7 @@ export async function execTool(
         if (count > 1 && args.replace_all !== true) {
           return { ok: false, output: `拒绝：目标片段出现 ${count} 次，不唯一。请提供更长上下文使其唯一，或传 replace_all=true 替换全部` }
         }
-        const next = args.replace_all === true ? text.split(find).join(replace) : text.replace(find, replace)
+        const next = args.replace_all === true ? text.split(find).join(replace) : replaceFirstLiteral(text, find, replace)
         if (next.length > MAX_WRITE) return { ok: false, output: `拒绝：替换后内容超过 ${MAX_WRITE / 1024}KB 上限` }
         await fs.writeFile(p, next, 'utf8')
         return { ok: true, output: `已替换 ${args.replace_all === true ? count : 1} 处`, writtenPath: p }
@@ -410,9 +451,11 @@ export async function execTool(
         const url = safeWebUrl(args.url)
         if (!url) return { ok: false, output: '拒绝：URL 为空或不是 http/https 链接' }
         const { net } = require('electron') as typeof import('electron')
+        // 取消信号联动：外部取消时立即中断进行中的请求
+        const fetchSignal = signal ? AbortSignal.any([AbortSignal.timeout(WEB_TIMEOUT_MS), signal]) : AbortSignal.timeout(WEB_TIMEOUT_MS)
         const res = await net.fetch(url, {
           redirect: 'follow',
-          signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+          signal: fetchSignal,
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2', Accept: 'text/html,application/json,text/plain,*/*' }
         }).catch((e: unknown) => ({ err: e as Error }))
         if ('err' in res && res.err) return { ok: false, output: `请求失败：${res.err.message}` }
@@ -430,9 +473,10 @@ export async function execTool(
         if (!query) return { ok: false, output: '拒绝：搜索词为空' }
         const { net } = require('electron') as typeof import('electron')
         const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query)
+        const fetchSignal = signal ? AbortSignal.any([AbortSignal.timeout(WEB_TIMEOUT_MS), signal]) : AbortSignal.timeout(WEB_TIMEOUT_MS)
         const res = await net.fetch(url, {
           redirect: 'follow',
-          signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+          signal: fetchSignal,
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2' }
         }).catch((e: unknown) => ({ err: e as Error }))
         if ('err' in res && res.err) return { ok: false, output: `搜索失败：${res.err.message}` }
@@ -476,9 +520,29 @@ export async function execTool(
           const child = spawn(command, {
             shell: true,
             cwd: resolvePath(grant.dir),
-            windowsHide: true,
-            timeout: CMD_TIMEOUT_MS
+            windowsHide: true
+            // 注意：不用 spawn 的 timeout 选项——它只终止 cmd.exe 外壳，
+            // 外壳启动的孙子进程会继续运行。超时/取消统一走 killTree 杀整棵树。
           })
+          let killed = false
+          let timedOut = false
+          const cleanup = () => {
+            clearTimeout(timer)
+            if (signal) signal.removeEventListener('abort', onAbort)
+          }
+          const timer = setTimeout(() => {
+            timedOut = true
+            killed = true
+            killTree(child)
+          }, CMD_TIMEOUT_MS)
+          const onAbort = () => {
+            killed = true
+            killTree(child)
+          }
+          if (signal) {
+            if (signal.aborted) onAbort()
+            else signal.addEventListener('abort', onAbort, { once: true })
+          }
           // 输出按 Buffer 收集，结束后统一解码（避免多字节序列被 chunk 边界切断）
           const chunks: Buffer[] = []
           let total = 0
@@ -488,8 +552,9 @@ export async function execTool(
           }
           child.stdout?.on('data', append)
           child.stderr?.on('data', append)
-          child.on('error', (e) => res({ ok: false, output: `启动失败：${e.message}` }))
-          child.on('close', (code, signal) => {
+          child.on('error', (e) => { cleanup(); res({ ok: false, output: `启动失败：${e.message}` }) })
+          child.on('close', (code, signalName) => {
+            cleanup()
             // 中文 Windows 的 cmd 输出为 GBK（代码页 936）：先严格按 UTF-8 解码，失败则回退 GBK
             let out: string
             try {
@@ -498,8 +563,12 @@ export async function execTool(
               try { out = new TextDecoder('gbk').decode(Buffer.concat(chunks)) } catch { out = Buffer.concat(chunks).toString('utf8') }
             }
             if (out.length >= MAX_OUTPUT) out = out.slice(0, MAX_OUTPUT) + '…（输出已截断）'
-            if (signal === 'SIGTERM' || signal === 'SIGKILL') {
-              res({ ok: false, output: `命令超时（${CMD_TIMEOUT_MS / 1000}s）被终止。已产生的输出：\n${out || '（无）'}` })
+            if (timedOut) {
+              res({ ok: false, output: `命令超时（${CMD_TIMEOUT_MS / 1000}s）已终止（含子进程）。已产生的输出：\n${out || '（无）'}` })
+            } else if (killed && signal?.aborted) {
+              res({ ok: false, output: `已取消：命令被用户停止（进程树已终止）。已产生的输出：\n${out || '（无）'}` })
+            } else if (signalName === 'SIGTERM' || signalName === 'SIGKILL') {
+              res({ ok: false, output: `命令被终止。已产生的输出：\n${out || '（无）'}` })
             } else {
               res({ ok: true, output: `退出码 ${code}\n${out || '（无输出）'}` })
             }
