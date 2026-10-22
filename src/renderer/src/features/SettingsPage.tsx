@@ -1,10 +1,10 @@
-// 设置页：八分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 快捷键 / 数据 / 关于）
+// 设置页：九分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 命令审批 / 快捷键 / 数据 / 关于）
 import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
-import type { Skill, HotkeyAction } from '@shared/types'
+import type { Skill, HotkeyAction, ApprovalRecord } from '@shared/types'
 import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
@@ -12,7 +12,7 @@ import { UsagePanel } from '../components/UsagePanel'
 import { bridge } from '../lib/ipc'
 import { fmtTime, fmtTokens, uid, cls, formatKeyBinding, validateKeyBinding } from '../lib/utils'
 
-type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'shortcuts' | 'data' | 'about'
+type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'approvals' | 'shortcuts' | 'data' | 'about'
 
 const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'appearance', label: '外观', icon: 'info' },
@@ -20,6 +20,7 @@ const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'skills', label: 'Skill', icon: 'file' },
   { key: 'workflow', label: '工作流', icon: 'reorder' },
   { key: 'usage', label: '用量统计', icon: 'file' },
+  { key: 'approvals', label: '命令审批', icon: 'shield' },
   { key: 'shortcuts', label: '快捷键', icon: 'send' },
   { key: 'data', label: '数据', icon: 'folder' },
   { key: 'about', label: '关于', icon: 'info' }
@@ -64,6 +65,7 @@ export function SettingsPage() {
             {section === 'skills' && <SkillsSection />}
             {section === 'workflow' && <WorkflowSection />}
             {section === 'usage' && <UsageSection />}
+            {section === 'approvals' && <ApprovalSection />}
             {section === 'shortcuts' && <ShortcutsSection />}
             {section === 'data' && <DataSection />}
             {section === 'about' && <AboutSection />}
@@ -360,6 +362,91 @@ function UsageSection() {
         未上报的调用会标出次数而不是估一个数；无公开单价的模型不折算金额。
       </div>
       <UsagePanel />
+    </div>
+  )
+}
+
+/* ---- 命令审批：白名单一览 + 审批历史 ---- */
+const DECISION_TEXT: Record<string, string> = { once: '本次允许', always: '始终允许', deny: '拒绝' }
+
+function ApprovalSection() {
+  const agents = useAgents((s) => s.agents)
+  const [rules, setRules] = useState<Record<string, string[]>>({})
+  const [records, setRecords] = useState<ApprovalRecord[]>([])
+  const load = () => {
+    void bridge.approval.allRules().then(setRules)
+    void bridge.approval.history(200).then(setRecords)
+  }
+  useEffect(load, [])
+  const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? id
+
+  return (
+    <div className="set-group" data-testid="approval-settings">
+      <div className="group-title">命令审批</div>
+      <div className="desc" style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 10 }}>
+        模型 Agent 执行命令时逐条确认，点「始终允许」的规则落在各 Agent 的白名单里（可在 Agent 的工具面板增删）。
+        危险形态（rm -rf、format、curl | sh 等）白名单覆盖不了，永远要确认。
+        CLI Agent 的命令审批由它自己的 CLI 负责，AgentHub 不替它做决定。
+      </div>
+
+      <div className="group-title" style={{ marginTop: 6 }}>白名单</div>
+      {Object.keys(rules).length === 0 && (
+        <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>（还没有任何规则）</div>
+      )}
+      {Object.entries(rules)
+        .filter(([, list]) => list.length)
+        .map(([id, list]) => (
+          <div key={id} style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>{nameOf(id)}</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {list.map((r) => (
+                <code key={r} style={{ fontSize: 11.5, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 999 }}>
+                  {r}
+                </code>
+              ))}
+            </div>
+          </div>
+        ))}
+
+      <div className="group-title" style={{ marginTop: 12 }}>
+        审批历史
+        <Button variant="ghost" onClick={load} style={{ marginLeft: 8 }}>刷新</Button>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            void bridge.approval.clearHistory().then(load)
+            useUi.getState().toast('审批历史已清空', 'ok')
+          }}
+        >
+          清空
+        </Button>
+      </div>
+      {records.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>（还没有审批记录：开了命令审批后，每次确认都会留在这里）</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 340, overflowY: 'auto' }}>
+          {records.map((r) => (
+            <div key={r.id} data-approval-record style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
+                <b
+                  style={{
+                    color: r.decision === 'deny' ? 'var(--danger)' : r.decision === 'always' ? 'var(--ok, #16a34a)' : 'var(--text-2)'
+                  }}
+                >
+                  {DECISION_TEXT[r.decision] ?? r.decision}
+                </b>
+                <span style={{ color: 'var(--text-3)' }}>{fmtTime(r.ts)}</span>
+                {r.agentName && <span style={{ color: 'var(--text-3)' }}>· {r.agentName}</span>}
+              </div>
+              <code style={{ display: 'block', fontSize: 12, wordBreak: 'break-all', margin: '4px 0' }}>{r.command}</code>
+              <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>
+                {r.reason}
+                {r.rule ? ` → 写入白名单：${r.rule}` : ''}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

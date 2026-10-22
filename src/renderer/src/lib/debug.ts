@@ -5,6 +5,7 @@ import { useWorkflow } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
 import { useSessions } from '../stores/sessions'
 import { useSettings } from '../stores/settings'
+import { useApprovals } from '../stores/approvals'
 import { bridge } from '../lib/ipc'
 import type { AgentConfig } from '@shared/types'
 
@@ -65,6 +66,17 @@ export function installDebugHooks() {
       return useWorkflow.getState().run?.id ?? null
     },
     stopTask: () => useWorkflow.getState().stop('user'),
+    // 命令审批：待裁决队列 + 由脚本代替人点选（验证确认框真能拦住命令）
+    approvals: () => useApprovals.getState().pending.map((p) => ({ id: p.id, command: p.command, reason: p.reason })),
+    decideApproval: (id: string, decision: 'once' | 'always' | 'deny') => {
+      void useApprovals.getState().decide(id, decision)
+      return true
+    },
+    // 直接走一次沙箱工具（含命令审批链路），验证"没批准就不执行"
+    execTool: (grant: Record<string, unknown>, tool: string, argsJson: string) =>
+      bridge.tools.exec(grant as never, tool, argsJson),
+    approvalHistory: () => bridge.approval.history(50),
+    approvalRules: (agentId?: string) => bridge.approval.rules(agentId),
     // 工作流产物目录（验证用：设置与还原，避免验证后把用户配置留在测试目录）
     setWorkflowOutputDir: (dir: string) => {
       useWorkflow.getState().patchConfig({ outputDir: dir })

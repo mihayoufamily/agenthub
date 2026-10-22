@@ -156,7 +156,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
               onClick={() => setToolsOpen(true)}
               title="文件/命令/联网工具授权（沙箱或完全访问、命令执行开关、联网开关）"
             >
-              <Icon name="file" size={11} /> 工具{agent.tools ? `·${[agent.tools.access === 'full' ? '完全访问' : '沙箱', agent.tools.allowCommands && '命令', agent.tools.allowWeb && '联网'].filter(Boolean).join('·')}` : ''}
+              <Icon name="file" size={11} /> 工具{agent.tools ? `·${[agent.tools.access === 'full' ? '完全访问' : '沙箱', agent.tools.allowCommands && (agent.tools.commandPolicy === 'auto' ? '命令·放行' : '命令·确认'), agent.tools.allowWeb && '联网'].filter(Boolean).join('·')}` : ''}
             </button>
           )}
           {agent.kind === 'cli' && agent.cliConfig && (
@@ -681,6 +681,19 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   const [allowWeb, setAllowWeb] = useState(!!agent.tools?.allowWeb)
   const [fullAccess, setFullAccess] = useState(agent.tools?.access === 'full')
   const [riskAck, setRiskAck] = useState(false)
+  const [commandPolicy, setCommandPolicy] = useState<'ask' | 'auto'>(agent.tools?.commandPolicy ?? 'ask')
+  // 白名单存在主进程 approvals.json（不在 agent config 里）：渲染层只能显式提交新规则
+  const [rules, setRules] = useState<string[]>([])
+  const [ruleDraft, setRuleDraft] = useState('')
+  useEffect(() => {
+    let alive = true
+    void bridge.approval.rules(agent.id).then((r) => {
+      if (alive) setRules(r)
+    })
+    return () => {
+      alive = false
+    }
+  }, [agent.id])
 
   const save = () => {
     if (!enabled) {
@@ -699,13 +712,15 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
       dir: dir.trim(),
       allowCommands,
       allowWeb,
-      ...(fullAccess ? { access: 'full' as const } : {})
+      ...(fullAccess ? { access: 'full' as const } : {}),
+      ...(allowCommands ? { commandPolicy } : {})
     }
     updateAgent(agent.id, { tools })
+    void bridge.approval.setRules(agent.id, rules.map((r) => r.trim()).filter(Boolean))
     useUi.getState().toast(
       fullAccess
         ? `已启用完全访问（文件全盘 + 命令不限目录${allowCommands ? '' : '；命令未授权'}${allowWeb ? '，联网' : ''}）`
-        : `已启用工具（沙箱：${tools.dir}${allowCommands ? '，命令' : ''}${allowWeb ? '，联网' : ''}）`,
+        : `已启用工具（沙箱：${tools.dir}${allowCommands ? `，命令${commandPolicy === 'ask' ? '（逐条确认）' : '（授权即放行）'}` : ''}${allowWeb ? '，联网' : ''}）`,
       'ok'
     )
     onClose()
@@ -794,6 +809,66 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
                 </div>
               </span>
             </label>
+            {allowCommands && (
+              <div
+                style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '10px 12px' }}
+                data-testid="command-approval-block"
+              >
+                <div style={{ fontSize: 12.5, fontWeight: 600 }}>命令审批</div>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
+                  <input type="radio" name="command-policy" checked={commandPolicy === 'ask'} onChange={() => setCommandPolicy('ask')} style={{ marginTop: 3 }} />
+                  <span style={{ lineHeight: 1.6, fontSize: 12.5 }}>
+                    <b>逐条确认</b>（默认）
+                    <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                      不在下方白名单里的命令会弹窗问你：本次允许 / 始终允许（写进白名单）/ 拒绝。180 秒没人确认按拒绝收场，不会替你放行。
+                    </div>
+                  </span>
+                </label>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
+                  <input type="radio" name="command-policy" checked={commandPolicy === 'auto'} onChange={() => setCommandPolicy('auto')} style={{ marginTop: 3 }} />
+                  <span style={{ lineHeight: 1.6, fontSize: 12.5 }}>
+                    授权即放行（旧行为）
+                    <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                      勾了"允许执行命令"就不再逐条确认。无人值守跑长工作流时用；审批历史仍会记录每次工具调用。
+                    </div>
+                  </span>
+                </label>
+                <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
+                  白名单规则：整段相等才放行，以 <code>*</code> 结尾才是前缀放行（如 <code>npm run *</code>）。
+                  命令里的 <code>&amp;&amp;</code>、<code>|</code> 会拆开逐段核对，一段没过就整条问。
+                  危险形态（rm -rf、del /s、format、curl | sh、git push --force 等）<b>白名单覆盖不了</b>，永远要确认。
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {rules.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-3)' }}>（还没有规则，第一条命令就会弹确认）</div>}
+                  {rules.map((r, i) => (
+                    <div key={`${r}-${i}`} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <code style={{ flex: 1, fontSize: 12, wordBreak: 'break-all' }}>{r}</code>
+                      <Button variant="ghost" onClick={() => setRules(rules.filter((_, n) => n !== i))}>删除</Button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input
+                    value={ruleDraft}
+                    onChange={(e) => setRuleDraft(e.target.value)}
+                    placeholder="新增一条规则，例如 npm run build"
+                    style={{ flex: 1 }}
+                    data-testid="command-rule-input"
+                  />
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      const v = ruleDraft.trim().toLowerCase()
+                      if (!v) return
+                      if (!rules.includes(v)) setRules([...rules, v])
+                      setRuleDraft('')
+                    }}
+                  >
+                    添加
+                  </Button>
+                </div>
+              </div>
+            )}
             <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
               <input type="checkbox" checked={allowWeb} onChange={(e) => setAllowWeb(e.target.checked)} style={{ marginTop: 3 }} />
               <span style={{ lineHeight: 1.6 }}>

@@ -85,7 +85,10 @@ function buildExecutorSystem(exec: ExecutorCapability): string {
   }
   if (exec.kind === 'model' && exec.hasTools) {
     if (exec.allowCommands) {
-      parts.push('此外已授权执行 shell 命令（工作目录为授权目录，超时 60 秒）：可用于构建、测试等产物验证。')
+      parts.push(
+        '此外已授权执行 shell 命令（工作目录为授权目录，超时 60 秒）：可用于构建、测试等产物验证。' +
+          '注意：不在白名单里的命令会先弹给用户确认，用户可能拒绝或久未处理；被拒绝时如实说明并改用文本成果交付，不要重试同一条命令。'
+      )
     }
     if (exec.allowWeb) {
       parts.push('此外已授权联网：web_fetch 可抓取网页（HTML 自动转文本）、web_search 可搜索（DuckDuckGo）。需要查资料/引用最新信息时使用。')

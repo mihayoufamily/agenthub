@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
-  LedgerEntry, LedgerUsageRow, ConventionFile
+  LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord
 } from '../shared/types'
 
 /**
@@ -102,6 +102,14 @@ const api = {
       const handler = (_e: unknown, data: Parameters<typeof cb>[0]) => cb(data)
       ipcRenderer.on('model:event', handler)
       return () => ipcRenderer.removeListener('model:event', handler)
+    },
+    /** 命令审批到达（独立订阅口：payload 与流事件不同构，不塞进 onEvent 的联合类型里） */
+    onApproval: (cb: (req: ApprovalRequest) => void) => {
+      const handler = (_e: unknown, data: { type?: string; approval?: ApprovalRequest }) => {
+        if (data?.type === 'approval' && data.approval) cb(data.approval)
+      }
+      ipcRenderer.on('model:event', handler)
+      return () => ipcRenderer.removeListener('model:event', handler)
     }
   },
   skills: {
@@ -133,6 +141,17 @@ const api = {
   /** 项目约定自动读取（AGENTS.md / CLAUDE.md 原文，主进程只读不写） */
   conv: {
     read: (dir?: string) => ipcRenderer.invoke('conv:read', dir) as Promise<ConventionFile[]>
+  },
+  /** 命令审批：白名单规则由主进程持有（渲染层改不动它，只能显式提交新规则） */
+  approval: {
+    pending: () => ipcRenderer.invoke('approval:pending') as Promise<ApprovalRequest[]>,
+    decide: (id: string, decision: ApprovalDecision) =>
+      ipcRenderer.invoke('approval:decide', id, decision) as Promise<{ ok: boolean; message?: string }>,
+    rules: (agentId?: string) => ipcRenderer.invoke('approval:rules', agentId) as Promise<string[]>,
+    allRules: () => ipcRenderer.invoke('approval:rules:all') as Promise<Record<string, string[]>>,
+    setRules: (agentId: string, rules: string[]) => ipcRenderer.invoke('approval:rules:set', agentId, rules) as Promise<string[]>,
+    history: (limit?: number) => ipcRenderer.invoke('approval:history', limit) as Promise<ApprovalRecord[]>,
+    clearHistory: () => ipcRenderer.invoke('approval:history:clear') as Promise<{ ok: boolean }>
   },
   dialogs: {
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<Array<{ name: string; path: string; size: number; content?: string; dataUrl?: string; image?: boolean; error?: boolean; message?: string }>>,

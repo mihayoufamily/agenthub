@@ -7,6 +7,8 @@ import { resolve as resolvePath, dirname, sep, relative } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { ToolGrant } from '../shared/types'
+import type { ApprovalDecision } from '../shared/types'
+import { checkCommand } from '../shared/approvals'
 
 const MAX_READ = 200 * 1024 // 读文件上限
 const MAX_WRITE = 1024 * 1024 // 写文件上限
@@ -412,12 +414,23 @@ export interface ToolExecResult {
   writtenPath?: string
 }
 
+/**
+ * 命令审批闸门（由调用方注入，主进程 approvals.ts 实现）。
+ * rules 用函数取而不是数组：用户点「始终允许」后规则当场变了，
+ * 同一条流里后续同类命令应当直接放行，不该还拿着旧快照问第二遍。
+ */
+export interface CommandApprover {
+  rules: () => string[]
+  ask: (info: { tool: string; command: string; reason: string; uncovered: string[] }) => Promise<ApprovalDecision>
+}
+
 /** 执行一次工具调用。argsJson 为模型输出的 JSON 字符串（解析失败按参数错误处理）。signal 为外部取消信号（可中断命令/联网）。 */
 export async function execTool(
   grant: ToolGrant,
   tool: string,
   argsJson: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  approver?: CommandApprover
 ): Promise<ToolExecResult> {
   let args: Record<string, unknown> = {}
   try {
@@ -613,6 +626,22 @@ export async function execTool(
         if (!grant.allowCommands) return { ok: false, output: '拒绝：该 Agent 未授权执行命令' }
         const command = typeof args.command === 'string' ? args.command : ''
         if (!command.trim()) return { ok: false, output: '拒绝：命令为空' }
+        // 命令审批（默认开）：危险形态或不在白名单的片段都要人确认；
+        // 只有把该 Agent 的策略显式设为 auto（旧的一刀切放行）才跳过这一层
+        if (grant.commandPolicy !== 'auto') {
+          const v = checkCommand(command, approver?.rules() ?? [])
+          if (!v.allowed) {
+            if (!approver) {
+              return {
+                ok: false,
+                output: `拒绝：${v.reason}（此执行入口没有确认界面，请从工作站/工作流发起，或把该 Agent 的命令策略改为"授权即放行"）`
+              }
+            }
+            const d = await approver.ask({ tool: 'run_command', command, reason: v.reason, uncovered: v.uncovered })
+            if (signal?.aborted) return { ok: false, output: '已取消：工具执行被用户停止' }
+            if (d === 'deny') return { ok: false, output: `拒绝：用户不批准该命令（${v.reason}）` }
+          }
+        }
         // 完全访问：命令不限工作目录（dir 仅作默认 cwd，失效时不强制）；沙箱模式：cwd 固定为沙箱根
         const full = grant.access === 'full'
         const cwdRoot = grant.dir?.trim() ? resolvePath(grant.dir) : ''

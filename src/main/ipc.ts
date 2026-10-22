@@ -7,7 +7,9 @@ import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill } from '../shared/types'
-import { execTool } from './tools'
+import { execTool, type CommandApprover } from './tools'
+import * as approvals from './approvals'
+import type { ApprovalDecision } from '../shared/types'
 import { readConventions } from './conventions'
 import { checkUpdate } from './updater'
 import * as ledger from './ledger'
@@ -80,6 +82,33 @@ function hostOf(baseUrl: string): string {
 
 /** 注册全部 IPC 通道。getStore/getWin 为延迟引用，避免初始化顺序问题。 */
 export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow | null) {
+  /**
+   * 命令审批闸门：判定与裁决都在主进程，界面只是"问一个人"的通道。
+   * 请求走 model:event 的 approval 事件下发，点完由 approval:decide 回来落地。
+   */
+  const makeApprover = (
+    reqId: string,
+    ctx: { agentId?: string; agentName?: string; dir: string }
+  ): CommandApprover => ({
+    rules: () => approvals.rulesFor(ctx.agentId),
+    ask: (info) =>
+      approvals.requestApproval(
+        {
+          id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+          reqId,
+          tool: info.tool,
+          command: info.command,
+          dir: ctx.dir,
+          ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
+          ...(ctx.agentName ? { agentName: ctx.agentName } : {}),
+          reason: info.reason,
+          uncovered: info.uncovered,
+          ts: Date.now()
+        },
+        (req) => getWin()?.webContents.send('model:event', { reqId, type: 'approval', approval: req })
+      )
+  })
+
   // ---------- 应用信息 ----------
   const { app } = require('electron')
   ipcMain.handle('app:info', () => ({
@@ -307,12 +336,18 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     openai.chatStream(cfg, key, reqId, messages, (ev) => {
       tap(ev)
       getWin()?.webContents.send('model:event', ev)
-    }, grant)
+    }, grant, grant ? makeApprover(reqId, {
+      dir: grant.dir,
+      ...(opts?.agentId ? { agentId: opts.agentId } : {}),
+      ...(agentName ? { agentName } : {})
+    }) : undefined)
     return { ok: true }
   })
 
   ipcMain.handle('model:cancel', (_e, reqId: string) => {
     openai.cancelStream(reqId)
+    // 挂在这条流上的审批一并按拒绝收掉：否则界面留一张没人认领的弹窗
+    approvals.denyPendingFor(reqId)
     return { ok: true }
   })
 
@@ -396,7 +431,21 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     if (!grant || typeof grant.dir !== 'string' || !grant.dir) {
       return { ok: false, output: '拒绝：未配置工具目录' }
     }
-    return execTool(grant, tool, argsJson)
+    // 这条入口是给验证脚本与高级用途直接跑一次工具用的：命令审批照样要过，
+    // 只是问的是"正在调用它的那个人"，而不是某个 Agent 的白名单
+    return execTool(grant, tool, argsJson, undefined, makeApprover('tools:exec', { dir: grant.dir }))
+  })
+
+  // ---------- 命令审批（白名单 / 待裁决 / 审批历史） ----------
+  ipcMain.handle('approval:pending', () => approvals.pendingList())
+  ipcMain.handle('approval:decide', (_e, id: string, decision: ApprovalDecision) => approvals.resolveApproval(id, decision))
+  ipcMain.handle('approval:rules', (_e, agentId?: string) => approvals.rulesFor(agentId))
+  ipcMain.handle('approval:rules:all', () => approvals.allRules())
+  ipcMain.handle('approval:rules:set', (_e, agentId: string, rules: string[]) => approvals.setRules(agentId, rules))
+  ipcMain.handle('approval:history', (_e, limit?: number) => approvals.listRecords(limit ?? 200))
+  ipcMain.handle('approval:history:clear', () => {
+    approvals.clearRecords()
+    return { ok: true }
   })
 
   // 选择目录（Agent 工具沙箱根配置用）

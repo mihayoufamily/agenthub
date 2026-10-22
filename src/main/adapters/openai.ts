@@ -1,5 +1,5 @@
 import type { CustomModelConfig, ModelTestResult, ToolGrant, ToolCall, UsageInfo } from '../../shared/types'
-import { execTool, toolDefs, MAX_OUTPUT } from '../tools'
+import { execTool, toolDefs, MAX_OUTPUT, type CommandApprover } from '../tools'
 
 /**
  * OpenAI 兼容接口适配层（接入"模型 API"而非"现成 Agent"）。
@@ -299,7 +299,8 @@ export function chatStream(
   reqId: string,
   messages: IncomingMsg[],
   onEvent: (e: ChatChunkEvent) => void,
-  grant?: ToolGrant
+  grant?: ToolGrant,
+  approver?: CommandApprover
 ) {
   const ctrl = new AbortController()
   activeStreams.set(reqId, ctrl)
@@ -374,7 +375,7 @@ export function chatStream(
           const call: ToolCall = { id: uid('tool'), tool: tc.name, args: argsSummary(tc.args), status: 'running', ts: Date.now() }
           onEvent({ reqId, type: 'tool', toolCall: call })
           // 取消信号透传：正在执行的命令/联网可被立即中断
-          const res = await execTool(grant, tc.name, tc.args, ctrl.signal)
+          const res = await execTool(grant, tc.name, tc.args, ctrl.signal, approver)
           const done: ToolCall = {
             ...call,
             status: res.ok ? 'done' : 'error',

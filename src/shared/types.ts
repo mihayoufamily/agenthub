@@ -49,6 +49,47 @@ export interface ToolGrant {
   allowWeb?: boolean
   /** 访问模式：sandbox（默认，沙箱内）/ full（完全访问，全盘文件 + 不限目录命令） */
   access?: 'sandbox' | 'full'
+  /**
+   * 命令审批策略：'ask'（默认，每条不在白名单的命令都要人工确认）/ 'auto'（沿用旧行为，授权即放行）。
+   * 白名单本身不在这里——它由主进程 approvals.json 持有，渲染层改不了，避免自我提权。
+   */
+  commandPolicy?: 'ask' | 'auto'
+}
+
+/** 命令审批的人工裁决结果 */
+export type ApprovalDecision = 'once' | 'always' | 'deny'
+
+/** 一次待裁决的命令审批请求（推给渲染层界面） */
+export interface ApprovalRequest {
+  id: string
+  /** 关联的流 reqId：该流被取消时待审批一律按拒绝收场 */
+  reqId: string
+  tool: string
+  /** 命令原文（界面完整展示，不折叠、不改写） */
+  command: string
+  dir: string
+  agentId?: string
+  agentName?: string
+  /** 为什么要问：不在白名单 / 命中危险形态 / 未配置白名单 */
+  reason: string
+  /** 未被规则覆盖的命令片段（如实指出到底是哪一段没过） */
+  uncovered?: string[]
+  ts: number
+}
+
+/** 审批历史条目（裁决落盘，事后可审计） */
+export interface ApprovalRecord {
+  id: string
+  ts: number
+  tool: string
+  command: string
+  dir: string
+  agentName?: string
+  decision: ApprovalDecision
+  /** 命中的放行理由（与当初为什么问它放在一起看才有意义） */
+  reason: string
+  /** decision=always 时写入白名单的规则 */
+  rule?: string
 }
 
 /** 思考强度（仅对官方支持的 harness 显示与透传；不支持的模型不显示该设置） */

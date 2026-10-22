@@ -17,6 +17,8 @@ import { TaskView } from './features/TaskView'
 import { ModeSwitchWarning, requestModeSwitch } from './features/ModeSwitch'
 import { SettingsPage } from './features/SettingsPage'
 import { Toasts } from './components/Toasts'
+import { ApprovalModal } from './components/ApprovalModal'
+import { watchApprovals } from './stores/approvals'
 import { Button, Spinner } from './components/primitives'
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
@@ -105,6 +107,9 @@ export function App() {
     push()
     return useWorkflow.subscribe(push)
   }, [])
+
+  // 命令审批：事件与待裁决队列都挂在这一层（两种模式与设置页都要能弹出来）
+  useEffect(() => watchApprovals(), [])
 
   useEffect(() => {
     installDebugHooks()
@@ -207,6 +212,7 @@ export function App() {
       <UpdateBanner />
       <SettingsPage />
       <ModeSwitchWarning />
+      <ApprovalModal />
       <Toasts />
     </ErrorBoundary>
   )
