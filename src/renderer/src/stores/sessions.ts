@@ -219,16 +219,15 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       const history = [
         ...(skillBlock ? [{ role: 'system', content: skillBlock }] : []),
         ...(activeOf(get(), agentId)?.messages ?? [])
-        // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位——
-        // 思考模型+tools 协议要求所有 assistant 带 reasoning_content，空占位会导致 400）
+        // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位）
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.error && !m.demo && !m.streaming && m.id !== msgId)
         .slice(-HISTORY_WINDOW)
         .map((m) => ({
           role: m.role,
           content: m.id === userMsg.id ? m.text + attachmentText : m.text,
-          // 思考模型协议（DeepSeek/方舟官方样例）：assistant 消息总是带 reasoning_content 字段
-          // （无思考内容时为空串；非思考模型服务端会忽略该字段）
-          ...(m.role === 'assistant' ? { reasoning_content: m.reasoning ?? '' } : {})
+          // 思考内容单独携带；是否以 reasoning_content 回传接口由主进程按
+          // AGENTHUB_PASS_REASONING 裁决（严格接口回传会 400，渲染层不硬编码协议）
+          ...(m.role === 'assistant' && m.reasoning ? { reasoning: m.reasoning } : {})
         }))
       ]
 
@@ -309,7 +308,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
 
       const r = agent.kind === 'cli'
         ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath, workDir: cliWorkDir, thinkingLevel: agent.cliConfig!.thinkingLevel }, reqId, history)
-        : await bridge.models.chat(agent.modelConfig!, reqId, history, agent.tools ? { tools: agent.tools } : undefined)
+        : await bridge.models.chat(agent.modelConfig!, reqId, history, { agentId })
       if (!r.ok) {
         set((s) => {
           const activeStreams = { ...s.activeStreams }

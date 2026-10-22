@@ -65,7 +65,7 @@ const api = {
     test: (name: CliName) => ipcRenderer.invoke('cli:test', name) as Promise<{ ok: boolean; message: string; version?: string; exePath?: string }>,
     /** 可枚举的模型清单（不可枚举时 ok=false，界面回退到手填） */
     models: (name: CliName) => ipcRenderer.invoke('cli:models', name) as Promise<{ ok: boolean; models?: string[]; message?: string; source?: string }>,
-    chat: (name: CliName, opts: { model?: string; exePath?: string; workDir?: string; timeoutMs?: number; thinkingLevel?: ThinkingLevel }, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[]) =>
+    chat: (name: CliName, opts: { model?: string; exePath?: string; workDir?: string; timeoutMs?: number; thinkingLevel?: ThinkingLevel }, reqId: string, messages: { role: string; content: string; reasoning?: string }[]) =>
       ipcRenderer.invoke('cli:chat', name, opts, reqId, messages) as Promise<{ ok: boolean; message?: string }>,
     cancel: (reqId: string) => ipcRenderer.invoke('cli:cancel', reqId),
     /** 流式事件与 models 共用 model:event 通道（reqId 路由） */
@@ -81,7 +81,7 @@ const api = {
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
     /** 余额查询（DeepSeek 官方 /user/balance；其他接口 ok=false） */
     balance: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:balance', cfg) as Promise<{ ok: boolean; message?: string; balance?: number; currency?: string }>,
-    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[], opts?: { tools?: ToolGrant }) =>
+    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string }[], opts?: { agentId?: string }) =>
       ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts),
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
     /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */

@@ -8,7 +8,6 @@ import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill } from '../shared/types'
 import { execTool } from './tools'
 import { checkUpdate } from './updater'
-import type { ChatMsg } from './adapters/openai'
 
 /** 注册全部 IPC 通道。getStore/getWin 为延迟引用，避免初始化顺序问题。 */
 export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow | null) {
@@ -137,17 +136,21 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return openai.listModels(cfg, key)
   })
 
-  ipcMain.handle('model:chat', (_e, cfg: CustomModelConfig, reqId: string, messages: ChatMsg[], opts?: { tools?: ToolGrant }) => {
+  ipcMain.handle('model:chat', (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string }) => {
     const key = getStore().getCredential(cfg.keyId)
     if (!key) {
       const win = getWin()
       win?.webContents.send('model:event', { reqId, type: 'error', message: '未找到 API Key，请先在 Agent 设置中填写并保存' })
       return { ok: false }
     }
-    // opts.tools（Agent 级授权）存在时启用工具循环：模型可在沙箱目录内读写文件/执行命令
+    // 工具授权以存储配置为唯一来源：渲染层只传 agentId 供查表，
+    // 不接受渲染层自构造的 grant（否则渲染层可自我提权为完全访问/联网）
+    const grant: ToolGrant | undefined = opts?.agentId
+      ? getStore().getConfig().agents.find((a) => a.id === opts.agentId)?.tools
+      : undefined
     openai.chatStream(cfg, key, reqId, messages, (ev) => {
       getWin()?.webContents.send('model:event', ev)
-    }, opts?.tools)
+    }, grant)
     return { ok: true }
   })
 
@@ -204,7 +207,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return cli.testConnection(name)
   })
 
-  ipcMain.handle('cli:chat', async (_e, name: string, opts: cli.CliChatOptions, reqId: string, messages: { role: string; content: string; reasoning_content?: string }[]) => {
+  ipcMain.handle('cli:chat', async (_e, name: string, opts: cli.CliChatOptions, reqId: string, messages: { role: string; content: string; reasoning?: string }[]) => {
     if (!cli.isKnownCli(name)) {
       getWin()?.webContents.send('model:event', { reqId, type: 'error', message: `未知 CLI：${name}` })
       return { ok: false }

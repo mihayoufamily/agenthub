@@ -142,6 +142,18 @@ function agentChatToCard(
       if (ev.type === 'delta' && ev.text) {
         text += ev.text
         setRun((r) => ({ ...r, cards: updateCard(r.cards, cardId, { conclusion: text }) }))
+      } else if (ev.type === 'reasoning' && ev.text) {
+        // 思考增量进入当前角色卡片的过程区（同卡累计为一条"思考"，避免碎片刷屏）
+        setRun((r) => {
+          const cur = r.cards.find((c) => c.id === cardId)
+          if (!cur) return r
+          const process = [...cur.process]
+          const i = process.findIndex((p) => p.kind === 'thinking')
+          const entry: ProcessEvent = { kind: 'thinking', text: (i >= 0 ? process[i].text : '') + ev.text, ts: Date.now() }
+          if (i >= 0) process[i] = entry
+          else process.push(entry)
+          return { ...r, cards: updateCard(r.cards, cardId, { process }) }
+        })
       } else if (ev.type === 'tool' && ev.toolCall) {
         // 工具调用如实进入卡片过程（同 id 替换：running→done 只留一条）；write_file 成功的真实产物登记为 artifacts
         const tc = ev.toolCall
@@ -211,7 +223,7 @@ function agentChatToCard(
               opts?.modelOverride ? { ...agent.modelConfig, modelId: opts.modelOverride } : agent.modelConfig,
               reqId,
               messages,
-              agent.tools ? { tools: agent.tools } : undefined
+              { agentId: agent.id }
             )
           : Promise.resolve({ ok: false })
     void launched.then((r: { ok: boolean }) => {

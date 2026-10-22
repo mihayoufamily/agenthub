@@ -4,6 +4,7 @@
 // 联网工具（web_fetch/web_search）需用户在授权面板单独开启（allowWeb）。
 import { promises as fs, realpathSync } from 'node:fs'
 import { resolve as resolvePath, dirname, sep, relative } from 'node:path'
+import { lookup as dnsLookup } from 'node:dns/promises'
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { ToolGrant } from '../shared/types'
 
@@ -15,26 +16,56 @@ export { MAX_OUTPUT }
 const CMD_TIMEOUT_MS = 60_000 // 命令超时
 const MAX_SEARCH_HITS = 100 // 文本搜索匹配上限
 const MAX_GLOB = 200 // 通配符匹配文件上限
+const MAX_GLOB_LEN = 200 // 通配符模式长度上限（模型可控输入）
 const WEB_TIMEOUT_MS = 20_000 // 联网请求超时
 const MAX_WEB_BODY = 200 * 1024 // 联网响应体上限
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2'
 /** 遍历时跳过的目录（对齐常见工程习惯，避免把依赖/版本库翻出来） */
 const SKIP_DIRS = new Set(['node_modules', '.git', '.workbuddy', 'dist', 'out', 'release'])
 
-/** 简易通配符转正则：支持 **（跨目录）、*（目录内）、?（单字符）；不引入 minimatch 依赖 */
-function globToRegex(g: string): RegExp | null {
-  if (!g.trim()) return null
-  let re = ''
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i]
-    if (c === '*') {
-      if (g[i + 1] === '*') {
-        // **/ → 任意层级（含零层）；裸 ** → 任意字符
-        if (g[i + 2] === '/') { re += '(?:.*/)?'; i += 2 } else { re += '.*'; i += 1 }
-      } else re += '[^/]*'
-    } else if (c === '?') re += '[^/]'
-    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+/** 段内通配匹配（* 任意字符、? 单字符）：双指针回溯，O(n·m)；不用正则故不存在灾难性回溯 */
+function matchSegment(pat: string, s: string): boolean {
+  let p = 0
+  let i = 0
+  let star = -1
+  let mark = 0
+  while (i < s.length) {
+    if (p < pat.length && (pat[p] === '?' || pat[p].toLowerCase() === s[i].toLowerCase())) { p++; i++ }
+    else if (p < pat.length && pat[p] === '*') { star = p; p++; mark = i }
+    else if (star >= 0) { p = star + 1; i = ++mark }
+    else return false
   }
-  try { return new RegExp(`^${re}$`, 'i') } catch { return null }
+  while (p < pat.length && pat[p] === '*') p++
+  return p === pat.length
+}
+
+/**
+ * 编译路径通配：** 跨目录段（含零段）、* 段内、? 单字符，大小写不敏感（Windows 习惯）。
+ * 按段推进"可能位置集合"，复杂度是多项式——模式由模型可控，
+ * 用正则会留下 `*a*a*a*b` 这类灾难性回溯打爆主进程的口子。
+ * 模式为空或超长返回 null（调用方据此拒绝）。
+ */
+function compileGlob(pattern: unknown): ((relPath: string) => boolean) | null {
+  if (typeof pattern !== 'string') return null
+  const g = pattern.trim()
+  if (!g || g.length > MAX_GLOB_LEN) return null
+  const segs = g.split(/[\\/]/).filter(Boolean)
+  if (segs.length === 0) return null
+  return (relPath: string) => {
+    const target = relPath.split(/[\\/]/).filter(Boolean)
+    let cur = new Set<number>([0])
+    for (const seg of segs) {
+      const next = new Set<number>()
+      if (seg === '**') {
+        for (const j of cur) for (let k = j; k <= target.length; k++) next.add(k)
+      } else {
+        for (const j of cur) if (j < target.length && matchSegment(seg, target[j])) next.add(j + 1)
+      }
+      if (next.size === 0) return false
+      cur = next
+    }
+    return cur.has(target.length)
+  }
 }
 
 /** 递归收集沙箱内全部文件的相对路径（跳过 SKIP_DIRS；上限保护） */
@@ -73,14 +104,99 @@ function htmlToText(html: string): string {
     .trim()
 }
 
-/** 校验外链 URL：仅 http/https（防 file:// 等本地协议与注入） */
-function safeWebUrl(raw: unknown): string | null {
+/** 判定主机是否非公网（环回/内网/链路本地/组播/保留）——SSRF 拦截 */
+function isNonPublicHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  if (!h) return true
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true
+  if (h === '::' || h === '::1' || h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true
+  const v4 = h.match(/^(?:\d{1,3}\.){3}\d{1,3}$/)?.[0] ?? h.match(/^::ffff:((?:\d{1,3}\.){3}\d{1,3})$/)?.[1]
+  if (v4) {
+    const [a, b] = v4.split('.').map(Number)
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return true
+    if (a === 169 && b === 254) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && (b === 168 || b === 0)) return true
+  }
+  return false
+}
+
+/**
+ * 校验外链 URL：仅 http/https，且主机不得指向本机/内网（SSRF）。
+ * 域名会做一次 DNS 解析复核，拦掉 localtest.me 这类"公网名字指向 127.0.0.1"的把戏。
+ * 残留限制（如实记录）：解析与真实请求之间存在重新解析窗口，DNS rebinding 无法在本层彻底消除。
+ */
+async function safeWebUrl(raw: unknown): Promise<string | null> {
   if (typeof raw !== 'string' || !raw.trim()) return null
+  let u: URL
+  try { u = new URL(raw.trim()) } catch { return null }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+  if (isNonPublicHost(u.hostname)) return null
   try {
-    const u = new URL(raw.trim())
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
-    return u.toString()
+    const addrs = await dnsLookup(u.hostname.replace(/^\[|\]$/g, ''), { all: true })
+    if (addrs.length === 0 || addrs.some((a) => isNonPublicHost(a.address))) return null
   } catch { return null }
+  return u.toString()
+}
+
+/** 流式读取响应体到上限即停：不整体缓冲，超大/无限响应不会撑爆主进程（会卡住整个应用） */
+async function readBodyCapped(res: Response, limit: number): Promise<{ text: string; truncated: boolean }> {
+  if (!res.body) return { text: '', truncated: false }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  const parts: string[] = []
+  let len = 0
+  let truncated = false
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      const s = decoder.decode(value, { stream: true })
+      if (len + s.length > limit) {
+        parts.push(s.slice(0, Math.max(0, limit - len)))
+        len = limit
+        truncated = true
+        break
+      }
+      parts.push(s)
+      len += s.length
+    }
+  } finally {
+    if (truncated) await reader.cancel().catch(() => { /* 已放弃剩余内容 */ })
+  }
+  return { text: parts.join(''), truncated }
+}
+
+/**
+ * 联网 GET（web_fetch / web_search 共用）：SSRF 校验 + 跳转后按最终地址复核 + 流式限量读取。
+ * 用 redirect:'follow' 而非 'manual'：Electron net 的 manual 语义不保证能读到 Location，
+ * 逐跳手工跟随会把常见的 301/302 页面变成失败；改为跟随后用 res.url 复核最终落点。
+ * 残留限制：跳转到内网的那次请求本身仍已发出（盲 SSRF），但响应体一律不外传给模型。
+ */
+async function webGet(
+  rawUrl: string,
+  signal: AbortSignal | undefined,
+  accept: string
+): Promise<
+  | { ok: true; contentType: string; text: string; truncated: boolean }
+  | { ok: false; output: string }
+> {
+  const url = await safeWebUrl(rawUrl)
+  if (!url) return { ok: false, output: '拒绝：URL 为空、不是 http/https 链接，或指向本机/内网地址（SSRF 已拦截）' }
+  const { net } = require('electron') as typeof import('electron')
+  const fetchSignal = signal ? AbortSignal.any([AbortSignal.timeout(WEB_TIMEOUT_MS), signal]) : AbortSignal.timeout(WEB_TIMEOUT_MS)
+  const res = await net.fetch(url, {
+    redirect: 'follow',
+    signal: fetchSignal,
+    headers: { 'User-Agent': WEB_UA, Accept: accept }
+  }).catch((e: unknown) => ({ err: e as Error }))
+  if ('err' in res && res.err) return { ok: false, output: `请求失败：${res.err.message}` }
+  const r = res as Response
+  if (!(await safeWebUrl(r.url || url))) return { ok: false, output: '拒绝：跳转后指向本机/内网地址（SSRF 已拦截，响应体未外传）' }
+  if (!r.ok) return { ok: false, output: `HTTP ${r.status} ${r.statusText}` }
+  const { text, truncated } = await readBodyCapped(r, MAX_WEB_BODY)
+  return { ok: true, contentType: r.headers.get('content-type') ?? '', text, truncated }
 }
 
 /** OpenAI function calling 工具定义（发给模型的 schema；命令执行与联网仅授权后可见） */
@@ -218,7 +334,7 @@ export function toolDefs(allowCommands: boolean, allowWeb: boolean): unknown[] {
         type: 'function',
         function: {
           name: 'web_fetch',
-          description: '抓取一个 http/https 网页并转为纯文本（HTML 会剥离标签；JSON/纯文本原样返回）',
+          description: '抓取一个 http/https 网页并转为纯文本（HTML 会剥离标签；JSON/纯文本原样返回）。上限 200KB，超限停止下载并标注截断；本机/内网地址一律拒绝',
           parameters: {
             type: 'object',
             properties: { url: { type: 'string', description: '完整 URL（http/https）' } },
@@ -380,14 +496,17 @@ export async function execTool(
           return { ok: false, output: '拒绝：正则存在嵌套量词（可能灾难性回溯），请拆分为多个简单搜索' }
         }
         const root = resolvePath(grant.dir)
-        const gfilter = typeof args.glob === 'string' && args.glob.trim() ? globToRegex(args.glob) : null
+        const gfilter = compileGlob(args.glob)
+        if (typeof args.glob === 'string' && args.glob.trim() && !gfilter) {
+          return { ok: false, output: `拒绝：glob 模式非法或超过 ${MAX_GLOB_LEN} 字符` }
+        }
         const files: string[] = []
         await walkRelPaths(root, root, files)
         const hits: string[] = []
         let scanned = 0
         for (const rel of files) {
           if (hits.length >= MAX_SEARCH_HITS) break
-          if (gfilter && !gfilter.test(rel)) continue
+          if (gfilter && !gfilter(rel)) continue
           const abs = resolvePath(root, rel)
           try {
             const st = await fs.stat(abs)
@@ -412,12 +531,12 @@ export async function execTool(
         }
       }
       case 'glob_files': {
-        const re = globToRegex(typeof args.pattern === 'string' ? args.pattern : '')
-        if (!re) return { ok: false, output: '拒绝：通配符模式为空或非法' }
+        const match = compileGlob(args.pattern)
+        if (!match) return { ok: false, output: `拒绝：通配符模式为空或超过 ${MAX_GLOB_LEN} 字符` }
         const root = resolvePath(grant.dir)
         const files: string[] = []
         await walkRelPaths(root, root, files)
-        const matched = files.filter((f) => re.test(f))
+        const matched = files.filter((f) => match(f))
         const shown = matched.slice(0, MAX_GLOB)
         return {
           ok: true,
@@ -450,62 +569,38 @@ export async function execTool(
       }
       case 'web_fetch': {
         if (!grant.allowWeb) return { ok: false, output: '拒绝：该 Agent 未授权联网' }
-        const url = safeWebUrl(args.url)
-        if (!url) return { ok: false, output: '拒绝：URL 为空或不是 http/https 链接' }
-        const { net } = require('electron') as typeof import('electron')
-        // 取消信号联动：外部取消时立即中断进行中的请求
-        const fetchSignal = signal ? AbortSignal.any([AbortSignal.timeout(WEB_TIMEOUT_MS), signal]) : AbortSignal.timeout(WEB_TIMEOUT_MS)
-        const res = await net.fetch(url, {
-          redirect: 'follow',
-          signal: fetchSignal,
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2', Accept: 'text/html,application/json,text/plain,*/*' }
-        }).catch((e: unknown) => ({ err: e as Error }))
-        if ('err' in res && res.err) return { ok: false, output: `请求失败：${res.err.message}` }
-        const r = res as Response
-        if (!r.ok) return { ok: false, output: `HTTP ${r.status} ${r.statusText}` }
-        let body = await r.text()
-        if (body.length > MAX_WEB_BODY) body = body.slice(0, MAX_WEB_BODY) + '…（内容超限已截断）'
-        const ct = r.headers.get('content-type') ?? ''
-        const text = ct.includes('html') ? htmlToText(body) : body
-        return { ok: true, output: text ? text.slice(0, MAX_OUTPUT) || '（空内容）' : '（空内容）' }
+        const r = await webGet(typeof args.url === 'string' ? args.url : '', signal, 'text/html,application/json,text/plain,*/*')
+        if (!r.ok) return { ok: false, output: r.output }
+        const raw = r.contentType.includes('html') ? htmlToText(r.text) : r.text
+        const body = raw.length > MAX_OUTPUT ? raw.slice(0, MAX_OUTPUT) : raw
+        if (!body) return { ok: true, output: '（空内容）' }
+        const suffix = r.truncated ? `\n…（响应超过 ${MAX_WEB_BODY / 1024}KB，已停止下载并截断）` : ''
+        return { ok: true, output: body + suffix }
       }
       case 'web_search': {
         if (!grant.allowWeb) return { ok: false, output: '拒绝：该 Agent 未授权联网' }
         const query = typeof args.query === 'string' ? args.query.trim() : ''
         if (!query) return { ok: false, output: '拒绝：搜索词为空' }
-        const { net } = require('electron') as typeof import('electron')
-        const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query)
-        const fetchSignal = signal ? AbortSignal.any([AbortSignal.timeout(WEB_TIMEOUT_MS), signal]) : AbortSignal.timeout(WEB_TIMEOUT_MS)
-        const res = await net.fetch(url, {
-          redirect: 'follow',
-          signal: fetchSignal,
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2' }
-        }).catch((e: unknown) => ({ err: e as Error }))
-        if ('err' in res && res.err) return { ok: false, output: `搜索失败：${res.err.message}` }
-        const r = res as Response
-        if (!r.ok) return { ok: false, output: `搜索失败：HTTP ${r.status}` }
-        const html = await r.text()
-        // DuckDuckGo HTML 版结果解析（非官方接口，稳定性一般——如实标注）
+        const r = await webGet('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), signal, 'text/html,*/*')
+        if (!r.ok) return { ok: false, output: `搜索失败：${r.output}` }
+        const html = r.text
+        // DuckDuckGo HTML 版结果解析（非官方接口，稳定性一般——如实标注）。
+        // 按结果块切分：标题/链接/摘要取自同一块。旧实现把摘要按出现顺序与结果按位置配对，
+        // 页面里插入广告（有链接无摘要）就会整体错位，把 A 的摘要挂到 B 上喂给模型
         const results: string[] = []
-        const linkRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
-        const snippetRe = /class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
-        const snippets: string[] = []
-        let sm: RegExpExecArray | null
-        while ((sm = snippetRe.exec(html)) && snippets.length < 8) snippets.push(htmlToText(sm[1]))
-        let lm: RegExpExecArray | null
-        let rank = 0
-        while ((lm = linkRe.exec(html)) && results.length < 8) {
-          rank += 1
-          const href = lm[1].replace(/^\/\/duckduckgo\.com\/l\/\?uddg=/, (m) => m) // 保留原始（可能是跳转链）
-          let target = href
+        const blocks = html.split(/(?=<a[^>]+class="[^"]*result__a)/i).filter((b) => b.startsWith('<a'))
+        for (const block of blocks) {
+          if (results.length >= 8) break
+          const head = block.match(/^<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+          if (!head) continue
+          let target = head[1]
           try {
-            if (href.startsWith('//duckduckgo.com/l/?uddg=')) {
-              target = decodeURIComponent(href.split('uddg=')[1]?.split('&')[0] ?? href)
+            if (target.startsWith('//duckduckgo.com/l/?uddg=')) {
+              target = decodeURIComponent(target.split('uddg=')[1]?.split('&')[0] ?? target)
             }
           } catch { /* 解析失败用原链 */ }
-          const title = htmlToText(lm[2])
-          const snip = snippets[rank - 1] ?? ''
-          results.push(`${rank}. ${title}\n   ${target}\n   ${snip.slice(0, 160)}`)
+          const snip = block.match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/i)
+          results.push(`${results.length + 1}. ${htmlToText(head[2])}\n   ${target}\n   ${htmlToText(snip?.[1] ?? '').slice(0, 160)}`)
         }
         return {
           ok: true,
@@ -552,23 +647,34 @@ export async function execTool(
           // 输出按 Buffer 收集，结束后统一解码（避免多字节序列被 chunk 边界切断）
           const chunks: Buffer[] = []
           let total = 0
+          // 字节上限是"丢数据"而非"切字符"：记录是否丢过，截断必须如实标注（静默截断会骗模型）
+          let capped = false
           const append = (b: Buffer | string) => {
             if (typeof b === 'string') { chunks.push(Buffer.from(b, 'utf8')); total += b.length; return }
-            if (total < MAX_OUTPUT) { chunks.push(b); total += b.length }
+            if (total < MAX_OUTPUT) { chunks.push(b); total += b.length } else capped = true
           }
           child.stdout?.on('data', append)
           child.stderr?.on('data', append)
           child.on('error', (e) => { cleanup(); res({ ok: false, output: `启动失败：${e.message}` }) })
           child.on('close', (code, signalName) => {
             cleanup()
-            // 中文 Windows 的 cmd 输出为 GBK（代码页 936）：先严格按 UTF-8 解码，失败则回退 GBK
-            let out: string
+            // 中文 Windows 的 cmd 输出为 GBK（代码页 936）：先严格按 UTF-8 解码，失败则回退 GBK。
+            // 输出按字节截断可能切碎末尾多字节字符：严格解码失败时先回退最多 3 字节重试，
+            // 成功说明是截断边界问题而非 GBK，避免整段 UTF-8 被按 GBK 误解码成乱码
+            const buf = Buffer.concat(chunks)
+            const strict = new TextDecoder('utf-8', { fatal: true })
+            let out: string | null = null
             try {
-              out = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))
+              out = strict.decode(buf)
             } catch {
-              try { out = new TextDecoder('gbk').decode(Buffer.concat(chunks)) } catch { out = Buffer.concat(chunks).toString('utf8') }
+              for (let cut = 1; cut <= 3 && out === null; cut++) {
+                try { out = strict.decode(buf.subarray(0, buf.length - cut)) } catch { /* 继续回退 */ }
+              }
             }
-            if (out.length >= MAX_OUTPUT) out = out.slice(0, MAX_OUTPUT) + '…（输出已截断）'
+            if (out === null) {
+              try { out = new TextDecoder('gbk').decode(buf) } catch { out = buf.toString('utf8') }
+            }
+            if (capped || out.length >= MAX_OUTPUT) out = out.slice(0, MAX_OUTPUT) + '…（输出已截断）'
             if (timedOut) {
               res({ ok: false, output: `命令超时（${CMD_TIMEOUT_MS / 1000}s）已终止（含子进程）。已产生的输出：\n${out || '（无）'}` })
             } else if (killed && signal?.aborted) {

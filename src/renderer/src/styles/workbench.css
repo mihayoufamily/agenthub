@@ -220,11 +220,15 @@
 /* 底部输入 */
 .wb-composer-wrap {
   padding: 10px 24px 18px;
+  /* 纵向：上下文用量条在输入框正上方。横向 flex 会把用量条挤到输入框左侧、
+     其内部 flex:1 的进度轨道被压成 0 宽（实测 2026-10-22） */
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
   background: linear-gradient(transparent, var(--bg) 30%);
 }
 .wb-composer-wrap .composer { width: min(860px, 100%); position: relative; }
+.wb-composer-wrap .ctx-bar { width: min(860px, 100%); }
 
 /* Shift+滚轮切换提示 HUD */
 .switch-hud {

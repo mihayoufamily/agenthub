@@ -541,7 +541,7 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
   const lines = text.split('\n').filter((l) => l.trim()).length
   return (
     <div className="reasoning-block">
-      <button className="rb-head" onClick={() => setOpen((v) => !v)} title="思考模型的思考过程（随消息保存，多轮对话传回 API）">
+      <button className="rb-head" onClick={() => setOpen((v) => !v)} title="思考模型的思考过程（随消息保存；工具循环默认不回传给接口，避免严格接口报 400，可用 AGENTHUB_PASS_REASONING=1 开启）">
         <Icon name={open ? 'chevron' : 'up'} size={11} />
         <span>{streaming ? '思考中…' : '思考过程'}</span>
         <span className="rb-meta">{streaming ? `${text.length} 字` : `${lines} 行 · ${text.length} 字`}</span>

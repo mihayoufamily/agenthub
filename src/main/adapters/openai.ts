@@ -13,6 +13,17 @@ export type ChatMsg =
   | { role: 'assistant'; content: string | null; reasoning_content?: string; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
   | { role: 'tool'; content: string; tool_call_id: string }
 
+/** 渲染层传入的历史消息：思考内容单独携带，是否回传由主进程按 PASS_REASONING 裁决 */
+export type IncomingMsg = { role: 'system' | 'user' | 'assistant'; content: string; reasoning?: string }
+
+/** 历史消息转接口线格式：思考内容仅在 PASS_REASONING 开启时随 assistant 消息回传 */
+function toWireMsg(m: IncomingMsg): ChatMsg {
+  if (m.role !== 'assistant') return { role: m.role, content: m.content }
+  return m.reasoning && PASS_REASONING
+    ? { role: 'assistant', content: m.content, reasoning_content: m.reasoning }
+    : { role: 'assistant', content: m.content }
+}
+
 export interface ChatChunkEvent {
   reqId: string
   type: 'delta' | 'reasoning' | 'done' | 'error' | 'usage' | 'tool' | 'notice'
@@ -81,7 +92,8 @@ export async function testConnection(cfg: CustomModelConfig, apiKey: string): Pr
       return { ok: false, message: `HTTP ${res.status} ${res.statusText || ''}`.trim() }
     }
     const data = (await res.json()) as { data?: { id?: string }[] }
-    const models = (data.data ?? []).map((m) => m.id ?? '').filter(Boolean).slice(0, 50)
+    // 不截断：这份列表是"模型 ID 是否存在"的判定依据，截断会把排名靠后的合法 ID 误判为不存在
+    const models = (data.data ?? []).map((m) => m.id ?? '').filter(Boolean)
     return { ok: true, message: `连接成功，发现 ${models.length} 个模型`, models }
   } catch (e) {
     const err = e as Error
@@ -267,7 +279,7 @@ export function chatStream(
   cfg: CustomModelConfig,
   apiKey: string,
   reqId: string,
-  messages: ChatMsg[],
+  messages: IncomingMsg[],
   onEvent: (e: ChatChunkEvent) => void,
   grant?: ToolGrant
 ) {
@@ -277,14 +289,40 @@ export function chatStream(
 
   void (async () => {
     try {
-      const convo: ChatMsg[] = [...messages]
+      const convo: ChatMsg[] = messages.map(toWireMsg)
+      // 用量按轮累计：每轮是一次独立计费的调用，故 token 相加。
+      // 明细（入/出）只在"每一轮都报了明细"时才上报——否则残缺的入/出会让费用估算按输入单价
+      // 计价而系统性偏低（输出单价通常是输入的数倍），宁可只显示总量也不给错的拆分。
       let tokens = 0
+      let promptTokens = 0
+      let completionTokens = 0
+      let roundsWithUsage = 0
+      let roundsWithDetail = 0
+      const addUsage = (u?: UsageInfo) => {
+        if (!u?.tokens) return
+        tokens += u.tokens
+        roundsWithUsage++
+        if (u.prompt != null || u.completion != null) {
+          promptTokens += u.prompt ?? 0
+          completionTokens += u.completion ?? 0
+          roundsWithDetail++
+        }
+      }
+      const emitUsage = () => {
+        if (!tokens) return
+        const detailed = roundsWithUsage > 0 && roundsWithDetail === roundsWithUsage
+        onEvent({
+          reqId,
+          type: 'usage',
+          usage: detailed ? { tokens, prompt: promptTokens, completion: completionTokens } : { tokens }
+        })
+      }
       let rounds = 0
       for (;;) {
         const r = await chatRound(cfg, apiKey, convo, tools, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal, (t) => onEvent({ reqId, type: 'reasoning', text: t }))
-        if (r.usage?.tokens) tokens += r.usage.tokens
+        addUsage(r.usage)
         if (r.finish !== 'tool_calls' || !grant || r.toolCalls.length === 0) {
-          if (tokens) onEvent({ reqId, type: 'usage', usage: { tokens } })
+          emitUsage()
           onEvent({ reqId, type: 'done' })
           activeStreams.delete(reqId)
           return
@@ -294,8 +332,8 @@ export function chatStream(
           convo.push({ role: 'user', content: `（系统）已达到工具调用轮数上限（${MAX_TOOL_ROUNDS}），请直接给出最终答复。` })
           // 标记后继续：下一轮无 tool_calls 自然收束
           const r2 = await chatRound(cfg, apiKey, convo, undefined, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal, (t) => onEvent({ reqId, type: 'reasoning', text: t }))
-          if (r2.usage?.tokens) tokens += r2.usage.tokens
-          if (tokens) onEvent({ reqId, type: 'usage', usage: { tokens } })
+          addUsage(r2.usage)
+          emitUsage()
           onEvent({ reqId, type: 'done' })
           activeStreams.delete(reqId)
           return
@@ -310,7 +348,7 @@ export function chatStream(
         for (const tc of r.toolCalls) {
           // 取消后不再发起新的工具执行（已取消的请求由下方统一收尾）
           if (ctrl.signal.aborted) {
-            if (tokens) onEvent({ reqId, type: 'usage', usage: { tokens } })
+            emitUsage()
             onEvent({ reqId, type: 'done', message: '已取消' })
             activeStreams.delete(reqId)
             return
