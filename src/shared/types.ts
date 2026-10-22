@@ -16,6 +16,11 @@ export interface AgentConfig {
   desc: string
   model: string
   status: AgentConnStatus
+  /**
+   * 该 Agent 的常驻提示词：每次真实调用都自动拼上（工作站对话与工作流角色都生效）。
+   * 与 Skill 的区别是"这是我对这个执行者的长期要求"，不是可复用的方法包。
+   */
+  systemPrompt?: string
   /** 自定义模型配置（kind === 'model' 时有效），apiKey 从不落此处 */
   modelConfig?: CustomModelConfig
   /** 本机 CLI 配置（kind === 'cli' 时有效）；凭据由 CLI 自身管理，AgentHub 不保存任何密钥 */
@@ -58,6 +63,12 @@ export interface Skill {
   content: string
   createdAt: number
   updatedAt?: number
+  /** 禁用后不出现在引用列表、也不会被注入（缺省 = 启用） */
+  enabled?: boolean
+  /** 兼容 Agent Skills 标准：来源目录与附带文件（相对该目录），渐进加载时告诉模型还能读什么 */
+  dir?: string
+  files?: string[]
+  format?: 'legacy' | 'agentskills'
 }
 
 /** 单次请求的用量（usage 事件；CLI 与模型 Agent 通用） */
@@ -120,10 +131,12 @@ export interface Attachment {
   size: number
   path: string
   status: 'ok' | 'error'
-  /** text = 文本附件（内容随真实调用发送给模型/CLI）；binary = 仅记录引用，不发送内容 */
-  kind: 'text' | 'binary'
+  /** text = 文本附件（内容随真实调用发送）；image = 图片（模型走 base64，CLI 只给路径）；binary = 仅记录引用，不发送 */
+  kind: 'text' | 'image' | 'binary'
   /** 文本附件的内容（主进程选取时读取；超过上限或读取失败则无此字段并标记 error） */
   content?: string
+  /** 图片附件的 data URL（发给支持视觉的模型；不写入任何持久化记录） */
+  dataUrl?: string
 }
 
 /** 工作台单 Agent 会话消息 */
@@ -210,6 +223,8 @@ export interface ArtifactRef {
   kind: 'file' | 'change' | 'record'
   demo?: boolean
   path?: string
+  /** 产物来源说明（如实标注）：模型经工具真实写盘 / 由 AgentHub 把文本成果落盘 */
+  by?: 'tool' | 'app'
 }
 
 export interface RoleCard {
@@ -253,6 +268,8 @@ export interface WorkflowRun {
   usage?: { tokens?: number; elapsedMs?: number }
   demo?: boolean
   notes?: string[]
+  /** 本次任务实际生效的产物目录（由主进程裁决后记录，交付卡片与事后回看都以此为准） */
+  outputDir?: string
 }
 
 export interface WorkflowRoleConfig {
@@ -274,6 +291,31 @@ export interface WorkflowConfig {
   confirmEveryRound: boolean
   /** 整个任务真实调用累计消耗 Token 上限；0 = 不限制 */
   maxTokens: number
+  /**
+   * 产物目录：本次工作流的落盘位置。
+   * 执行角色若已授权文件工具，其沙箱根临时覆盖为此目录（只换目录，不提升访问级别）；
+   * 未授权工具时，AgentHub 把执行结论写成本目录下的一篇文本产物。
+   * 留空 = 默认文档目录下的 AgentHub-artifacts。
+   */
+  outputDir?: string
+}
+
+/** 可自定义的全局快捷键动作（窗口内生效，非系统级热键） */
+export type HotkeyAction = 'modeSwitch' | 'openSettings' | 'stopTask' | 'newWorkflow'
+
+/** 默认键位；用户在设置里改了就覆盖 */
+export const HOTKEY_DEFAULTS: Record<HotkeyAction, string> = {
+  modeSwitch: 'Ctrl+M',
+  openSettings: 'Ctrl+Comma',
+  stopTask: 'Ctrl+Backspace',
+  newWorkflow: 'Ctrl+Shift+N'
+}
+
+export const HOTKEY_LABELS: Record<HotkeyAction, string> = {
+  modeSwitch: '工作站 ↔ 工作流互切',
+  openSettings: '打开设置',
+  stopTask: '停止正在执行的工作流',
+  newWorkflow: '新建工作流'
 }
 
 export interface Prefs {
@@ -287,6 +329,8 @@ export interface Prefs {
   shiftWheelSwitch: boolean
   firstRunDone: boolean
   lastMode: WorkMode | null
+  /** 自定义键位（只存被改过的项；缺省用 HOTKEY_DEFAULTS） */
+  keybindings?: Partial<Record<HotkeyAction, string>>
 }
 
 /** 持久化配置（带版本号，支持迁移） */
@@ -298,28 +342,78 @@ export interface AppConfig {
     plannerAgentId: string
     executorAgentId: string
     reviewerAgentId: string
+    /**
+     * 角色在工作流侧单独选的模型（覆盖 Agent 自带模型）。
+     * 必须持久化：否则重启/resolveRoles 之后覆盖丢失，表现为"工作流里切了模型又变回原模型"。
+     */
+    plannerModel?: string
+    executorModel?: string
+    reviewerModel?: string
   }
-  /** 工作流保存的快捷任务（最多 3 个，超出淘汰最旧） */
-  savedTasks?: SavedTask[]
+  /** 工作流预设（角色 + 模型方案，一键套用） */
+  presets?: WorkflowPreset[]
   /** Skill 提示包（Markdown 可复用；聊天引用注入，设置页管理） */
   skills?: Skill[]
 }
 
 /** 保存的任务：目标 + 三角色完整配置 + 审核方式（点击卡片直接恢复整套配置发起新任务） */
-export interface SavedTask {
+/**
+ * 工作流预设：只打包"用谁来干"——三角色各用哪个 Agent、各用什么模型。
+ * 目标文字、产物目录、审核方式都不进预设（那是"干什么"和"怎么跑"，与预设正交）。
+ */
+export interface WorkflowPreset {
   id: string
-  goal: string
+  name: string
   createdAt: number
-  plannerAgentId: string
-  executorAgentId: string
-  reviewerAgentId: string
-  reviewMode: ReviewMode
-  /** 角色级模型覆盖（保存时的值；恢复时沿用） */
-  modelOverrides?: { planner?: string; executor?: string; reviewer?: string }
+  updatedAt: number
+  planner: PresetRole
+  executor: PresetRole
+  reviewer: PresetRole
 }
 
-/** 长期记忆条目（区别于单次任务记录） */
-export interface MemoryEntry {
+export interface PresetRole {
+  agentId: string
+  /** 角色级模型覆盖；留空 = 用该 Agent 自带模型 */
+  model?: string
+}
+
+/** 调用账本条目（只含元数据：不含请求/响应正文，也不含任何凭据） */
+export interface LedgerEntry {
+  ts: number
+  channel: 'model' | 'cli'
+  /** harness 标识：模型侧是 baseUrl 主机名，CLI 侧是 cli 名 */
+  harness: string
+  model?: string
+  agentId?: string
+  agentName?: string
+  workflow?: boolean
+  ok: boolean
+  ms?: number
+  tokens?: number
+  prompt?: number
+  completion?: number
+  cost?: number | null
+  events?: number
+  error?: string
+}
+
+/** 按 harness × 模型 聚合后的用量行 */
+export interface LedgerUsageRow {
+  harness: string
+  model: string
+  calls: number
+  ok: number
+  failed: number
+  tokens: number
+  prompt: number
+  completion: number
+  cost: number
+  /** 该 harness 未上报 usage 的调用数：如实标注，不拿估算冒充实测 */
+  noUsage: number
+  ms: number
+}
+
+/** 长期记忆条目（区别于单次任务记录） */export interface MemoryEntry {
   id: string
   kind: 'goal' | 'constraint' | 'decision' | 'progress' | 'review' | 'confirm' | 'summary'
   text: string

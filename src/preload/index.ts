@@ -1,7 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
-  ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel
+  ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
+  LedgerEntry, LedgerUsageRow
 } from '../shared/types'
 
 /**
@@ -13,6 +14,18 @@ const api = {
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
     openDataFolder: () => ipcRenderer.invoke('app:openDataFolder'),
     openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
+    /** 打开本机文件或目录（产物交付用；主进程校验绝对路径且存在） */
+    openPath: (p: string) => ipcRenderer.invoke('app:openPath', p) as Promise<{ ok: boolean; message?: string }>,
+    /** 确保并返回 AgentHub 自建工作区目录（<文档>/AgentHub-workspaces/<name>）：目录由主进程创建，渲染层不再自己拼路径 */
+    ensureWorkspaceDir: (name: string) =>
+      ipcRenderer.invoke('app:ensureWorkspaceDir', name) as Promise<{ ok: boolean; path?: string; message?: string }>,
+    /** 后台任务完成/失败的系统通知（窗口聚焦时主进程会自己跳过） */
+    notify: (title: string, body: string) =>
+      ipcRenderer.invoke('app:notify', title, body) as Promise<{ ok: boolean; skipped?: boolean; message?: string }>,
+    /** 上报"有工作流正在执行"：主进程据此决定关闭窗口要不要弹确认 */
+    setBusy: (busy: boolean) => ipcRenderer.invoke('app:setBusy', busy) as Promise<{ ok: boolean }>,
+    /** 当前应用菜单的加速键清单（验证用） */
+    menuSummary: () => ipcRenderer.invoke('app:menuSummary') as Promise<{ accelerators: string[]; custom: boolean }>,
     relaunch: () => ipcRenderer.invoke('app:relaunch')
   },
   update: {
@@ -30,7 +43,7 @@ const api = {
     setPrefs: (prefs: AppConfig['prefs']) => ipcRenderer.invoke('prefs:set', prefs),
     setAgents: (agents: AgentConfig[]) => ipcRenderer.invoke('agents:set', agents),
     setWorkflowDefaults: (wd: AppConfig['workflowDefaults']) => ipcRenderer.invoke('workflowDefaults:set', wd),
-    setSavedTasks: (tasks: AppConfig['savedTasks']) => ipcRenderer.invoke('savedTasks:set', tasks),
+    setPresets: (list: AppConfig['presets']) => ipcRenderer.invoke('presets:set', list),
     exportFile: () => ipcRenderer.invoke('config:export'),
     importFile: () => ipcRenderer.invoke('config:import')
   },
@@ -81,7 +94,7 @@ const api = {
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
     /** 余额查询（DeepSeek 官方 /user/balance；其他接口 ok=false） */
     balance: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:balance', cfg) as Promise<{ ok: boolean; message?: string; balance?: number; currency?: string }>,
-    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string }[], opts?: { agentId?: string }) =>
+    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string; images?: { name: string; dataUrl: string; path: string }[] }[], opts?: { agentId?: string; workflow?: boolean }) =>
       ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts),
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
     /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */
@@ -95,18 +108,33 @@ const api = {
     list: () => ipcRenderer.invoke('skills:list') as Promise<Skill[]>,
     save: (skill: Partial<Skill> & { name: string; content: string }) =>
       ipcRenderer.invoke('skills:save', skill) as Promise<{ ok: boolean; skill?: Skill; message?: string }>,
-    remove: (id: string) => ipcRenderer.invoke('skills:remove', id) as Promise<{ ok: true }>
+    remove: (id: string) => ipcRenderer.invoke('skills:remove', id) as Promise<{ ok: true }>,
+    /** 导入 Agent Skills 标准目录（含 SKILL.md） */
+    importDir: () => ipcRenderer.invoke('skills:importDir') as Promise<{ ok: boolean; skill?: Skill; message?: string }>
   },
-  tools: {
-    /** 直接执行一次沙箱工具（验证与高级用途；参数不合法/越界会被拒） */
+  /** 调用账本：只含元数据的用量与排障数据（不含正文与凭据） */
+  ledger: {
+    list: (limit?: number) => ipcRenderer.invoke('ledger:list', limit) as Promise<LedgerEntry[]>,
+    stats: (sinceTs?: number) => ipcRenderer.invoke('ledger:stats', sinceTs) as Promise<LedgerUsageRow[]>,
+    clear: () => ipcRenderer.invoke('ledger:clear') as Promise<{ ok: boolean }>,
+    export: () => ipcRenderer.invoke('ledger:export') as Promise<{ ok: boolean; message?: string }>
+  },
+  tools: {    /** 直接执行一次沙箱工具（验证与高级用途；参数不合法/越界会被拒） */
     exec: (grant: ToolGrant, tool: string, argsJson: string) =>
       ipcRenderer.invoke('tools:exec', grant, tool, argsJson) as Promise<{ ok: boolean; output: string; writtenPath?: string }>,
     pickDir: () => ipcRenderer.invoke('dialog:pickDir') as Promise<string | null>
   },
+  artifacts: {
+    /** 当前生效的工作流产物目录（用户在执行设置里选的；未选为主进程默认值） */
+    dir: () => ipcRenderer.invoke('artifact:dir') as Promise<string>,
+    /** 由 AgentHub 落盘一篇文本产物：固定写入工作流产物目录，渲染层只能给文件名 */
+    write: (fileName: string, content: string) =>
+      ipcRenderer.invoke('artifact:write', fileName, content) as Promise<{ ok: boolean; path?: string; message?: string }>
+  },
   dialogs: {
-    pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<Array<{ name: string; path: string; size: number; content?: string; error?: boolean }>>,
-    saveFile: (defaultName: string, content: string) =>
-      ipcRenderer.invoke('dialog:saveFile', defaultName, content) as Promise<{ ok: boolean; message: string }>
+    pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<Array<{ name: string; path: string; size: number; content?: string; dataUrl?: string; image?: boolean; error?: boolean; message?: string }>>,
+    saveFile: (defaultName: string, content: string, defaultDir?: string) =>
+      ipcRenderer.invoke('dialog:saveFile', defaultName, content, defaultDir) as Promise<{ ok: boolean; message: string }>
   },
   theme: {
     set: (t: 'light' | 'dark' | 'system') => ipcRenderer.invoke('theme:set', t)

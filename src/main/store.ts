@@ -90,9 +90,9 @@ export class Store {
     this.writeJson(this.dirs.config, cfg)
   }
 
-  setSavedTasks(tasks: AppConfig['savedTasks']) {
+  setPresets(list: AppConfig['presets']) {
     const cfg = this.getConfig()
-    cfg.savedTasks = tasks
+    cfg.presets = list
     this.writeJson(this.dirs.config, cfg)
   }
 

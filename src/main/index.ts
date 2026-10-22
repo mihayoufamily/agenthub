@@ -1,8 +1,9 @@
-import { app, BrowserWindow, nativeTheme, ipcMain } from 'electron'
+import { app, BrowserWindow, nativeTheme, ipcMain, Menu, Tray, dialog, nativeImage } from 'electron'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerIpc } from './ipc'
 import { Store } from './store'
+import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 
 // 窗口状态持久化（简化：保存位置尺寸，启动时恢复并做屏幕边界校验）
 interface WindowState { x?: number; y?: number; width: number; height: number; maximized?: boolean }
@@ -127,6 +128,87 @@ async function runShotSequence(win: BrowserWindow) {
   app.quit()
 }
 
+/**
+ * 应用菜单：替换 Electron 的默认菜单。
+ *
+ * 默认菜单带三个坑（Ctrl+W 直接退出就是这么来的）：
+ *  - Window ▸ Close（Ctrl+W）关唯一窗口 → window-all-closed → 应用静默退出；
+ *  - View ▸ Force Reload（Ctrl+R）会重载渲染进程，**正在跑的工作流当场断掉**；
+ *  - View ▸ Toggle Developer Tools（Ctrl+Shift+I）对普通用户是误触面。
+ * 这里保留编辑类加速键（复制/粘贴等照常），Close 改为走我们自己的确认流程。
+ */
+function buildAppMenu() {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: '文件',
+      submenu: [
+        { label: '关闭窗口', accelerator: 'CmdOrCtrl+W', click: () => requestClose() },
+        // 不给"退出"配加速键：Alt+F4 由系统处理（最终仍会走 win.on('close') 的同一套确认），
+        // 而 Ctrl+Q 这类组合可能和用户自定义的快捷键撞车
+        { label: '退出 AgentHub', click: () => { setQuitting(true); app.quit() } }
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }
+      ]
+    },
+    {
+      label: '窗口',
+      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'togglefullscreen' }]
+    }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+/** 关闭请求：没在跑就直接退；正在跑弹确认（默认"后台继续运行"） */
+async function requestClose() {
+  const win = mainWindow
+  if (!win) return
+  if (decideCloseNow() !== 'ask') {
+    setQuitting(true)
+    win.close()
+    return
+  }
+  const r = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: ['后台继续运行（收到托盘）', '仍然退出应用', '取消（留在当前窗口）'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+    title: '有工作流正在执行',
+    message: '关闭后正在执行的工作流会中断',
+    detail: '进度按阶段边界保存，重启后只能标为"状态未知"手动继续，不会自动续跑。选择后台继续运行时会缩到系统托盘，跑完弹通知。'
+  })
+  if (r.response === 0) {
+    ensureTray()
+    win.hide()
+  } else if (r.response === 1) {
+    setQuitting(true)
+    win.close()
+  }
+}
+
+let tray: Tray | null = null
+
+function ensureTray() {
+  if (tray) return
+  const iconPath = join(__dirname, '../../build/icon.ico')
+  const image = existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+  tray = new Tray(image)
+  tray.setToolTip(isBusy() ? 'AgentHub · 工作流正在执行' : 'AgentHub')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示主窗口', click: () => { mainWindow?.show(); mainWindow?.focus() } },
+      { type: 'separator' },
+      { label: '退出 AgentHub', click: () => { setQuitting(true); app.quit() } }
+    ])
+  )
+  tray.on('click', () => { mainWindow?.show(); mainWindow?.focus() })
+}
+
 function createWindow() {
   const ws = loadWindowState()
   // 应用图标（out/main -> ../../build/icon.ico；便携版/asar 内同结构）
@@ -182,7 +264,14 @@ function createWindow() {
       app.quit()
     }
   })
-  win.on('close', () => saveWindowState(win))
+  win.on('close', (e) => {
+    saveWindowState(win)
+    // Alt+F4 / 任务栏关闭同样要过确认：正在跑的工作流不能被静默掐断
+    if (decideCloseNow() === 'ask') {
+      e.preventDefault()
+      void requestClose()
+    }
+  })
 
   // 诊断：渲染层 console 与加载状态转发到主进程 stdout
   win.webContents.on('console-message', (_e, _level, message) => {
@@ -244,6 +333,8 @@ function createWindow() {
 function startApp() {
   app.on('second-instance', () => {
     if (mainWindow) {
+      // 缩到托盘后再次双击图标：把窗口叫回来，而不是"看起来没反应"
+      if (!mainWindow.isVisible()) mainWindow.show()
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
     }
@@ -252,6 +343,7 @@ function startApp() {
   app.whenReady().then(() => {
     store = new Store()
     registerIpc(() => store as Store, () => mainWindow)
+    buildAppMenu()
     // 跟随主题（渲染进程可通过 theme:set 覆盖 themeSource）
     nativeTheme.themeSource = 'system'
     mainWindow = createWindow()
@@ -260,6 +352,9 @@ function startApp() {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow()
     })
   })
+
+  // 任何"确定要退出"的路径（托盘退出 / 确认框选退出 / relaunch）都不再被关闭确认拦住
+  app.on('before-quit', () => setQuitting(true))
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()

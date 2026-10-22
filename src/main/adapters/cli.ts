@@ -79,9 +79,10 @@ interface CliSpec {
   format: 'ndjson' | 'text'
   /**
    * 行解析器工厂（每次会话创建一个实例，内部可维护跨行状态，如 tool_use → tool_result 配对）。
-   * format === 'ndjson' 时必需。
+   * format === 'ndjson' 时必需。cwd 为本次 spawn 的工作目录，用于把 CLI 报出的相对路径
+   * 还原成绝对路径（产物登记 artifacts 必须是可打开的真实路径）。
    */
-  makeParser?(): (obj: Record<string, unknown>, emit: (e: Omit<ChatChunkEvent, 'reqId'>) => void) => void
+  makeParser?(cwd: string): (obj: Record<string, unknown>, emit: (e: Omit<ChatChunkEvent, 'reqId'>) => void) => void
   /** 进程正常退出即视为完成 */
   doneOnExit: boolean
   /** 思考强度的环境变量映射（可选；codex 用 -c 参数在 buildArgs 内处理，不需要此字段） */
@@ -116,20 +117,54 @@ function toolResultToText(c: unknown): string {
 }
 
 /**
+ * 把 CLI 报出的文件路径还原为可打开的绝对路径：相对路径按本次 spawn 的 cwd 解析，
+ * 并且只在文件真实存在时才返回（CLI 自称写了但没落盘的情况不能登记为产物）。
+ */
+function realOutPath(cwd: string, raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined
+  const p = resolvePath(cwd, raw)
+  try {
+    return existsSync(p) ? p : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 会产出/修改文件的工具名（Claude Code 与 CodeBuddy 同构），其参数中的路径字段 */
+const WRITE_TOOLS: Record<string, string> = {
+  Write: 'file_path',
+  Edit: 'file_path',
+  MultiEdit: 'file_path',
+  NotebookEdit: 'notebook_path'
+}
+
+/**
  * Claude Code / CodeBuddy 同构的 stream-json 解析器（带会话级状态）：
  * - assistant.content[].text → 正文增量
+ * - assistant.content[].thinking → 思考过程增量（默认只在 UI 折叠展示，不计入正文）
  * - assistant.content[].tool_use → 工具调用开始（running）
- * - user.content[].tool_result → 工具调用结束（done/error + 结果摘要）
+ * - user.content[].tool_result → 工具调用结束（done/error + 结果摘要；写文件成功时带产物绝对路径）
  * - result → 用量 + done/error
  */
-function makeStreamJsonParser(): (obj: Record<string, unknown>, emit: (e: Omit<ChatChunkEvent, 'reqId'>) => void) => void {
+function makeStreamJsonParser(cwd: string): (obj: Record<string, unknown>, emit: (e: Omit<ChatChunkEvent, 'reqId'>) => void) => void {
   const toolUses = new Map<string, { tool: string; args: unknown }>()
+  // 已上报过的思考块：stream-json 会在每个 assistant 快照里重复带完整 content，需去重避免刷屏
+  const seenThinking = new Set<string>()
+  // 思考块整块上报：多块之间补空行，否则在界面里黏成一段、"只显重点"的分段筛选失效
+  let sawThinking = false
   return (obj, emit) => {
     const type = obj.type as string
     if (type === 'assistant') {
-      const msg = obj.message as { content?: { type?: string; text?: string; id?: string; name?: string; input?: unknown }[] } | undefined
+      const msg = obj.message as { content?: { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }[] } | undefined
       for (const block of msg?.content ?? []) {
         if (block?.type === 'text' && block.text) emit({ type: 'delta', text: block.text })
+        if (block?.type === 'thinking' && block.thinking) {
+          if (!seenThinking.has(block.thinking)) {
+            seenThinking.add(block.thinking)
+            emit({ type: 'reasoning', text: (sawThinking ? '\n\n' : '') + block.thinking })
+            sawThinking = true
+          }
+        }
         if (block?.type === 'tool_use' && block.id) {
           const tool = block.name ?? 'unknown'
           toolUses.set(block.id, { tool, args: block.input })
@@ -147,16 +182,23 @@ function makeStreamJsonParser(): (obj: Record<string, unknown>, emit: (e: Omit<C
         if (block?.type !== 'tool_result' || !block.tool_use_id) continue
         const use = toolUses.get(block.tool_use_id)
         const resultText = toolResultToText(block.content)
+        const ok = !block.is_error
+        // 写文件成功 → 登记真实产物路径（供工作流交付卡片展示与打开）
+        const pathField = use ? WRITE_TOOLS[use.tool] : undefined
+        const writtenPath = ok && pathField
+          ? realOutPath(cwd, (use!.args as Record<string, unknown> | undefined)?.[pathField])
+          : undefined
         emit({
           type: 'tool',
           toolCall: {
             id: block.tool_use_id,
             tool: use?.tool ?? 'unknown',
             args: use ? summarizeArgs(use.args) : {},
-            status: block.is_error ? 'error' : 'done',
+            status: ok ? 'done' : 'error',
             result: resultText.length > 5000 ? resultText.slice(0, 5000) + '…（已截断）' : resultText,
             ts: Date.now()
-          }
+          },
+          ...(writtenPath ? { writtenPath } : {})
         })
         toolUses.delete(block.tool_use_id)
       }
@@ -307,12 +349,14 @@ const SPECS: Record<CliName, CliSpec> = {
         const type = obj.type as string
         if (type === 'response_output_text_delta' && typeof obj.delta === 'string' && obj.delta) {
           emit({ type: 'delta', text: obj.delta })
+        } else if (type === 'response_reasoning_summary_text_delta' && typeof obj.delta === 'string' && obj.delta) {
+          // 思考摘要增量：只进思考区，不计入正文
+          emit({ type: 'reasoning', text: obj.delta })
         } else if (type === 'response_completed') {
           const usage = (obj.response as { usage?: { total_tokens?: number } })?.usage
           if (usage?.total_tokens) emit({ type: 'usage', usage: { tokens: usage.total_tokens } })
           emit({ type: 'done' })
         }
-        // 思考增量（response_reasoning_summary_text_delta）不计入正文；
         // 失败路径由退出码 + stderr 处理（incomplete 等退出码非 0）
       }
     },
@@ -377,14 +421,34 @@ const SPECS: Record<CliName, CliSpec> = {
       return args
     },
     format: 'ndjson',
-    makeParser() {
+    makeParser(cwd) {
       // codex 的 item.completed 在完成时才发（无 running 态），计数器生成稳定卡片 id
       let n = 0
+      const seenReasoning = new Set<string>()
+      let sawReasoning = false
       return (obj, emit) => {
         const type = obj.type as string
         if (type === 'item.completed') {
-          const item = obj.item as { type?: string; text?: string; message?: string; command?: string; exit_code?: number; output?: string; change_type?: string; path?: string } | undefined
+          const item = obj.item as { type?: string; text?: string; message?: string; command?: string; exit_code?: number; output?: string; change_type?: string; path?: string; summary?: unknown } | undefined
           if (item?.type === 'agent_message' && item.text) emit({ type: 'delta', text: item.text })
+          if (item?.type === 'reasoning') {
+            // 思考过程：summary 数组（新版）或 text 字段（旧版），逐条去重后进入思考区，不计入正文
+            const parts: string[] = []
+            if (Array.isArray(item.summary)) {
+              for (const s of item.summary) {
+                const t = typeof s === 'string' ? s : String((s as { text?: unknown } | null)?.text ?? '')
+                if (t.trim()) parts.push(t.trim())
+              }
+            }
+            if (item.text?.trim()) parts.push(item.text.trim())
+            for (const p of parts) {
+              if (seenReasoning.has(p)) continue
+              seenReasoning.add(p)
+              // 整块上报的思考之间补空行（同 stream-json 解析器），保证界面能按段筛选重点
+              emit({ type: 'reasoning', text: (sawReasoning ? '\n\n' : '') + p })
+              sawReasoning = true
+            }
+          }
           if (item?.type === 'command_execution') {
             // 工具事件透传：命令执行（完成态，含退出码与输出）
             const out = item.output ?? ''
@@ -401,7 +465,8 @@ const SPECS: Record<CliName, CliSpec> = {
             })
           }
           if (item?.type === 'file_change') {
-            // 工具事件透传：文件变更（codex 的 path 可能为相对路径，不登记 artifacts 以免误报）
+            // 工具事件透传：文件变更；创建/修改且文件确实落盘时登记为真实产物（相对路径按 cwd 还原）
+            const written = item.change_type === 'delete' ? undefined : realOutPath(cwd, item.path)
             emit({
               type: 'tool',
               toolCall: {
@@ -410,7 +475,8 @@ const SPECS: Record<CliName, CliSpec> = {
                 args: { type: item.change_type ?? '', path: item.path ?? '' },
                 status: 'done',
                 ts: Date.now()
-              }
+              },
+              ...(written ? { writtenPath: written } : {})
             })
           }
           // item.type === 'error' 多为配置告警（如未知配置项），不打断主流程
@@ -793,10 +859,10 @@ export async function cliChatStream(
   try {
     // workDir（方案1 边界）：CLI 进程的 cwd；目录不存在时 spawn 报错如实上抛（不悄悄创建）。
     // 未显式设置时的最后防线：默认文档工作区（绝不以应用安装目录为 cwd——CLI 写文件会污染程序文件）
-    const { app } = require('electron') as typeof import('electron')
-    const { mkdirSync } = require('node:fs') as typeof import('node:fs')
     let cwdDir = opts.workDir?.trim() || ''
     if (!cwdDir) {
+      const { app } = require('electron') as typeof import('electron')
+      const { mkdirSync } = require('node:fs') as typeof import('node:fs')
       cwdDir = join(app.getPath('documents'), 'AgentHub-workspaces', name)
       try { mkdirSync(cwdDir, { recursive: true }) } catch { /* 创建失败时 spawn 会如实报错 */ }
     }
@@ -813,7 +879,7 @@ export async function cliChatStream(
     let doneEmitted = false
     let errored = false
     // 行解析器：每次会话一个实例（内部维护 tool_use → tool_result 的跨行配对状态）
-    const parser = spec.format === 'ndjson' ? spec.makeParser?.() : undefined
+    const parser = spec.format === 'ndjson' ? spec.makeParser?.(cwdDir) : undefined
     const emit = (e: Omit<ChatChunkEvent, 'reqId'>) => {
       if (e.type === 'done') doneEmitted = true
       // 错误信息中文化（人话 + 原文折叠）：统一在出口处包装，覆盖所有来源
@@ -875,7 +941,14 @@ export async function cliChatStream(
     proc.on('error', (e) => {
       activeChats.delete(reqId)
       pendingCancels.delete(reqId)
-      emit({ type: 'error', message: `进程启动失败：${e.message}` })
+      // cwd 不存在时 Node 也只报 ENOENT，和"CLI 可执行文件没了"长得一模一样——分开说
+      const cwdMissing = (e as NodeJS.ErrnoException).code === 'ENOENT' && !!cwdDir && !existsSync(cwdDir)
+      emit({
+        type: 'error',
+        message: cwdMissing
+          ? `工作目录不存在，进程无法启动：${cwdDir}（请先建好该目录，或在顶栏"目录"/工作流产物目录里重新选择）`
+          : `进程启动失败：${e.message}`
+      })
     })
     proc.on('close', (code) => {
       // 冲刷残留缓冲（无换行结尾的最后一行）

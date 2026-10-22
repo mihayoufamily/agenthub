@@ -8,16 +8,34 @@ import { execTool, toolDefs, MAX_OUTPUT } from '../tools'
  */
 
 /** 工具循环的对话消息（兼容 OpenAI tool 协议的扩展形状） */
+/** 多模态内容块（OpenAI 兼容）：图片以 data URL 传，不依赖服务端能访问本机文件 */
+export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+
 export type ChatMsg =
-  | { role: 'system' | 'user'; content: string }
+  | { role: 'system' | 'user'; content: string | ContentPart[] }
   | { role: 'assistant'; content: string | null; reasoning_content?: string; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
   | { role: 'tool'; content: string; tool_call_id: string }
 
 /** 渲染层传入的历史消息：思考内容单独携带，是否回传由主进程按 PASS_REASONING 裁决 */
-export type IncomingMsg = { role: 'system' | 'user' | 'assistant'; content: string; reasoning?: string }
+export type IncomingMsg = {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+  reasoning?: string
+  /** 本轮 user 消息附带的图片（模型侧转成多模态 content；CLI 侧由渲染层改成路径文本） */
+  images?: { name: string; dataUrl: string; path: string }[]
+}
 
 /** 历史消息转接口线格式：思考内容仅在 PASS_REASONING 开启时随 assistant 消息回传 */
 function toWireMsg(m: IncomingMsg): ChatMsg {
+  if (m.role === 'user' && m.images?.length) {
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text: m.content },
+        ...m.images.map((i) => ({ type: 'image_url' as const, image_url: { url: i.dataUrl } }))
+      ]
+    }
+  }
   if (m.role !== 'assistant') return { role: m.role, content: m.content }
   return m.reasoning && PASS_REASONING
     ? { role: 'assistant', content: m.content, reasoning_content: m.reasoning }

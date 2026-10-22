@@ -71,6 +71,21 @@ export function contextWindowOf(modelId: string | undefined, explicit?: number):
 }
 
 /**
+ * 模型是否支持图片输入。没有统一的能力探测接口，所以只给三档结论：
+ *  yes = 明确支持；no = 明确不支持（纯文本模型）；unknown = 表里没登记。
+ * unknown 时界面提示后照常发送——不替服务端下结论，也不因为没登记就拦死用户。
+ */
+const VISION_YES = [/gpt-4o/i, /gpt-4\.1/i, /gpt-4-vision/i, /^o[1-9](-|$)/i, /claude-(3|4|5)/i, /gemini/i, /doubao.*vision/i, /seed.*vision/i, /qwen[\w.-]*vl/i, /deepseek-vl/i, /glm[-\w]*-v(ision)?/i, /moonshot.*vision|kimi.*vision/i]
+const VISION_NO = [/deepseek-chat/i, /deepseek-reasoner/i, /deepseek-coder/i]
+
+export function visionOf(modelId: string | undefined): 'yes' | 'no' | 'unknown' {
+  if (!modelId) return 'unknown'
+  if (VISION_NO.some((p) => p.test(modelId))) return 'no'
+  if (VISION_YES.some((p) => p.test(modelId))) return 'yes'
+  return 'unknown'
+}
+
+/**
  * 估算一段文本的 token 数（无接口 usage 时的近似）：
  * CJK 字符约 1 token/字，其余约 1 token/4 字符（对中英文混排够用）。
  */
