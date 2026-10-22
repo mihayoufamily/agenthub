@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
-  LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord
+  LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord,
+  CheckpointManifest, RollbackResult, FileChange
 } from '../shared/types'
 
 /**
@@ -94,8 +95,8 @@ const api = {
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
     /** 余额查询（DeepSeek 官方 /user/balance；其他接口 ok=false） */
     balance: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:balance', cfg) as Promise<{ ok: boolean; message?: string; balance?: number; currency?: string }>,
-    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string; images?: { name: string; dataUrl: string; path: string }[] }[], opts?: { agentId?: string; workflow?: boolean }) =>
-      ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts),
+    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string; images?: { name: string; dataUrl: string; path: string }[] }[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string }) =>
+      ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts) as Promise<{ ok: boolean; checkpoint?: string }>,
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
     /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */
     onEvent: (cb: (e: { reqId: string; type: string; text?: string; message?: string; usage?: { tokens?: number; prompt?: number; completion?: number }; toolCall?: ToolCall; writtenPath?: string }) => void) => {
@@ -127,16 +128,28 @@ const api = {
     clear: () => ipcRenderer.invoke('ledger:clear') as Promise<{ ok: boolean }>,
     export: () => ipcRenderer.invoke('ledger:export') as Promise<{ ok: boolean; message?: string }>
   },
-  tools: {    /** 直接执行一次沙箱工具（验证与高级用途；参数不合法/越界会被拒） */
-    exec: (grant: ToolGrant, tool: string, argsJson: string) =>
-      ipcRenderer.invoke('tools:exec', grant, tool, argsJson) as Promise<{ ok: boolean; output: string; writtenPath?: string }>,
+  tools: {    /** 直接执行一次沙箱工具（验证与高级用途；参数不合法/越界会被拒；给 checkpointId 则改动可回滚） */
+    exec: (grant: ToolGrant, tool: string, argsJson: string, checkpointId?: string) =>
+      ipcRenderer.invoke('tools:exec', grant, tool, argsJson, checkpointId) as Promise<{
+        ok: boolean; output: string; writtenPath?: string; change?: FileChange
+      }>,
     pickDir: () => ipcRenderer.invoke('dialog:pickDir') as Promise<string | null>
   },
   artifacts: {
     /** 当前生效的工作流产物目录（用户在执行设置里选的；未选为主进程默认值） */
     dir: () => ipcRenderer.invoke('artifact:dir') as Promise<string>,    /** 由 AgentHub 落盘一篇文本产物：固定写入工作流产物目录，渲染层只能给文件名 */
-    write: (fileName: string, content: string) =>
-      ipcRenderer.invoke('artifact:write', fileName, content) as Promise<{ ok: boolean; path?: string; message?: string }>
+    write: (fileName: string, content: string, checkpointId?: string) =>
+      ipcRenderer.invoke('artifact:write', fileName, content, checkpointId) as Promise<{ ok: boolean; path?: string; message?: string; checkpoint?: string }>
+  },
+  /** 改动检查点：工具层文件改动的备份清单与整体回滚（不覆盖 run_command 与 CLI 自己的写盘） */
+  checkpoint: {
+    manifest: (id: string) =>
+      ipcRenderer.invoke('checkpoint:manifest', id) as Promise<{
+        manifest: CheckpointManifest | null
+        summary: { total: number; created: number; modified: number; deleted: number; moved: number; unbacked: string[] }
+      }>,
+    rollback: (id: string) => ipcRenderer.invoke('checkpoint:rollback', id) as Promise<RollbackResult>,
+    prune: (id: string) => ipcRenderer.invoke('checkpoint:prune', id) as Promise<{ ok: boolean }>
   },
   /** 项目约定自动读取（AGENTS.md / CLAUDE.md 原文，主进程只读不写） */
   conv: {

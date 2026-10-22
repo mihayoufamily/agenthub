@@ -8,6 +8,7 @@ import { Button, Badge } from '../components/primitives'
 import { Collapse } from '../components/Collapse'
 import { Composer } from '../components/Composer'
 import { OutputDirChip } from '../components/OutputDir'
+import { CheckpointBar } from '../components/CheckpointBar'
 import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls } from '../lib/utils'
 
@@ -432,6 +433,7 @@ function DeliveryCard({ run }: { run: WorkflowRun }) {
             <button className="link-btn" onClick={() => void openLocalPath(run.outputDir ?? '')}>打开文件夹</button>
           </div>
         )}
+        {!run.demo && <CheckpointBar id={run.id} title="本次任务改动的文件" />}
         <div className="dc-actions">
           <Button variant="secondary" onClick={() => void exportRun()}>
             <Icon name="file" size={13} /> 导出任务记录

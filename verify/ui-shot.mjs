@@ -504,7 +504,15 @@ const main = async () => {
       ok('未落在 Agent 原授权目录（沙箱根未被使用）', !existsSync(join(SANDBOX, '交付说明.md')))
       const hasAppArt = await js(cdp, `(() => { const s = window.__ahub_debug.state(); return (s.run?.cardDetails ?? []).some((c) => (c.artifacts ?? []).some((a) => /\\[app\\]/.test(a))) })()`)
       ok('已有执行方写盘产物时不再生成 AgentHub 兜底文本（来源不重复）', !hasAppArt)
+      // 检查点：真实写盘必须进了可回滚清单，且交付卡片上看得见
+      const cps = await js(cdp, '(() => { const s = window.__ahub_debug.state(); return s.run ? s.run.id : null })()')
       await shot('11-workflow-tool-artifact')
+      if (cps) {
+        const man = await js(cdp, `window.__ahub_debug.checkpoint(${JSON.stringify(cps)})`)
+        ok('工具层写盘进入改动检查点（交付可回滚）', (man?.summary?.total ?? 0) >= 1, JSON.stringify(man?.summary))
+        const barShown = await js(cdp, `!!document.querySelector('[data-checkpoint=\"' + ${JSON.stringify(cps)} + '\"]')`)
+        ok('交付卡片挂出了改动清单入口（可展开看 diff）', barShown === true)
+      }
     }
     await js(cdp, 'window.__ahub_debug.stopTask()')
     await sleep(2000)

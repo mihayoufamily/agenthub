@@ -371,18 +371,115 @@ console.log('\n[J] 命令审批（白名单逐段核对 / 危险形态不可覆�
 
     let asks = 0
     const askOnce = { rules: () => [], ask: async () => { asks++; return 'deny' } }
-    const denied = await execTool({ dir: tmp, allowCommands: true }, 'run_command', JSON.stringify({ command: `echo hi` }), undefined, askOnce)
+    const denied = await execTool({ dir: tmp, allowCommands: true }, 'run_command', JSON.stringify({ command: `echo hi` }), undefined, { approver: askOnce })
     ok('用户点拒绝 → 模型收到"用户不批准"而不是硬编码权限错误', !denied.ok && denied.output.includes('用户不批准'), denied.output)
     ok('确实问了人一次', asks === 1)
 
     let asks2 = 0
     const allowGate = { rules: () => ['echo hi'], ask: async () => { asks2++; return 'once' } }
-    const passed = await execTool({ dir: tmp, allowCommands: true }, 'run_command', JSON.stringify({ command: 'echo hi' }), undefined, allowGate)
+    const passed = await execTool({ dir: tmp, allowCommands: true }, 'run_command', JSON.stringify({ command: 'echo hi' }), undefined, { approver: allowGate })
     ok('白名单命中就不再打扰（未弹确认）', passed.ok && asks2 === 0, passed.output)
 
     const auto = await execTool({ dir: tmp, allowCommands: true, commandPolicy: 'auto' }, 'run_command', JSON.stringify({ command: 'echo old' }))
     ok('授权即放行（旧行为）仍可显式选择', auto.ok && auto.output.includes('old'))
   }
+}
+
+// ---------- K. 改动检查点与回滚 ----------
+console.log('\n[K] checkpoint / diff / rollback（工具层改动可看可退）')
+{
+  const cp = await import('../out/main/checkpoints.js')
+  const root = mkdtempSync(join(tmpdir(), 'ahub-cp-'))
+  const work = join(root, 'work')
+  mkdirSync(work, { recursive: true })
+  cp.init(join(root, 'cps'))
+
+  // diff 纯函数
+  ok('内容相同不编造 diff', cp.diffLines('a\nb', 'a\nb') === '')
+  const d = cp.diffLines('keep1\nold-line\nkeep2', 'keep1\nnew-line\nkeep2')
+  ok('行级 diff 削掉公共首尾只留变化', d.includes('- old-line') && d.includes('+ new-line') && !d.includes('- keep1'), d)
+  ok('过大内容如实说没生成', cp.diffLines('x'.repeat(300 * 1024), 'y').includes('未生成'))
+  ok('越界路径不纳入检查点', cp.relativeOf(work, join(root, 'elsewhere.txt')) === null && typeof cp.relativeOf(work, join(work, 'a.txt')) === 'string')
+
+  const execCp = (tool, args) => execTool({ dir: work, allowCommands: false }, tool, JSON.stringify(args), undefined, { checkpoint: 'cp-t' })
+  await cp.start('cp-t', work)
+  ok('检查点开局是空清单', (cp.manifestOf('cp-t')?.entries.length ?? -1) === 0)
+
+  // ① 新建
+  const w1 = await execCp('write_file', { path: 'a.txt', content: '第一版\n' })
+  ok('新建文件登记为 created', w1.change?.kind === 'created' && w1.change?.rel === 'a.txt', JSON.stringify(w1.change))
+  ok('新建没有"原件"可 diff', w1.change?.diff === null)
+
+  // ② 覆盖：备份第一次改动前的内容 + 出 diff
+  const w2 = await execCp('write_file', { path: 'a.txt', content: '第二版\n' })
+  ok('再次写入登记为 modified', w2.change?.kind === 'modified', JSON.stringify(w2.change))
+  ok('覆盖前给出行级 diff', (w2.change?.diff ?? '').includes('- 第一版') && (w2.change?.diff ?? '').includes('+ 第二版'), w2.change?.diff)
+  ok('同一路径只备份一次（存的是最初内容）', (cp.manifestOf('cp-t')?.backed.join(',') ?? '') === 'a.txt', cp.manifestOf('cp-t')?.backed.join(','))
+
+  // ③ replace_in_file 也进清单
+  const w3 = await execCp('replace_in_file', { path: 'a.txt', find: '第二版', replace: '第三版' })
+  ok('替换登记为 modified 且带 diff', w3.change?.kind === 'modified' && (w3.change?.diff ?? '').includes('+ 第三版'), w3.change?.diff)
+  ok('改动确实落盘了（回滚前先在）', readFileSync(join(work, 'a.txt'), 'utf8') === '第三版\n')
+
+  // ④ 只新建从未存在过的文件：回滚应当删掉它
+  await execCp('write_file', { path: 'new.txt', content: '全新\n' })
+  ok('新建文件在回滚前存在', existsSync(join(work, 'new.txt')))
+
+  // ⑤ move 记录目标与来源
+  await execCp('write_file', { path: 'b.txt', content: 'B 原始\n' })
+  const w4 = await execCp('move', { from: 'b.txt', to: 'sub/b.txt' })
+  ok('移动 rel 记目标、from 记来源', w4.change?.kind === 'moved' && w4.change?.rel === join('sub', 'b.txt') && w4.change?.from === 'b.txt', JSON.stringify(w4.change))
+
+  // ⑥ 回滚
+  const r = await cp.rollback('cp-t')
+  ok('回滚报成功并逐项计数', r.ok && r.restored === 2 && r.moved === 1 && r.removed === 1, JSON.stringify(r))
+  ok('改过的文件回到任务开始前的内容', readFileSync(join(work, 'a.txt'), 'utf8') === '第一版\n', readFileSync(join(work, 'a.txt'), 'utf8'))
+  ok('纯新建的文件被删掉', !existsSync(join(work, 'new.txt')))
+  ok('被移动的文件回到原位且内容不变', readFileSync(join(work, 'b.txt'), 'utf8') === 'B 原始\n' && !existsSync(join(work, 'sub', 'b.txt')))
+
+  // ⑦ 清单不被回滚抹掉（回滚后仍能看当时改了什么）
+  ok('回滚后清单仍在（可回看）', (cp.manifestOf('cp-t')?.entries.length ?? 0) >= 5)
+  const sum = cp.summarize(cp.manifestOf('cp-t'))
+  ok('摘要按类型计数且总数自洽', sum.created + sum.modified + sum.moved + sum.deleted === sum.total && sum.total >= 5, JSON.stringify(sum))
+  // ⑧ 未注入位置时整体停用而不报错
+  cp.init('')
+  ok('未注入落盘根目录时检查点停用（不炸、不假装在录）', (await cp.start('x', work)) === null && (await cp.rollback('x')).ok === false)
+  cp.init(join(root, 'cps'))
+  await cp.prune('cp-t')
+  ok('prune 只删副本、留清单', cp.manifestOf('cp-t') !== null && !existsSync(join(root, 'cps', 'cp-t', 'files')))
+  // ⑧ 写前 diff 预览（默认关；开启后覆盖必须人点头）
+  {
+    const dir2 = join(root, 'preview')
+    mkdirSync(dir2, { recursive: true })
+    writeFileSync(join(dir2, 'x.txt'), '原内容\n', 'utf-8')
+    let lastAsk = null
+    const gate = { rules: () => [], ask: async (info) => { lastAsk = info; return 'deny' } }
+    const denied = await execTool({ dir: dir2, allowCommands: false, previewWrites: true }, 'write_file', JSON.stringify({ path: 'x.txt', content: '新内容\n' }), undefined, { approver: gate })
+    ok('开启预览后覆盖会先问，并带上进行中的 diff', lastAsk?.kind === 'diff' && (lastAsk?.diff ?? '').includes('- 原内容'), JSON.stringify(lastAsk)?.slice(0, 120))
+    ok('点拒绝则文件保持原样', denied.ok === false && readFileSync(join(dir2, 'x.txt'), 'utf-8') === '原内容\n', denied.output)
+    const gateAllow = { rules: () => [], ask: async (info) => { lastAsk = info; return 'once' } }
+    const passed = await execTool({ dir: dir2, allowCommands: false, previewWrites: true }, 'write_file', JSON.stringify({ path: 'x.txt', content: '新内容\n' }), undefined, { approver: gateAllow })
+    ok('点本次允许才真的写', passed.ok === true && readFileSync(join(dir2, 'x.txt'), 'utf-8') === '新内容\n')
+    let asked = 0
+    const gateCount = { rules: () => [], ask: async () => { asked++; return 'once' } }
+    await execTool({ dir: dir2, allowCommands: false, previewWrites: true }, 'write_file', JSON.stringify({ path: 'brand-new.txt', content: 'x\n' }), undefined, { approver: gateCount })
+    ok('新建文件不打扰（预览只管覆盖）', asked === 0)
+    let silent = 0
+    await execTool({ dir: dir2, allowCommands: false }, 'write_file', JSON.stringify({ path: 'x.txt', content: '不打扰\n' }), undefined, { approver: { rules: () => [], ask: async () => { silent++; return 'deny' } } })
+    ok('未开启预览时保持原行为（直接写、不问）', silent === 0 && readFileSync(join(dir2, 'x.txt'), 'utf-8') === '不打扰\n')
+    // 写前预览不适用白名单：even always 也不该把路径写进规则
+    const st2 = await import('../out/main/approvals.js')
+    st2.init(join(root, 'approvals.json'))
+    let sent = null
+    const p = st2.requestApproval({ id: 'appr-diff', reqId: 'r2', tool: 'write_file', command: 'x.txt', dir: dir2, agentId: 'agent-A', reason: '将覆盖已有文件', uncovered: [], kind: 'diff', diff: '- a\n+ b', ts: Date.now() }, (r) => { sent = r.id })
+    await new Promise((r) => setImmediate(r))
+    ok('预览请求带 kind=diff 下发', sent === 'appr-diff' && st2.pendingList()[0]?.kind === 'diff')
+    st2.resolveApproval('appr-diff', 'always')
+    await p
+    ok('预览点"始终允许"也不会往白名单塞路径', st2.rulesFor('agent-A').every((r) => !r.includes('x.txt')))
+  }
+
+  rmSync(root, { recursive: true, force: true })
 }
 
 rmSync(tmp, { recursive: true, force: true })

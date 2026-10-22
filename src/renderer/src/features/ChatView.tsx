@@ -13,6 +13,7 @@ import { Icon } from '../components/Icons'
 import { CliModelOptions } from '../components/CliModels'
 import { ThinkingText } from '../components/Thinking'
 import { UsagePanel } from '../components/UsagePanel'
+import { CheckpointBar } from '../components/CheckpointBar'
 import { digestThinking } from '../lib/thinking'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
 import { contextWindowOf, estimateTokens, estimateCost, fmtCost, visionOf } from '@shared/pricing'
@@ -380,6 +381,7 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
             )}
           </div>
         )}
+        {msg.checkpoint && !msg.streaming && <CheckpointBar id={msg.checkpoint} title="这次回复改动的文件" />}
         <div className="msg-time">
           {fmtTime(msg.ts)}
           {msg.model && ` · ${msg.model}`}
@@ -663,6 +665,15 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
           {tc.status === 'running' ? '执行中…' : tc.status === 'error' ? '失败' : '完成'}
         </span>
       </button>
+      {open && tc.change?.diff && (
+        <div className="tool-diff" data-tool-diff>
+          <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>
+            {tc.change.kind === 'created' ? '新建文件' : tc.change.kind === 'modified' ? '改动内容' : '改动记录'}
+            {tc.change.unbacked ? ` · 未纳入回滚：${tc.change.unbacked}` : ''}
+          </div>
+          {tc.change.diff}
+        </div>
+      )}
       {open && tc.result && (
         <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border)', color: 'var(--text-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 220, overflowY: 'auto' }}>
           {tc.result}
@@ -682,6 +693,7 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   const [fullAccess, setFullAccess] = useState(agent.tools?.access === 'full')
   const [riskAck, setRiskAck] = useState(false)
   const [commandPolicy, setCommandPolicy] = useState<'ask' | 'auto'>(agent.tools?.commandPolicy ?? 'ask')
+  const [previewWrites, setPreviewWrites] = useState(!!agent.tools?.previewWrites)
   // 白名单存在主进程 approvals.json（不在 agent config 里）：渲染层只能显式提交新规则
   const [rules, setRules] = useState<string[]>([])
   const [ruleDraft, setRuleDraft] = useState('')
@@ -713,7 +725,8 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
       allowCommands,
       allowWeb,
       ...(fullAccess ? { access: 'full' as const } : {}),
-      ...(allowCommands ? { commandPolicy } : {})
+      ...(allowCommands ? { commandPolicy } : {}),
+      ...(previewWrites ? { previewWrites: true } : {})
     }
     updateAgent(agent.id, { tools })
     void bridge.approval.setRules(agent.id, rules.map((r) => r.trim()).filter(Boolean))
@@ -869,6 +882,16 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
                 </div>
               </div>
             )}
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
+              <input type="checkbox" checked={previewWrites} onChange={(e) => setPreviewWrites(e.target.checked)} style={{ marginTop: 3 }} data-testid="preview-writes" />
+              <span style={{ lineHeight: 1.6 }}>
+                <b>覆盖已有文件前先看 diff</b>（默认关）
+                <div style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                  开启后 write_file / replace_in_file 撞到已存在的文件会先弹出行级 diff 让你确认；新建文件不打扰。
+                  关掉时改动仍然会进检查点，事后可看 diff、可回滚。
+                </div>
+              </span>
+            </label>
             <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
               <input type="checkbox" checked={allowWeb} onChange={(e) => setAllowWeb(e.target.checked)} style={{ marginTop: 3 }} />
               <span style={{ lineHeight: 1.6 }}>

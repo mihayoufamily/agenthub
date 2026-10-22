@@ -73,8 +73,10 @@ export function installDebugHooks() {
       return true
     },
     // 直接走一次沙箱工具（含命令审批链路），验证"没批准就不执行"
-    execTool: (grant: Record<string, unknown>, tool: string, argsJson: string) =>
-      bridge.tools.exec(grant as never, tool, argsJson),
+    execTool: (grant: Record<string, unknown>, tool: string, argsJson: string, checkpointId?: string) =>
+      bridge.tools.exec(grant as never, tool, argsJson, checkpointId),
+    checkpoint: async (id: string) => bridge.checkpoint.manifest(id),
+    rollbackCheckpoint: (id: string) => bridge.checkpoint.rollback(id),
     approvalHistory: () => bridge.approval.history(50),
     approvalRules: (agentId?: string) => bridge.approval.rules(agentId),
     // 工作流产物目录（验证用：设置与还原，避免验证后把用户配置留在测试目录）
@@ -175,6 +177,7 @@ export function installDebugHooks() {
       ),
       run: useWorkflow.getState().run
         ? {
+            id: useWorkflow.getState().run!.id,
             status: useWorkflow.getState().run!.status,
             stage: useWorkflow.getState().run!.stage,
             round: useWorkflow.getState().run!.round,

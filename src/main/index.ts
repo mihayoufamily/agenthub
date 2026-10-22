@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerIpc } from './ipc'
 import { Store } from './store'
 import * as approvals from './approvals'
+import * as checkpoints from './checkpoints'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 
 // 窗口状态持久化（简化：保存位置尺寸，启动时恢复并做屏幕边界校验）
@@ -343,8 +344,10 @@ function startApp() {
 
   app.whenReady().then(() => {
     store = new Store()
+    const ud = app.getPath('userData')
     // 命令审批的规则与历史落在 userData，位置在这里注入（纯规则层不碰磁盘）
-    approvals.init(join(app.getPath('userData'), 'approvals.json'))
+    approvals.init(join(ud, 'approvals.json'))
+    checkpoints.init(join(ud, 'checkpoints'))
     registerIpc(() => store as Store, () => mainWindow)
     buildAppMenu()
     // 跟随主题（渲染进程可通过 theme:set 覆盖 themeSource）

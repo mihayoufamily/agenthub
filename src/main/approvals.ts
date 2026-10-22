@@ -115,7 +115,8 @@ function toRecord(req: ApprovalRequest, decision: ApprovalDecision): ApprovalRec
     dir: req.dir,
     agentName: req.agentName,
     decision,
-    reason: req.reason
+    // 预览请求把改动规模带进历史：事后审计时能想起当时在写什么
+    reason: req.kind === 'diff' && !req.reason.includes('行差异') ? `${req.reason}（约 ${Math.max(1, (req.diff ?? '').split('\n').filter((l) => /^[+-]/.test(l)).length)} 行差异）` : req.reason
   }
 }
 
@@ -152,13 +153,14 @@ export function resolveApproval(id: string, decision: ApprovalDecision): { ok: b
   if (!p) return { ok: false, message: '该审批已超时或已结束（不在这里重复放行）' }
   const { req } = p
   const hit = dangerousHit(req.command)
-  // 危险形态不给"始终允许"：写进白名单也没用（判定第一层就拦），
-  // 与其存一条永远不生效的规则，不如在历史里说清为什么这次只是临时放行
-  const rule = decision === 'always' && !hit ? rulesToAdd(req.uncovered?.length ? req.uncovered : [req.command]) : undefined
+  // 写前预览（kind='diff'）不存在"始终允许"：每次覆盖要单独看，
+  // 真收到 always 也只当本次允许，不往白名单里塞路径
+  const whitelistable = req.kind !== 'diff' && !hit
+  const rule = decision === 'always' && whitelistable ? rulesToAdd(req.uncovered?.length ? req.uncovered : [req.command]) : undefined
   if (rule?.length && req.agentId) addRules(req.agentId, rule)
   pushRecord({
     ...toRecord(req, decision),
-    ...(rule?.length ? { rule: rule.join(' ｜ ') } : hit && decision === 'always' ? { rule: `危险形态不写白名单（${hit}）` } : {})
+    ...(rule?.length ? { rule: rule.join(' ｜ ') } : hit && decision === 'always' ? { rule: `危险形态不写白名单（${hit}）` } : decision === 'always' && req.kind === 'diff' ? { rule: '写前预览不适用白名单，本次仅放行这一次覆盖' } : {})
   })
   p.resolve(decision)
   return { ok: true }

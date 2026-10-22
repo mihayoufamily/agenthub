@@ -2,7 +2,7 @@
 // 用法：node verify/approval-shot.mjs [--port=9236]
 // 走 tools:exec 这条入口（同一套审批闸门），不碰用户的 Agent 配置与白名单。
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
@@ -115,6 +115,26 @@ try {
     pass++
   }
   await js(cdp, 'window.__ahub_debug.workbench()')
+
+  // ---- 7. 改动检查点与回滚（走真实 IPC，不只看纯函数） ----
+  console.log('\n[7] 检查点：写文件进清单、回滚回到开始前')
+  const work = join(dir, 'cp-work')
+  mkdirSync(work)
+  // 检查点 id 会留在 userData/checkpoints 里（清单很小且只读），用随机后缀避免和历史数据撞
+  const cpId = `gui-cp-${Date.now().toString(36)}`
+  writeFileSync(join(work, 'note.md'), '原始内容\n', 'utf-8')
+  const w = await js(
+    cdp,
+    `window.__ahub_debug.execTool(${JSON.stringify({ dir: work, allowCommands: false })}, 'write_file', ${JSON.stringify(JSON.stringify({ path: 'note.md', content: '改后内容\n' }))}, ${JSON.stringify(cpId)})`
+  )
+  ok('写入登记为 modified 且带 diff', w?.change?.kind === 'modified' && (w?.change?.diff ?? '').includes('+ 改后内容'), JSON.stringify(w?.change))
+  ok('落盘确实是新内容', readFileSync(join(work, 'note.md'), 'utf-8') === '改后内容\n')
+  const man = await js(cdp, `window.__ahub_debug.checkpoint(${JSON.stringify(cpId)})`)
+  ok('清单里能看到这次改动', man?.summary?.total >= 1 && man?.summary?.modified === 1, JSON.stringify(man?.summary))
+  const rb = await js(cdp, `window.__ahub_debug.rollbackCheckpoint(${JSON.stringify(cpId)})`)
+  ok('回滚报成功（不是嘴上说说）', rb?.ok === true && rb.restored === 1, JSON.stringify(rb))
+  ok('文件真的回到任务开始前的内容', readFileSync(join(work, 'note.md'), 'utf-8') === '原始内容\n', readFileSync(join(work, 'note.md'), 'utf-8'))
+  ok('回滚后清单仍可回看', (await js(cdp, `window.__ahub_debug.checkpoint(${JSON.stringify(cpId)})`))?.manifest?.entries?.length >= 1)
 
   console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 } finally {

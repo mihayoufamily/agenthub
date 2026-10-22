@@ -54,6 +54,8 @@ export interface ToolGrant {
    * 白名单本身不在这里——它由主进程 approvals.json 持有，渲染层改不了，避免自我提权。
    */
   commandPolicy?: 'ask' | 'auto'
+  /** 写前预览：覆盖已有文件前先给出行级 diff 让人确认（默认关，工具循环里逐次弹窗很吵） */
+  previewWrites?: boolean
 }
 
 /** 命令审批的人工裁决结果 */
@@ -65,16 +67,20 @@ export interface ApprovalRequest {
   /** 关联的流 reqId：该流被取消时待审批一律按拒绝收场 */
   reqId: string
   tool: string
-  /** 命令原文（界面完整展示，不折叠、不改写） */
+  /** 命令原文（界面完整展示，不折叠、不改写）；kind='diff' 时为受影响路径 */
   command: string
   dir: string
   agentId?: string
   agentName?: string
-  /** 为什么要问：不在白名单 / 命中危险形态 / 未配置白名单 */
+  /** 为什么要问：不在白名单 / 命中危险形态 / 未配置白名单 / 将覆盖已有文件 */
   reason: string
   /** 未被规则覆盖的命令片段（如实指出到底是哪一段没过） */
   uncovered?: string[]
   ts: number
+  /** 'command'（默认）= 命令审批；'diff' = 写前预览，界面不提示"始终允许" */
+  kind?: 'command' | 'diff'
+  /** kind='diff' 时的行级 diff */
+  diff?: string
 }
 
 /** 审批历史条目（裁决落盘，事后可审计） */
@@ -132,6 +138,8 @@ export interface ToolCall {
   /** 执行结果文本（文件内容/命令输出/错误信息；超限截断） */
   result?: string
   ts: number
+  /** 本次改动登记（有检查点时）：界面显示行级 diff 与"能不能回滚" */
+  change?: FileChange
 }
 
 /** CLI Agent 配置：执行走 CLI 可执行文件，凭据走 CLI 自身（如 arkcli 的 profile） */
@@ -203,6 +211,8 @@ export interface ChatMessage {
   cost?: number
   /** 本条消息引用的 Skill（注入对话的提示包，仅记录名称） */
   skills?: string[]
+  /** 本次回复对应的改动检查点 id（工具层写过文件才有；回滚入口据此找清单） */
+  checkpoint?: string
 }
 
 export interface AgentSession {
@@ -462,6 +472,43 @@ export interface ConventionFile {
   content: string
   /** 超过注入上限时主进程截断，界面与提示词都要如实标出 */
   truncated?: boolean
+}
+
+/** 一次工具层文件改动的登记条目（回滚清单与交付验收共用） */
+export interface FileChange {
+  /** 绝对路径 */
+  path: string
+  /** 相对本次工作目录的路径（回滚只按它在工作目录内操作） */
+  rel: string
+  kind: 'created' | 'modified' | 'deleted' | 'moved'
+  /** moved 的来源相对路径 */
+  from?: string
+  bytes?: number
+  /** 行级 diff（过大/二进制/新建时为 null，不假装算完了） */
+  diff?: string | null
+  /** 未纳入回滚的原因（超上限、越界等）：界面必须显示，不给"一键回滚"的假安全感 */
+  unbacked?: string
+}
+
+/** 改动检查点清单：copy-on-write，只存"第一次改动前"的原件副本 */
+export interface CheckpointManifest {
+  id: string
+  /** 本次检查点的工作目录（回滚只动它之内的路径） */
+  dir: string
+  createdAt: number
+  /** 已存过原件副本的相对路径 */
+  backed: string[]
+  entries: FileChange[]
+}
+
+/** 回滚结果（逐项如实汇报，部分失败不粉饰成成功） */
+export interface RollbackResult {
+  ok: boolean
+  restored: number
+  removed: number
+  moved: number
+  failed: { rel: string; message: string }[]
+  message?: string
 }
 
 /** 长期记忆条目（区别于单次任务记录） */export interface MemoryEntry {

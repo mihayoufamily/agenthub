@@ -359,6 +359,15 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       const r = agent.kind === 'cli'
         ? await bridge.cli.chat(agent.cliConfig!.cli, { model: agent.cliConfig!.model, exePath: agent.cliConfig!.exePath, workDir: cliWorkDir, thinkingLevel: agent.cliConfig!.thinkingLevel }, reqId, history)
         : await bridge.models.chat(agent.modelConfig!, reqId, history, { agentId })
+      // 本次回复若改过文件，主进程会给出检查点 id：界面据此挂出"看 diff / 回滚"入口
+      const cp = (r as { ok: boolean; checkpoint?: string }).checkpoint
+      if (cp) {
+        set((s) => withActive(s, agentId, (ses) => ({
+          ...ses,
+          messages: ses.messages.map((m) => (m.id === msgId ? { ...m, checkpoint: cp } : m))
+        })))
+        persistAgent(agentId)
+      }
       if (!r.ok) {
         set((s) => {
           const activeStreams = { ...s.activeStreams }

@@ -180,7 +180,7 @@ function agentChatToCard(
   user: string,
   cardId: string,
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
-  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number; workflow?: boolean; cliWorkDir?: string }
+  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number; workflow?: boolean; cliWorkDir?: string; checkpointId?: string }
 ): Promise<{ ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }> {
   const reqId = uid('req')
   activeModelReqId = reqId
@@ -286,7 +286,7 @@ function agentChatToCard(
               opts?.modelOverride ? { ...agent.modelConfig, modelId: opts.modelOverride } : agent.modelConfig,
               reqId,
               messages,
-              { agentId: agent.id, workflow: opts?.workflow }
+              { agentId: agent.id, workflow: opts?.workflow, ...(opts?.checkpointId ? { checkpointId: opts.checkpointId } : {}) }
             )
           : Promise.resolve({ ok: false })
     void launched.then((r: { ok: boolean }) => {
@@ -314,6 +314,7 @@ async function runStage(
 
   const card = makeCard(role, round, cfg, isDemoAgent)
   setRun((r) => ({ ...r, cards: [...r.cards, card] }))
+  const runId = get().run?.id
 
   // ---- 演示 Agent：脚本化内容（卡片逐张标注"演示"） ----
   if (isDemoAgent) {
@@ -373,6 +374,8 @@ async function runStage(
     modelOverride: roleCfg.modelOverride,
     cliTimeoutMs,
     workflow: useOutDir,
+    // 整个任务共用一个检查点：回滚回到任务开始前，而不是某一轮开始前
+    ...(runId ? { checkpointId: runId } : {}),
     ...(useOutDir ? { cliWorkDir: ctx.outputDir } : {})
   })
   if (isCancelled()) return null
@@ -442,7 +445,7 @@ async function writeTextArtifactIfNone(
   const body =
     `# ${ctx.goal}（第 ${ctx.round} 轮执行成果）\n\n` +
     `> 由 AgentHub 落盘：执行 Agent「${agent.name}」的文本成果原文，该 Agent 本次未直接写盘。\n\n${conclusion}\n`
-  const r = await bridge.artifacts.write(fileName, body)
+  const r = await bridge.artifacts.write(fileName, body, get().run?.id)
   if (!r.ok || !r.path) {
     setRun((r2) => ({
       ...r2,
@@ -647,6 +650,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       set({ run: null, draft: '', attachments: [], _started: false, _cancelled: false })
     }
     await bridge.runs.remove(id)
+    // 任务记录删了就把它的原件副本一起清掉（副本只用于回滚，留着只会涨盘）
+    void bridge.checkpoint.prune(id)
     await get().refreshTasks()
   },
 

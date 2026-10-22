@@ -1,5 +1,5 @@
 import type { CustomModelConfig, ModelTestResult, ToolGrant, ToolCall, UsageInfo } from '../../shared/types'
-import { execTool, toolDefs, MAX_OUTPUT, type CommandApprover } from '../tools'
+import { execTool, toolDefs, MAX_OUTPUT, type ToolHooks } from '../tools'
 
 /**
  * OpenAI 兼容接口适配层（接入"模型 API"而非"现成 Agent"）。
@@ -300,7 +300,7 @@ export function chatStream(
   messages: IncomingMsg[],
   onEvent: (e: ChatChunkEvent) => void,
   grant?: ToolGrant,
-  approver?: CommandApprover
+  hooks?: ToolHooks
 ) {
   const ctrl = new AbortController()
   activeStreams.set(reqId, ctrl)
@@ -375,11 +375,12 @@ export function chatStream(
           const call: ToolCall = { id: uid('tool'), tool: tc.name, args: argsSummary(tc.args), status: 'running', ts: Date.now() }
           onEvent({ reqId, type: 'tool', toolCall: call })
           // 取消信号透传：正在执行的命令/联网可被立即中断
-          const res = await execTool(grant, tc.name, tc.args, ctrl.signal, approver)
+          const res = await execTool(grant, tc.name, tc.args, ctrl.signal, hooks)
           const done: ToolCall = {
             ...call,
             status: res.ok ? 'done' : 'error',
-            result: res.output.length > 5000 ? res.output.slice(0, 5000) + '…（已截断）' : res.output
+            result: res.output.length > 5000 ? res.output.slice(0, 5000) + '…（已截断）' : res.output,
+            ...(res.change ? { change: res.change } : {})
           }
           onEvent({ reqId, type: 'tool', toolCall: done, ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}) })
           convo.push({ role: 'tool', tool_call_id: tc.id, content: res.output.slice(0, MAX_OUTPUT) })

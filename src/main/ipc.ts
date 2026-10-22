@@ -9,6 +9,7 @@ import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill } from '../shared/types'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
+import * as checkpoints from './checkpoints'
 import type { ApprovalDecision } from '../shared/types'
 import { readConventions } from './conventions'
 import { checkUpdate } from './updater'
@@ -103,7 +104,10 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
           ...(ctx.agentName ? { agentName: ctx.agentName } : {}),
           reason: info.reason,
           uncovered: info.uncovered,
-          ts: Date.now()
+          ts: Date.now(),
+          // 写前预览：一次覆盖一次问，"始终允许"对白名单型裁决没有意义
+          ...(info.kind ? { kind: info.kind } : {}),
+          ...(info.diff ? { diff: info.diff } : {})
         },
         (req) => getWin()?.webContents.send('model:event', { reqId, type: 'approval', approval: req })
       )
@@ -302,7 +306,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return openai.listModels(cfg, key)
   })
 
-  ipcMain.handle('model:chat', (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean }) => {
+  ipcMain.handle('model:chat', async (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string }) => {
     const key = getStore().getCredential(cfg.keyId)
     if (!key) {
       const win = getWin()
@@ -333,15 +337,30 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       ...(agentName ? { agentName } : {}),
       workflow: !!opts?.workflow
     })
+    // 改动检查点：一次工作流任务共用 run.id（返工/续跑都回到任务开始前的状态），
+    // 工作站对话按 reqId 单独成一个检查点。目录取主进程侧的 grant.dir，不信渲染层传的路径。
+    let checkpoint: string | undefined
+    if (grant) {
+      const cpId = String(opts?.checkpointId ?? reqId).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64)
+      if (cpId) {
+        await checkpoints.start(cpId, grant.dir)
+        checkpoint = cpId
+      }
+    }
     openai.chatStream(cfg, key, reqId, messages, (ev) => {
       tap(ev)
       getWin()?.webContents.send('model:event', ev)
-    }, grant, grant ? makeApprover(reqId, {
-      dir: grant.dir,
-      ...(opts?.agentId ? { agentId: opts.agentId } : {}),
-      ...(agentName ? { agentName } : {})
-    }) : undefined)
-    return { ok: true }
+    }, grant, grant
+      ? {
+          approver: makeApprover(reqId, {
+            dir: grant.dir,
+            ...(opts?.agentId ? { agentId: opts.agentId } : {}),
+            ...(agentName ? { agentName } : {})
+          }),
+          ...(checkpoint ? { checkpoint } : {})
+        }
+      : undefined)
+    return { ok: true, checkpoint }
   })
 
   ipcMain.handle('model:cancel', (_e, reqId: string) => {
@@ -427,13 +446,31 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   // ---------- 工具层（沙箱执行；渲染层可直调用于验证/高级用途） ----------
-  ipcMain.handle('tools:exec', async (_e, grant: ToolGrant, tool: string, argsJson: string) => {
+  ipcMain.handle('tools:exec', async (_e, grant: ToolGrant, tool: string, argsJson: string, checkpointId?: string) => {
     if (!grant || typeof grant.dir !== 'string' || !grant.dir) {
       return { ok: false, output: '拒绝：未配置工具目录' }
     }
     // 这条入口是给验证脚本与高级用途直接跑一次工具用的：命令审批照样要过，
     // 只是问的是"正在调用它的那个人"，而不是某个 Agent 的白名单
-    return execTool(grant, tool, argsJson, undefined, makeApprover('tools:exec', { dir: grant.dir }))
+    const cp = typeof checkpointId === 'string' ? checkpointId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) : ''
+    if (cp) await checkpoints.start(cp, grant.dir)
+    return execTool(grant, tool, argsJson, undefined, {
+      approver: makeApprover('tools:exec', { dir: grant.dir }),
+      ...(cp ? { checkpoint: cp } : {})
+    })
+  })
+
+  // ---------- 改动检查点（回滚） ----------
+  ipcMain.handle('checkpoint:manifest', (_e, id: string) => {
+    const m = checkpoints.manifestOf(String(id ?? ''))
+    return { manifest: m, summary: checkpoints.summarize(m) }
+  })
+  ipcMain.handle('checkpoint:rollback', async (_e, id: string) => {
+    return checkpoints.rollback(String(id ?? ''))
+  })
+  ipcMain.handle('checkpoint:prune', async (_e, id: string) => {
+    await checkpoints.prune(String(id ?? ''))
+    return { ok: true }
   })
 
   // ---------- 命令审批（白名单 / 待裁决 / 审批历史） ----------
@@ -500,7 +537,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
    * 由 AgentHub 落盘一篇文本产物（执行角色没有文件工具时的兜底交付：模型的完整文本成果写成文件）。
    * 目录固定为工作流产物目录，渲染层只能给文件名；文件名做字符过滤（不含分隔符，杜绝路径穿越）。
    */
-  ipcMain.handle('artifact:write', (_e, fileName: string, content: string) => {
+  ipcMain.handle('artifact:write', async (_e, fileName: string, content: string, checkpointId?: string) => {
     const dir = workflowOutDir(getStore)
     if (!dir) return { ok: false, message: '产物目录不可用（系统文档目录读取失败）' }
     const safe = typeof fileName === 'string'
@@ -514,8 +551,19 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     try {
       mkdirSync(dir, { recursive: true })
       const p = join(dir, safe)
+      // 由 AgentHub 落盘的文本产物同样进检查点：它和工具写盘的文件混在一个目录里，
+      // 回滚不该只认其中一半
+      const cpId = typeof checkpointId === 'string' ? checkpointId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) : ''
+      if (cpId) await checkpoints.start(cpId, dir)
+      const diff = cpId ? await checkpoints.diffOfFile(p, body) : null
+      const existed = existsSync(p)
+      const rel = cpId ? checkpoints.relativeOf(dir, p) : null
+      if (cpId && rel !== null) await checkpoints.beforeChange(cpId, p)
       writeFileSync(p, body, 'utf-8')
-      return { ok: true, path: p }
+      if (cpId && rel !== null) {
+        checkpoints.record(cpId, { rel, path: p, kind: existed ? 'modified' : 'created', diff, bytes: body.length })
+      }
+      return { ok: true, path: p, ...(cpId && rel !== null ? { checkpoint: cpId } : {}) }
     } catch (e) {
       return { ok: false, message: `写入失败：${(e as Error).message}` }
     }

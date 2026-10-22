@@ -7,8 +7,9 @@ import { resolve as resolvePath, dirname, sep, relative } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { ToolGrant } from '../shared/types'
-import type { ApprovalDecision } from '../shared/types'
+import type { ApprovalDecision, FileChange } from '../shared/types'
 import { checkCommand } from '../shared/approvals'
+import { relativeOf, beforeChange as cpBefore, record as cpRecord, diffOfFile, diffLines } from './checkpoints'
 
 const MAX_READ = 200 * 1024 // 读文件上限
 const MAX_WRITE = 1024 * 1024 // 写文件上限
@@ -406,12 +407,23 @@ export function killTree(proc: ChildProcess): void {
   try { proc.kill() } catch { /* noop */ }
 }
 
+/** 文件此刻是否存在（决定这次算"改"还是"新建"） */
+async function existsFile(p: string): Promise<boolean> {
+  try {
+    return (await fs.stat(p)).isFile()
+  } catch {
+    return false
+  }
+}
+
 export interface ToolExecResult {
   ok: boolean
   /** 结果文本：成功时为内容/输出摘要；失败时为拒绝/错误原因（会回传给模型） */
   output: string
   /** write_file 成功时的绝对路径（工作流登记 artifacts 用） */
   writtenPath?: string
+  /** 本次改动登记（有检查点时）：界面据此显示 diff 与"能不能回滚" */
+  change?: FileChange
 }
 
 /**
@@ -421,7 +433,22 @@ export interface ToolExecResult {
  */
 export interface CommandApprover {
   rules: () => string[]
-  ask: (info: { tool: string; command: string; reason: string; uncovered: string[] }) => Promise<ApprovalDecision>
+  ask: (info: {
+    tool: string
+    command: string
+    reason: string
+    uncovered: string[]
+    /** 'diff' = 写前预览（界面不显示"始终允许"，覆盖一次算一次） */
+    kind?: 'command' | 'diff'
+    diff?: string
+  }) => Promise<ApprovalDecision>
+}
+
+/** 工具执行的外挂：命令审批 + 改动检查点（两者都由调用方按场景注入） */
+export interface ToolHooks {
+  approver?: CommandApprover
+  /** 检查点 id：有值则在文件改动前备份原件并登记变更，之后可整体回滚 */
+  checkpoint?: string
 }
 
 /** 执行一次工具调用。argsJson 为模型输出的 JSON 字符串（解析失败按参数错误处理）。signal 为外部取消信号（可中断命令/联网）。 */
@@ -430,8 +457,22 @@ export async function execTool(
   tool: string,
   argsJson: string,
   signal?: AbortSignal,
-  approver?: CommandApprover
+  hooks?: ToolHooks
 ): Promise<ToolExecResult> {
+  const approver = hooks?.approver
+  const cp = hooks?.checkpoint
+  /** 改动前备份：返回"没备份成"的原因（越界/超上限），界面要如实显示 */
+  const backup = async (abs: string): Promise<{ rel: string | null; unbacked?: string }> => {
+    if (!cp) return { rel: null }
+    const rel = relativeOf(grant.dir || '.', abs)
+    if (rel === null) return { rel: null, unbacked: '完全访问模式下的目录外改动，不进入回滚清单' }
+    const b = await cpBefore(cp, abs)
+    return { rel, ...(b.backed || !b.reason ? {} : { unbacked: b.reason }) }
+  }
+  /** 改动后登记（登记失败不影响本次工具结果） */
+  const track = (change: FileChange | null) => {
+    if (cp && change) cpRecord(cp, change)
+  }
   let args: Record<string, unknown> = {}
   try {
     args = argsJson.trim() ? (JSON.parse(argsJson) as Record<string, unknown>) : {}
@@ -453,9 +494,24 @@ export async function execTool(
         if (!p) return { ok: false, output: `拒绝：路径越界或为空（仅限沙箱目录内）` }
         const content = typeof args.content === 'string' ? args.content : ''
         if (content.length > MAX_WRITE) return { ok: false, output: `拒绝：内容超过 ${MAX_WRITE / 1024}KB 上限` }
+        // diff 与备份都必须在写盘之前取，否则备份的是已经改坏的内容、diff 永远为空
+        const diff = await diffOfFile(p, content)
+        const existed = await existsFile(p)
+        if (grant.previewWrites && existed && approver) {
+          const d = await approver.ask({
+            tool: 'write_file', command: p, uncovered: [], kind: 'diff',
+            reason: '这次写入会覆盖已有文件，先看清改了什么', diff: diff ?? undefined
+          })
+          if (signal?.aborted) return { ok: false, output: '已取消：工具执行被用户停止' }
+          if (d === 'deny') return { ok: false, output: '拒绝：用户取消了这次写入（文件保持原样）' }
+        }
+        const kind: FileChange['kind'] = existed ? 'modified' : 'created'
+        const bk = await backup(p)
         await fs.mkdir(dirname(p), { recursive: true })
         await fs.writeFile(p, content, 'utf8')
-        return { ok: true, output: `已写入 ${content.length} 字符`, writtenPath: p }
+        const change = bk.rel === null ? null : { rel: bk.rel, path: p, kind, diff, bytes: content.length, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
+        track(change)
+        return { ok: true, output: `已写入 ${content.length} 字符`, writtenPath: p, ...(change ? { change } : {}) }
       }
       case 'list_dir': {
         const p = sandboxPath(grant, args.path === '' || args.path === undefined ? '.' : args.path)
@@ -479,17 +535,29 @@ export async function execTool(
       case 'delete_file': {
         const p = sandboxPath(grant, args.path)
         if (!p) return { ok: false, output: `拒绝：路径越界或为空（仅限沙箱目录内）` }
+        const bk = await backup(p)
         const { shell } = require('electron') as typeof import('electron')
         await shell.trashItem(p)
-        return { ok: true, output: '已移入回收站' }
+        const change = bk.rel === null ? null : { rel: bk.rel, path: p, kind: 'deleted' as const, diff: null, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
+        track(change)
+        return { ok: true, output: '已移入回收站', ...(change ? { change } : {}) }
       }
       case 'move': {
         const from = sandboxPath(grant, args.from)
         const to = sandboxPath(grant, args.to)
         if (!from || !to) return { ok: false, output: `拒绝：源或目标路径越界（仅限沙箱目录内）` }
+        const bk = await backup(from)
         await fs.mkdir(dirname(to), { recursive: true })
         await fs.rename(from, to)
-        return { ok: true, output: '已移动' }
+        const fromRel = relativeOf(grant.dir || '.', from)
+        // rel 记目标、from 记来源：回滚按"把目标挪回来源"处理（备份的是来源原件）
+        const toRel = relativeOf(grant.dir || '.', to)
+        const change = toRel === null ? null : {
+          rel: toRel, path: to, kind: 'moved' as const, from: fromRel ?? undefined, diff: null,
+          ...(bk.unbacked ? { unbacked: bk.unbacked } : {})
+        }
+        if (change) track(change)
+        return { ok: true, output: '已移动', ...(change ? { change } : {}) }
       }
       case 'search_files': {
         const pattern = typeof args.pattern === 'string' ? args.pattern : ''
@@ -577,8 +645,21 @@ export async function execTool(
         }
         const next = args.replace_all === true ? text.split(find).join(replace) : replaceFirstLiteral(text, find, replace)
         if (next.length > MAX_WRITE) return { ok: false, output: `拒绝：替换后内容超过 ${MAX_WRITE / 1024}KB 上限` }
+        const previewDiff = diffLines(text, next)
+        if (grant.previewWrites && approver) {
+          const d = await approver.ask({
+            tool: 'replace_in_file', command: p, uncovered: [], kind: 'diff',
+            reason: '精准替换会改动已有文件，先看清改了什么', diff: previewDiff || undefined
+          })
+          if (signal?.aborted) return { ok: false, output: '已取消：工具执行被用户停止' }
+          if (d === 'deny') return { ok: false, output: '拒绝：用户取消了这次替换（文件保持原样）' }
+        }
+        // 旧内容此刻还在内存里，直接算 diff，省一次读盘
+        const bk = await backup(p)
         await fs.writeFile(p, next, 'utf8')
-        return { ok: true, output: `已替换 ${args.replace_all === true ? count : 1} 处`, writtenPath: p }
+        const change = bk.rel === null ? null : { rel: bk.rel, path: p, kind: 'modified' as const, diff: previewDiff, bytes: next.length, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
+        track(change)
+        return { ok: true, output: `已替换 ${args.replace_all === true ? count : 1} 处`, writtenPath: p, ...(change ? { change } : {}) }
       }
       case 'web_fetch': {
         if (!grant.allowWeb) return { ok: false, output: '拒绝：该 Agent 未授权联网' }
