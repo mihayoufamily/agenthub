@@ -1412,7 +1412,7 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
   ok('redactSecrets / fingerprintCommand 已导出，且 shared/approvals.ts 不 import electron/fs（渲染进程敢直接引）', (() => {
     if (typeof ap?.redactSecrets !== 'function' || typeof ap?.fingerprintCommand !== 'function') return false
     try { return !bannedImport.test(readFileSync(new URL('../src/shared/approvals.ts', import.meta.url), 'utf-8')) } catch { return false }
-  })())
+  })(), `redactSecrets=${typeof ap?.redactSecrets} fingerprintCommand=${typeof ap?.fingerprintCommand}（两个都是 function 仍 FAIL 时＝源码里出现了 electron/fs 的 import）`)
   ok('归一后指纹稳定（空白/大小写不影响）', ap.fingerprintCommand('FOO  BAR') === ap.fingerprintCommand('foo bar'))
   ok('不同命令指纹不同', ap.fingerprintCommand('a.exe') !== ap.fingerprintCommand('b.exe'))
   ok('长度适合界面显示', ap.fingerprintCommand('node x.js').length === 12 && /^[a-z0-9]+$/.test(ap.fingerprintCommand('node x.js')), ap.fingerprintCommand('node x.js'))
