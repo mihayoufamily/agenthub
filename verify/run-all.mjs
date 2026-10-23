@@ -18,20 +18,30 @@ const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   return m ? [m[1], m[2]] : [a.replace(/^--/, ''), true]
 }))
 
-/** tier: logic（默认）| gui（--gui）| cli（--with-cli）；gate=false 只报告不计入成败 */
+/**
+ * tier: logic（默认）| gui（--gui）| cli（--with-cli）；gate=false 只报告不计入成败
+ * min：该套件的**断言数下限**，取值必须是某一轮实测的 PASS 数（不许估、不许照抄旧台账）。
+ *   实测 PASS < min → 该套件判 FAIL 并点名"断言数从 N 掉到 M"。这是反向保险：
+ *   谁删掉/静默跳过十条断言，套件本来照样报 OK，现在会红。
+ *   往套件里**加**断言后，要把对应 min 一起抬到新的实测值，否则下限就在原地腐烂。
+ *   min: null = 本轮没有实测基线（见 cli 层那行注释），只报数不设下限；跑出第一轮必须补上。
+ *   本轮基线来源：2026-10-24 收尾 C1 全量实测，逐套件数字见
+ *   .superpowers/sdd/2026-10-23-v0.4.0-safety-and-ci/wave-c1-numbers.md
+ */
 const SUITES = [
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）' },
-  { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态）' },
-  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出' },
-  { name: 'approval', tier: 'gui', script: 'approval-shot.mjs', what: '命令审批真机：没批准不执行、拒绝/本次/始终、危险形态仍要问、历史进设置' },
-  { name: 'cli-e2e', tier: 'gui', script: 'cli-e2e.mjs', what: 'CLI 适配器经真实 IPC 的行为' },
-  { name: 'cli-shot', tier: 'gui', script: 'cli-shot.mjs', what: '本机 CLI 面板截图（5 个条目与实测状态）', gate: false },
-  { name: 'wf-config', tier: 'gui', script: 'workflow-config-shot.mjs', what: '工作流三角色配置条（跨厂商绑定）' },
-  { name: 'model-picker', tier: 'gui', script: 'model-picker-shot.mjs', what: 'CLI 模型清单进切换弹窗' },
-  { name: 'model-list', tier: 'gui', script: 'model-list-check.mjs', what: 'CLI 模型清单真实 IPC 返回', gate: false },
-  { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
-  { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘' },
-  { name: 'cross-vendor', tier: 'cli', script: 'cross-vendor-run.mjs', what: '跨厂商三角色真跑一轮（规划→执行→审核 + 人工门）' }
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 483, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）' },
+  { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 52, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态）' },
+  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 79, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出' },
+  { name: 'approval', tier: 'gui', script: 'approval-shot.mjs', min: 94, what: '命令审批真机：没批准不执行、拒绝/本次/始终、危险形态仍要问、历史进设置' },
+  { name: 'cli-e2e', tier: 'gui', script: 'cli-e2e.mjs', min: 10, what: 'CLI 适配器经真实 IPC 的行为' },
+  { name: 'cli-shot', tier: 'gui', script: 'cli-shot.mjs', min: 4, what: '本机 CLI 面板截图（5 个条目与实测状态）', gate: false },
+  { name: 'wf-config', tier: 'gui', script: 'workflow-config-shot.mjs', min: 7, what: '工作流三角色配置条（跨厂商绑定）' },
+  { name: 'model-picker', tier: 'gui', script: 'model-picker-shot.mjs', min: 3, what: 'CLI 模型清单进切换弹窗' },
+  { name: 'model-list', tier: 'gui', script: 'model-list-check.mjs', min: 3, what: 'CLI 模型清单真实 IPC 返回', gate: false },
+  // cli 层要真跑 codex / CodeBuddy / arkcli（烧真实额度），本轮未实测 → 下限留空；跑过一轮后按实测 PASS 钉上
+  { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', min: null, what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
+  { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', min: null, what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘' },
+  { name: 'cross-vendor', tier: 'cli', script: 'cross-vendor-run.mjs', min: null, what: '跨厂商三角色真跑一轮（规划→执行→审核 + 人工门）' }
 ]
 
 const wanted = args.only
@@ -101,16 +111,31 @@ for (const suite of selected) {
   const m = out.match(PASS_RE)
   const pass = m ? Number(m[1]) : null
   const fail = m ? Number(m[2]) : null
-  const crashed = r.status !== 0 && (fail === null || fail === 0)
-  const bad = crashed || (fail ?? 0) > 0
+  const exit = r.status
+  const crashed = exit !== 0 && (fail === null || fail === 0)
+  // 每一条不通过都要留下能直接读懂的理由；"红了但不知道为什么红"最后总会把人引向削弱断言。
+  const reasons = []
+  if (crashed) reasons.push(`退出码 ${exit}${r.signal ? ` / 信号 ${r.signal}` : ''}，但输出里没有失败断言计数（崩了或被超时杀掉，不是断言红）`)
+  if ((fail ?? 0) > 0) reasons.push(`${fail} 条断言失败`)
+  // 收尾 C1 · 项 1b：退出码 0 却没打印 `结果：N PASS / M FAIL` 的套件，以前会被读成"通过"，
+  // 而它其实可能在打印计数行之前就 return 了（整套没跑完）。f5c6a74 已给所有已知不打印的
+  // 套件补齐计数行，所以这条规则开下去不该打死任何现有套件；真打死了就给它补计数行，
+  // 不要放宽这条规则、也不要加例外名单。
+  if (pass === null && exit === 0) reasons.push('套件没打印计数行（结果：N PASS / M FAIL），断言数无从核对')
+  // 收尾 C1 · 项 1a：每套件断言数下限。删断言、或断言被静默跳过，PASS 数就会掉 → 这里拦成 FAIL。
+  if (suite.min != null && pass !== null && pass < suite.min) {
+    reasons.push(`断言数从 ${suite.min} 掉到 ${pass}（低于该套件下限 min=${suite.min}；确实加了断言就把下限抬到新的实测值）`)
+  }
+  const bad = reasons.length > 0
   if (bad && suite.gate !== false) failed++
   const tag = bad ? (suite.gate === false ? 'WARN' : 'FAIL') : 'OK  '
-  console.log(`\n[${tag}] ${suite.name}  ${pass ?? '-'} PASS / ${fail ?? '-'} FAIL  ${Math.round((Date.now() - t0) / 1000)}s  —— ${suite.what}`)
+  console.log(`\n[${tag}] ${suite.name}  ${pass ?? '-'} PASS / ${fail ?? '-'} FAIL  ${Math.round((Date.now() - t0) / 1000)}s  exit=${exit ?? `signal:${r.signal}`}  min=${suite.min ?? '-'}  —— ${suite.what}`)
   if (bad) {
+    for (const reason of reasons) console.log('    原因：' + reason)
     const lines = out.split('\n').filter((l) => /FAIL|失败|Error:/.test(l)).slice(0, 12)
     for (const l of lines) console.log('    ' + l.trim())
   }
-  results.push({ name: suite.name, pass, fail, bad, gated: suite.gate !== false })
+  results.push({ name: suite.name, pass, fail, exit, min: suite.min ?? null, reasons, bad, gated: suite.gate !== false })
 }
 
 console.log('\n================ 汇总 ================')

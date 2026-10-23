@@ -21,7 +21,9 @@ jobs:
       # 注入面（no-danger / eval / new Function / 隐式 eval）由 ESLint 机器拦；0 error 为过，warn 不拦
       - run: npm run lint
       - run: npm run build
-      # 逻辑层回归：不起应用、不花额度。此前 CI 只做构建，427 条断言从未在机器上跑过
+      # 逻辑层回归：不起应用、不花额度。此前 CI 只做构建，断言从未在机器上跑过。
+      # 断言条数不在这里写死（会随套件增长漂移）：verify/run-all.mjs 的 SUITES 表带每套件
+      # min（某一轮实测的 PASS 数），条数一掉就跑红，CI 只要 `npm run verify` 退出码为 0。
       - run: npm run verify
       # 运行时依赖只有 react/react-dom/zustand；出高危就拦，dev 依赖噪音不拦
       - run: npm audit --omit=dev --audit-level=high
