@@ -194,7 +194,7 @@
 ## 已知限制（发版说明照此写，不粉饰）
 
 - 计划态对 CLI 角色**不构成写入约束**，只事后列改动。
-- MCP 若走 `.cmd` 家族，仍经 cmd 解释，不声称纯 `shell: false`。
+- MCP 的 npm 家族与 `.cmd/.bat` 仍显式经 `cmd.exe` 启动，不声称纯 `shell: false`；该分支对参数采用**拒绝式**校验（含 `"`、`%`，或无空格却含 `- MCP 若走 `.cmd` 家族，仍经 cmd 解释，不声称纯 `shell: false`。 | ^ < >` 的 token 直接报错），代价是 `--filter="a b"` 这类值在该分支不支持。真正 argv 直传的 `.exe`/脚本路径不受此限制。
 - `web_fetch` 的 DNS rebinding 窗口本轮不处理，README 原条目保留。
 - 饼图分母是 ledger 可见调用（2000 条上限、CLI 多数无 usage），不是全量账单。
 - 内置 skill 只读，正文要改必须先另存副本。
