@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeTheme, ipcMain, Menu, Tray, dialog, nativeImage } from 'electron'
+import { app, BrowserWindow, nativeTheme, ipcMain, Menu, Tray, dialog, nativeImage, shell } from 'electron'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerIpc } from './ipc'
@@ -6,6 +6,7 @@ import { Store } from './store'
 import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
 import { configurePriceOverrides } from '../shared/overrides'
+import { navDecision } from '../shared/winnav'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 import * as ledger from './ledger'
 
@@ -233,6 +234,28 @@ function createWindow() {
       nodeIntegration: false,
       spellcheck: false
     }
+  })
+  // 窗口导航兜底：本应用只加载本地页面，任何跳外部的东西都该去系统浏览器，不该留在窗口里
+  // 外链在新窗口/标签请求时直接转浏览器打开（裸 deny 会让将来出现的 target=_blank 点了没反应）
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    const act = navDecision(url, devServerUrl ?? null)
+    if (act === 'external') void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  // 同窗口导航：自己的页面放行，外链挡下后转系统浏览器
+  win.webContents.on('will-navigate', (e, url) => {
+    const act = navDecision(url, devServerUrl ?? null)
+    if (act === 'allow') return
+    e.preventDefault()
+    if (act === 'external') void shell.openExternal(url)
+    else console.log(`[main] 已拦截非法导航：${url.slice(0, 120)}`)
+  })
+  // 服务端 3xx 也算导航，不拦就等于绕过上面两条
+  win.webContents.on('will-redirect', (e, url) => {
+    const act = navDecision(url, devServerUrl ?? null)
+    if (act === 'allow') return
+    e.preventDefault()
+    if (act === 'external') void shell.openExternal(url)
   })
   if (ws.maximized) win.maximize()
   let shown = false

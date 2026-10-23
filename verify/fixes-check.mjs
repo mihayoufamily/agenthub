@@ -1192,6 +1192,22 @@ child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ c
   // 逻辑层起不了 electron 的 ipcMain，这两个 handler 无法在本层真调——这是够不到的半边，如实标注于此。
 }
 
+// ---------- Y. 窗口导航裁决：本地页面放行、外链转浏览器、其它协议拦掉 ----------
+console.log('\n[Y] navDecision')
+{
+  const wn = await import('../out/shared/winnav.js')
+  const dev = 'http://localhost:5173'
+  ok('开发源下的页面放行', wn.navDecision(`${dev}/index.html`, dev) === 'allow')
+  ok('生产 file:// 下的页面放行', wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null) === 'allow')
+  ok('file:// 指向 app 目录之外也拦（不是所有本地文件都算自己页面）', wn.navDecision('file:///C:/Windows/System32/hosts', null) === 'block')
+  ok('http(s) 外链转系统浏览器', wn.navDecision('https://github.com/mihayoufamily/agenthub', dev) === 'external')
+  ok('javascript: 协议直接拦掉', wn.navDecision('javascript:alert(1)', dev) === 'block')
+  ok('data: 文本也拦（防止把 data URL 当页面加载）', wn.navDecision('data:text/html,<script>alert(1)</script>', dev) === 'block')
+  ok('非法 URL 当拦，不抛异常', wn.navDecision('::::', dev) === 'block')
+  ok('空串当拦', wn.navDecision('', dev) === 'block')
+  ok('devServerUrl 为 null 时 http://localhost 不放行', wn.navDecision('http://localhost:5173/', null) === 'external')
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)
