@@ -5,7 +5,11 @@ import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
+
+// 被测 server 用绝对路径：应用进程的 cwd 不是脚本的 cwd
+const MOCK_MCP = fileURLToPath(new URL('./mock-mcp-server.mjs', import.meta.url))
 
 const argv = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)=(.*)$/)
@@ -135,6 +139,27 @@ try {
   ok('回滚报成功（不是嘴上说说）', rb?.ok === true && rb.restored === 1, JSON.stringify(rb))
   ok('文件真的回到任务开始前的内容', readFileSync(join(work, 'note.md'), 'utf-8') === '原始内容\n', readFileSync(join(work, 'note.md'), 'utf-8'))
   ok('回滚后清单仍可回看', (await js(cdp, `window.__ahub_debug.checkpoint(${JSON.stringify(cpId)})`))?.manifest?.entries?.length >= 1)
+
+  // ---- 8. MCP：设置页配置、探测、信任与撤销（客户端本身在 logic 层测） ----
+  console.log('\n[8] MCP 设置页与信任开关')
+  const srv = { id: `gui-mcp-${Date.now().toString(36)}`, name: 'Mock MCP', command: `"${process.execPath}" "${MOCK_MCP}"`, enabled: true, timeoutMs: 8000 }
+  const before = await js(cdp, 'window.agenthub.mcp.list()')
+  await js(cdp, `window.agenthub.mcp.set(${JSON.stringify([...before, srv])})`)
+  await js(cdp, 'window.__ahub_debug.settings()')
+  await sleep(600)
+  const navMcp = await js(cdp, `(() => { const b = [...document.querySelectorAll('.nav-item')].find((x) => x.textContent.trim() === 'MCP'); if (!b) return false; b.click(); return true })()`)
+  ok('设置里有「MCP」分区', navMcp === true)
+  await sleep(400)
+  ok('MCP 分区渲染出这一条 server', (await js(cdp, `!!document.querySelector('[data-mcp-row]')`)) === true)
+  const pr = await js(cdp, `window.agenthub.mcp.probe(${JSON.stringify(srv)})`)
+  ok('从渲染层探到工具清单（3 个）', pr?.ok === true && pr.tools?.length === 3, JSON.stringify(pr)?.slice(0, 160))
+  ok('未信任时不显示"撤销信任"（说明信任态是从主进程读的）', (await js(cdp, 'window.agenthub.mcp.trusted()')).includes(srv.id) === false)
+  await js(cdp, `window.agenthub.mcp.setTrust(${JSON.stringify(srv.id)}, true)`)
+  ok('信任可以写入主进程', (await js(cdp, 'window.agenthub.mcp.trusted()')).includes(srv.id) === true)
+  await js(cdp, `window.agenthub.mcp.set(${JSON.stringify(before)})`)
+  ok('删掉 server 时信任一起被清掉（不留没人认领的信任）', (await js(cdp, 'window.agenthub.mcp.trusted()')).includes(srv.id) === false)
+  ok('配置已还原', JSON.stringify(await js(cdp, 'window.agenthub.mcp.list()')) === JSON.stringify(before))
+  await js(cdp, 'window.__ahub_debug.workbench()')
 
   console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 } finally {

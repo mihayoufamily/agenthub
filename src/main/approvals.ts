@@ -30,16 +30,18 @@ export function init(filePath: string) {
 interface ApprovalFile {
   /** agentId -> 白名单规则 */
   rules: Record<string, string[]>
+  /** 已确认信任的 MCP server id（首次连接确认后整组放行） */
+  mcpTrusted: string[]
   records: ApprovalRecord[]
 }
 
 function read(): ApprovalFile {
   try {
-    if (!dataPath || !existsSync(dataPath)) return { rules: {}, records: [] }
+    if (!dataPath || !existsSync(dataPath)) return { rules: {}, mcpTrusted: [], records: [] }
     const raw = JSON.parse(readFileSync(dataPath, 'utf-8')) as Partial<ApprovalFile>
-    return { rules: raw.rules ?? {}, records: raw.records ?? [] }
+    return { rules: raw.rules ?? {}, mcpTrusted: raw.mcpTrusted ?? [], records: raw.records ?? [] }
   } catch {
-    return { rules: {}, records: [] }
+    return { rules: {}, mcpTrusted: [], records: [] }
   }
 }
 
@@ -80,8 +82,23 @@ export function addRules(agentId: string, rules: string[]): string[] {
   return next
 }
 
-export function listRecords(limit = 200): ApprovalRecord[] {
-  return read().records.slice(-limit).reverse()
+/** MCP 信任：首次连接确认后整组放行；撤销信任下次就要重新确认 */
+export function mcpTrusted(): string[] {
+  return read().mcpTrusted
+}
+
+export function isMcpTrusted(id: string): boolean {
+  return read().mcpTrusted.includes(id)
+}
+
+export function setMcpTrust(id: string, trusted: boolean): string[] {
+  const data = read()
+  data.mcpTrusted = trusted ? Array.from(new Set([...data.mcpTrusted, id])) : data.mcpTrusted.filter((x) => x !== id)
+  write(data)
+  return data.mcpTrusted
+}
+
+export function listRecords(limit = 200): ApprovalRecord[] {  return read().records.slice(-limit).reverse()
 }
 
 export function clearRecords() {
@@ -152,16 +169,26 @@ export function resolveApproval(id: string, decision: ApprovalDecision): { ok: b
   const p = pending.get(id)
   if (!p) return { ok: false, message: '该审批已超时或已结束（不在这里重复放行）' }
   const { req } = p
-  const hit = dangerousHit(req.command)
-  // 写前预览（kind='diff'）不存在"始终允许"：每次覆盖要单独看，
-  // 真收到 always 也只当本次允许，不往白名单里塞路径
-  const whitelistable = req.kind !== 'diff' && !hit
-  const rule = decision === 'always' && whitelistable ? rulesToAdd(req.uncovered?.length ? req.uncovered : [req.command]) : undefined
-  if (rule?.length && req.agentId) addRules(req.agentId, rule)
-  pushRecord({
-    ...toRecord(req, decision),
-    ...(rule?.length ? { rule: rule.join(' ｜ ') } : hit && decision === 'always' ? { rule: `危险形态不写白名单（${hit}）` } : decision === 'always' && req.kind === 'diff' ? { rule: '写前预览不适用白名单，本次仅放行这一次覆盖' } : {})
-  })
+  const hit = req.kind === 'mcp' || req.kind === 'diff' ? null : dangerousHit(req.command)
+  // 三种请求各有不同的"始终允许"含义：
+  // 命令 = 把片段写进该 Agent 白名单；MCP = 信任这个 server（整组放行）；
+  // 写前预览 = 不适用，一次覆盖一次问，真收到 always 也只当本次允许
+  let ruleNote: string | undefined
+  if (decision === 'always' && req.kind === 'mcp' && req.mcpServerId) {
+    setMcpTrust(req.mcpServerId, true)
+    ruleNote = `已信任 MCP server ${req.command}`
+  } else if (decision === 'always' && req.kind === 'diff') {
+    ruleNote = '写前预览不适用白名单，本次仅放行这一次覆盖'
+  } else if (decision === 'always' && hit) {
+    ruleNote = `危险形态不写白名单（${hit}）`
+  } else if (decision === 'always') {
+    const rule = rulesToAdd(req.uncovered?.length ? req.uncovered : [req.command])
+    if (rule.length && req.agentId) {
+      addRules(req.agentId, rule)
+      ruleNote = rule.join(' ｜ ')
+    }
+  }
+  pushRecord({ ...toRecord(req, decision), ...(ruleNote ? { rule: ruleNote } : {}) })
   p.resolve(decision)
   return { ok: true }
 }

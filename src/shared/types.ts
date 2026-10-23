@@ -56,6 +56,8 @@ export interface ToolGrant {
   commandPolicy?: 'ask' | 'auto'
   /** 写前预览：覆盖已有文件前先给出行级 diff 让人确认（默认关，工具循环里逐次弹窗很吵） */
   previewWrites?: boolean
+  /** 该 Agent 勾选启用的 MCP server id（不勾 = 这个 Agent 看不到任何 MCP 工具） */
+  mcpServerIds?: string[]
 }
 
 /** 命令审批的人工裁决结果 */
@@ -77,10 +79,14 @@ export interface ApprovalRequest {
   /** 未被规则覆盖的命令片段（如实指出到底是哪一段没过） */
   uncovered?: string[]
   ts: number
-  /** 'command'（默认）= 命令审批；'diff' = 写前预览，界面不提示"始终允许" */
-  kind?: 'command' | 'diff'
+  /** 'command'（默认）= 命令审批；'diff' = 写前预览（不提示"始终允许"）；'mcp' = 首次连接一个 MCP server */
+  kind?: 'command' | 'diff' | 'mcp'
   /** kind='diff' 时的行级 diff */
   diff?: string
+  /** kind='mcp' 时：这个 server 暴露的工具清单（放行前必须看得见） */
+  mcpTools?: { name: string; description?: string }[]
+  /** kind='mcp' 时：要记住信任的 server id */
+  mcpServerId?: string
 }
 
 /** 审批历史条目（裁决落盘，事后可审计） */
@@ -416,12 +422,8 @@ export interface AppConfig {
   skills?: Skill[]
   /** 工具前后 Hook（用户在设置里配置；开启即等于让 AgentHub 替你执行这些命令） */
   hooks?: HookRule[]
-  /**
-   * 内置单价是手写快照（只收录有公开价格的模型，查不到就不折算金额）。
-   * 这里记的是最近一次核对官方价目页的时间；填自填单价时也会刷新。
-   * 它不是"实时价格"，只是提醒这个数有多旧。
-   */
-  priceCheckedAt?: number
+  /** MCP server 全局列表（各 Agent 在工具面板勾选启用；信任标记在主进程侧） */
+  mcpServers?: McpServer[]
   /**
    * 自定义单价（元 / 1M tokens）：内置表是手写快照，价格变了或没收录的模型由你自己填，
    * 带填写日期，界面据此说明金额是按哪份数据折算的。
@@ -576,6 +578,36 @@ export interface HookRun {
   timedOut?: boolean
   /** stdout/stderr 摘要（截断后） */
   output?: string
+}
+
+/**
+ * MCP server 配置（tools-only：只用它提供的工具，不接它的 prompts/resources）。
+ * 第一版只支持 stdio：本机拉起一条命令，按换行分隔的 JSON-RPC 通信。
+ * 远程 HTTP/SSE 刻意不做——那要多一套鉴权与网络风险。
+ * 信任标记不在这里：它存在主进程的 approvals.json，渲染层改不动，
+ * 免得配置通道变成"自我授权"。
+ */
+export interface McpServer {
+  id: string
+  name: string
+  /** 整条启动命令（shell 语法） */
+  command: string
+  /** 附加环境变量 */
+  env?: Record<string, string>
+  /** 缺省视为启用 */
+  enabled?: boolean
+  /** initialize / tools/list / tools/call 的超时（毫秒，默认 15 秒） */
+  timeoutMs?: number
+  createdAt?: number
+}
+
+/** 一次 MCP 连接探测的结果（设置页"连接并查看工具"用） */
+export interface McpProbe {
+  ok: boolean
+  message: string
+  tools?: { name: string; description?: string }[]
+  serverTitle?: string
+  serverVersion?: string
 }
 
 /** 长期记忆条目（区别于单次任务记录） */export interface MemoryEntry {

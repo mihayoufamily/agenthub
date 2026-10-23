@@ -234,6 +234,12 @@
 .approval-meta > div { display: flex; gap: 8px; }
 .approval-meta b { flex: none; width: 88px; font-weight: 600; color: var(--text-3); }
 .approval-note { margin-top: 10px; font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
+.approval-tools { margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); max-height: 180px; overflow-y: auto; }
+.approval-tools-title { font-size: 12px; font-weight: 600; margin-bottom: 6px; color: var(--text-2); }
+.approval-tool { display: flex; flex-direction: column; gap: 1px; padding: 3px 0; border-bottom: 1px dashed var(--border); font-size: 11.5px; }
+.approval-tool:last-child { border-bottom: 0; }
+.approval-tool code { font-family: var(--mono, ui-monospace, Consolas, monospace); color: var(--text-2); word-break: break-all; }
+.approval-tool span { color: var(--text-3); line-height: 1.5; }
 
 /* ---- 改动检查点（diff 与回滚） ---- */
 .cp-bar { margin-top: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); }

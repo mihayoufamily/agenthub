@@ -3,6 +3,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import http from 'node:http'
 
 const { execTool } = await import('../out/main/tools.js')
@@ -617,6 +618,78 @@ console.log('\n[M] Hooks：pre 可否决 / post 只观察 / 参数只走环境�
   const nomatch = await hooksExec('read_file', { path: 'keep.txt' }, [H('q2', 'pre', 'silent.js', { match: '^write_file$' })])
   ok('不匹配该工具的规则不执行', nomatch.ok && !existsSync(join(root, 'silent.txt')))
   rmSync(root, { recursive: true, force: true })
+}
+
+// ---------- N. MCP 客户端（stdio，tools-only） ----------
+console.log('\n[N] MCP：连得上、列得出、调用得到，坏消息不打断协议流')
+{
+  const mc = await import('../out/main/mcp.js')
+  const node = process.execPath
+  // 绝对路径：不依赖跑批时的 cwd
+  const MOCK = fileURLToPath(new URL('./mock-mcp-server.mjs', import.meta.url))
+  const srv = (extra = {}) => ({ id: 'mock', name: 'Mock MCP', command: `"${node}" "${MOCK}"`, timeoutMs: 8000, ...extra })
+  const waitExit = async (c, ms = 3000) => {
+    const s0 = Date.now()
+    while (c.running && Date.now() - s0 < ms) await new Promise((r) => setTimeout(r, 100))
+    return !c.running
+  }
+
+  const p = await mc.probeServer(srv())
+  ok('探到 server 与工具清单', p.ok === true && (p.tools?.length ?? 0) === 3 && p.serverTitle === 'Mock MCP', JSON.stringify(p).slice(0, 160))
+
+  const { client } = await mc.McpClient.connect(srv({ id: 'mock2' }))
+  const tools = await client.listTools()
+  ok('tools/list 拿到 3 个工具', tools.length === 3 && tools.some((t) => t.name === 'no_schema'), tools.map((t) => t.name).join(','))
+  const echoed = await client.callTool('echo', { text: '你好' })
+  ok('tools/call 正常返回文本', echoed.ok === true && echoed.output === 'echo:你好', echoed.output)
+  const noSchema = await client.callTool('no_schema', {})
+  ok('没有 inputSchema 的工具照样能调', noSchema.ok && noSchema.output.includes('ok-no-schema'), noSchema.output)
+  const boom = await client.callTool('boom', {})
+  ok('isError 的工具报成失败而不是当成功', boom.ok === false && boom.output.includes('故意失败'), boom.output)
+  let rpcErr = ''
+  try {
+    await client.callTool('不存在', {})
+  } catch (e) {
+    rpcErr = e.message
+  }
+  ok('server 返回 JSON-RPC 错误时如实抛出', rpcErr.includes('未知工具'), rpcErr)
+  client.close()
+  ok('close 后 server 进程真的退出（不泄漏后台进程）', await waitExit(client))
+  let afterClose = ''
+  try {
+    await client.callTool('echo', { text: 'x' })
+  } catch (e) {
+    afterClose = e.message
+  }
+  ok('close 之后再调用立刻失败而不是挂住', /连接已关闭|未启动|退出/.test(afterClose), afterClose)
+
+  // 超时：server 30 秒才回，客户端按 timeoutMs 截住，不能把整个对话挂住
+  const { client: slow } = await mc.McpClient.connect(srv({ id: 'mock3', timeoutMs: 500 }))
+  const t0 = Date.now()
+  let timed = ''
+  try {
+    await slow.callTool('sleep', {})
+  } catch (e) {
+    timed = e.message
+  }
+  slow.close()
+  ok('工具调用超时有界并报清原因', timed.includes('超时') && Date.now() - t0 < 3000, `${timed} / ${Date.now() - t0}ms`)
+
+  // 命令为空 / 命令不存在：要如实失败，不能挂死
+  const bad = await mc.probeServer({ id: 'x', name: '空', command: '' })
+  ok('没配命令时如实失败', bad.ok === false && bad.message.includes('没有启动命令'), bad.message)
+  const missing = await mc.probeServer({ id: 'x', name: '缺', command: '"__no_such_binary_xyz__" --version', timeoutMs: 4000 })
+  ok('命令起不来时如实报启动失败（不假装连上了）', missing.ok === false && missing.message.includes('连接失败'), missing.message)
+
+  // 函数表：名字要符合 OpenAI 的字符集，且能反查回 server+工具
+  const mk = (id, name, toolNames) => ({ client: { server: { id, name, command: 'x' } }, tools: toolNames.map((n) => ({ name: n })) })
+  const wired = mc.mcpToolDefs([mk('srv-a', 'A', ['get file', 'list']), mk('srv-b', 'B', ['get file'])])
+  const names = wired.defs.map((d) => d.function.name)
+  ok('工具名符合函数字符集且各自可寻址', names.every((n) => /^[A-Za-z0-9_-]{1,64}$/.test(n)) && Object.keys(wired.routes).length === 3, names.join(','))
+  ok('描述缺省时补一句能看懂的', wired.defs.every((d) => d.function.description.length > 0))
+  ok('schema 缺省补空对象（严格接口才不会报参数缺失）', wired.defs.some((d) => d.function.parameters?.type === 'object'))
+  ok('路由能回到正确的 server 与工具', Object.entries(wired.routes).some(([, r]) => r.client.server.id === 'srv-b' && r.tool === 'get file'))
+  ok('工具清单不是数组时不炸', mc.mcpToolDefs([]).defs.length === 0)
 }
 
 rmSync(tmp, { recursive: true, force: true })

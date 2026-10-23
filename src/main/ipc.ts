@@ -6,14 +6,13 @@ import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
-import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride } from '../shared/types'
+import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer } from '../shared/types'
 import { configurePriceOverrides } from '../shared/overrides'
 import { validateHook } from './hooks'
-import type { HookRule } from '../shared/types'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
+import * as mcp from './mcp'
 import * as checkpoints from './checkpoints'
-import type { ApprovalDecision } from '../shared/types'
 import { readConventions } from './conventions'
 import { checkUpdate } from './updater'
 import * as ledger from './ledger'
@@ -86,6 +85,9 @@ function hostOf(baseUrl: string): string {
 
 /** 注册全部 IPC 通道。getStore/getWin 为延迟引用，避免初始化顺序问题。 */
 export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow | null) {
+  /** reqId -> 关掉这条请求的 MCP 连接；流结束、报错、取消都要收掉，不留后台进程 */
+  const mcpSessions = new Map<string, () => void>()
+
   /**
    * 命令审批闸门：判定与裁决都在主进程，界面只是"问一个人"的通道。
    * 请求走 model:event 的 approval 事件下发，点完由 approval:decide 回来落地。
@@ -215,6 +217,23 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   /** 当前应用菜单的加速键清单（验证脚本据此确认 Ctrl+R 刷新等默认键已不再注册） */
+  // ---------- MCP server（tools-only，stdio） ----------
+  ipcMain.handle('mcp:list', () => getStore().getConfig().mcpServers ?? [])
+  ipcMain.handle('mcp:set', (_e, list: McpServer[]) => {
+    const clean = (Array.isArray(list) ? list : [])
+      .filter((s) => s && typeof s.command === 'string' && s.command.trim() && typeof s.name === 'string' && s.name.trim())
+      .slice(0, 20)
+      .map((s) => ({ ...s, id: s.id || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` }))
+    getStore().setMcpServers(clean)
+    // 删掉的 server 要把信任一起清掉：留着一条没人认领的信任，将来同 id 复用就自动放行了
+    const keep = new Set(clean.map((s) => s.id))
+    for (const id of approvals.mcpTrusted()) if (!keep.has(id)) approvals.setMcpTrust(id, false)
+    return { ok: true, list: clean }
+  })
+  ipcMain.handle('mcp:probe', (_e, server: McpServer) => mcp.probeServer(server))
+  ipcMain.handle('mcp:trust', () => approvals.mcpTrusted())
+  ipcMain.handle('mcp:trust:set', (_e, id: string, trusted: boolean) => ({ ok: true, list: approvals.setMcpTrust(String(id ?? ''), !!trusted) }))
+
   // ---------- 工具 Hook（用户在设置里配置） ----------
   ipcMain.handle('hooks:list', () => getStore().getConfig().hooks ?? [])
   ipcMain.handle('hooks:set', (_e, list: HookRule[]) => {
@@ -379,8 +398,87 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       }
     }
     const userHooks = stored.hooks ?? []
+    // ---------- MCP：只连这个 Agent 勾选且启用的 server，首次连接要先确认 ----------
+    // 探完工具清单再问人，这样"放行"时看到的是它到底能干什么，而不是一个 server 名字。
+    const selected = (grant?.mcpServerIds ?? [])
+      .map((id) => (stored.mcpServers ?? []).find((s) => s.id === id))
+      .filter((s): s is McpServer => !!s && s.enabled !== false)
+    const clients: mcp.McpClient[] = []
+    const wiringEntries: { client: mcp.McpClient; tools: mcp.McpToolInfo[] }[] = []
+    for (const s of selected) {
+      try {
+        const { client } = await mcp.McpClient.connect(s)
+        clients.push(client)
+        const tools = await client.listTools()
+        if (!approvals.isMcpTrusted(s.id)) {
+          const d = await approvals.requestApproval(
+            {
+              id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+              reqId,
+              tool: 'mcp',
+              command: s.command,
+              dir: grant?.dir ?? '',
+              reason: `首次连接 MCP server「${s.name}」：它的工具会以这条命令的权限在本机执行`,
+              uncovered: [],
+              kind: 'mcp',
+              mcpServerId: s.id,
+              mcpTools: tools.map((t) => ({ name: t.name, ...(t.description ? { description: t.description.slice(0, 160) } : {}) })),
+              ts: Date.now()
+            },
+            (req) => getWin()?.webContents.send('model:event', { reqId, type: 'approval', approval: req })
+          )
+          if (d === 'deny') {
+            client.close()
+            clients.pop()
+            continue
+          }
+        }
+        if (tools.length) wiringEntries.push({ client, tools })
+      } catch (e) {
+        // 连不上不该让整次对话失败：如实报一条 notice，界面与账本都看得到
+        getWin()?.webContents.send('model:event', { reqId, type: 'notice', text: `MCP「${s.name}」连接失败：${(e as Error).message}` })
+      }
+    }
+    const wired = wiringEntries.length ? mcp.mcpToolDefs(wiringEntries) : undefined
+    const mcpWiring: openai.McpWiring | undefined = wired
+      ? {
+          defs: wired.defs,
+          routes: Object.fromEntries(
+            Object.entries(wired.routes).map(([name, route]) => [
+              name,
+              {
+                label: `mcp:${route.client.server.name}:${route.tool}`,
+                call: async (argsJson: string, signal?: AbortSignal) => {
+                  if (signal?.aborted) return { ok: false, output: '已取消：请求被用户停止' }
+                  let args: Record<string, unknown> = {}
+                  try {
+                    args = argsJson.trim() ? (JSON.parse(argsJson) as Record<string, unknown>) : {}
+                  } catch {
+                    return { ok: false, output: `参数不是合法 JSON：${argsJson.slice(0, 200)}` }
+                  }
+                  try {
+                    const r = await route.client.callTool(route.tool, args)
+                    return { ok: r.ok, output: `MCP 工具 ${route.tool}：${r.output}` }
+                  } catch (e) {
+                    return { ok: false, output: `MCP 调用失败：${(e as Error).message}` }
+                  }
+                }
+              }
+            ])
+          )
+        }
+      : undefined
+    const closeMcp = () => {
+      for (const c of clients) {
+        try { c.close() } catch { /* noop */ }
+      }
+      mcpSessions.delete(reqId)
+    }
+    if (clients.length) mcpSessions.set(reqId, closeMcp)
     openai.chatStream(cfg, key, reqId, messages, (ev) => {
       tap(ev)
+      // 一条请求一个连接：流结束（或报错）就关掉 server 进程，不留跨请求的活进程
+      if (ev.type === 'done' || ev.type === 'error') closeMcp()
       getWin()?.webContents.send('model:event', ev)
     }, grant, grant ? {
       approver: makeApprover(reqId, {
@@ -396,7 +494,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
         ...(opts?.runId ? { runId: opts.runId } : {}),
         reqId
       }
-    } : undefined)
+    } : undefined, mcpWiring)
     return { ok: true, checkpoint }
   })
 
@@ -404,6 +502,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     openai.cancelStream(reqId)
     // 挂在这条流上的审批一并按拒绝收掉：否则界面留一张没人认领的弹窗
     approvals.denyPendingFor(reqId)
+    // MCP 连接也跟着关：取消后不该有 server 进程还在后台跑
+    mcpSessions.get(reqId)?.()
     return { ok: true }
   })
 

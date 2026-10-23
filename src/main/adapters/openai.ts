@@ -1,5 +1,14 @@
 import type { CustomModelConfig, ModelTestResult, ToolGrant, ToolCall, UsageInfo } from '../../shared/types'
-import { execTool, toolDefs, MAX_OUTPUT, type ToolHooks } from '../tools'
+import { execTool, toolDefs, MAX_OUTPUT, type ToolHooks, type ToolExecResult } from '../tools'
+
+/**
+ * MCP 工具接线：函数表（给模型的 schema）+ 路由表（工具名 → 这个 server 的执行体）。
+ * 连接、信任确认与关流都由主进程侧负责，适配层只负责"模型点了这个工具就跑它"。
+ */
+export interface McpWiring {
+  defs: unknown[]
+  routes: Record<string, { label: string; call: (argsJson: string, signal?: AbortSignal) => Promise<ToolExecResult> }>
+}
 
 /**
  * OpenAI 兼容接口适配层（接入"模型 API"而非"现成 Agent"）。
@@ -300,11 +309,14 @@ export function chatStream(
   messages: IncomingMsg[],
   onEvent: (e: ChatChunkEvent) => void,
   grant?: ToolGrant,
-  hooks?: ToolHooks
+  hooks?: ToolHooks,
+  mcp?: McpWiring
 ) {
   const ctrl = new AbortController()
   activeStreams.set(reqId, ctrl)
-  const tools = grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb) : undefined
+  // 内置工具（有沙箱授权才有）+ MCP 工具合并成一张函数表；一个都没有就不带 tools 字段
+  const toolList = [...(grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb) : []), ...(mcp?.defs ?? [])]
+  const tools = toolList.length ? toolList : undefined
 
   void (async () => {
     try {
@@ -372,10 +384,16 @@ export function chatStream(
             activeStreams.delete(reqId)
             return
           }
-          const call: ToolCall = { id: uid('tool'), tool: tc.name, args: argsSummary(tc.args), status: 'running', ts: Date.now() }
+          // MCP 工具走 server 自己的执行体，不进沙箱；其余仍是 AgentHub 的工具层
+          const route = mcp?.routes[tc.name]
+          const call: ToolCall = { id: uid('tool'), tool: route ? route.label : tc.name, args: argsSummary(tc.args), status: 'running', ts: Date.now() }
           onEvent({ reqId, type: 'tool', toolCall: call })
-          // 取消信号透传：正在执行的命令/联网可被立即中断
-          const res = await execTool(grant, tc.name, tc.args, ctrl.signal, hooks)
+          // 取消信号透传：正在执行的命令/联网/MCP 调用可被立即中断
+          const res: ToolExecResult = route
+            ? await route.call(tc.args, ctrl.signal)
+            : grant
+              ? await execTool(grant, tc.name, tc.args, ctrl.signal, hooks)
+              : { ok: false, output: '拒绝：该 Agent 未启用 AgentHub 文件工具（只配了 MCP 工具时不能调它）' }
           const done: ToolCall = {
             ...call,
             status: res.ok ? 'done' : 'error',

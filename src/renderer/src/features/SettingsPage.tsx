@@ -1,10 +1,10 @@
-// 设置页：十分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 命令审批 / 工具 Hook / 快捷键 / 数据 / 关于）
+// 设置页：十一分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 命令审批 / 工具 Hook / MCP / 快捷键 / 数据 / 关于）
 import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
-import type { Skill, HotkeyAction, ApprovalRecord, HookRule } from '@shared/types'
+import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe } from '@shared/types'
 import { validateHook } from '@shared/hooks'
 import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
 import { Icon } from '../components/Icons'
@@ -13,7 +13,7 @@ import { UsagePanel } from '../components/UsagePanel'
 import { bridge } from '../lib/ipc'
 import { fmtTime, fmtTokens, uid, cls, formatKeyBinding, validateKeyBinding } from '../lib/utils'
 
-type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'approvals' | 'hooks' | 'shortcuts' | 'data' | 'about'
+type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'approvals' | 'hooks' | 'mcp' | 'shortcuts' | 'data' | 'about'
 
 const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'appearance', label: '外观', icon: 'info' },
@@ -23,6 +23,7 @@ const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'usage', label: '用量统计', icon: 'file' },
   { key: 'approvals', label: '命令审批', icon: 'shield' },
   { key: 'hooks', label: '工具 Hook', icon: 'terminal' },
+  { key: 'mcp', label: 'MCP', icon: 'swap' },
   { key: 'shortcuts', label: '快捷键', icon: 'send' },
   { key: 'data', label: '数据', icon: 'folder' },
   { key: 'about', label: '关于', icon: 'info' }
@@ -69,6 +70,7 @@ export function SettingsPage() {
             {section === 'usage' && <UsageSection />}
             {section === 'approvals' && <ApprovalSection />}
             {section === 'hooks' && <HookSection />}
+            {section === 'mcp' && <McpSection />}
             {section === 'shortcuts' && <ShortcutsSection />}
             {section === 'data' && <DataSection />}
             {section === 'about' && <AboutSection />}
@@ -570,6 +572,112 @@ function HookSection() {
         <Button variant="primary" onClick={() => void add()}>添加</Button>
       </div>
       {err && <div style={{ fontSize: 12, color: 'var(--danger)', marginTop: 6 }} data-hook-err>{err}</div>}
+    </div>
+  )
+}
+
+/* ---- MCP server（tools-only + stdio） ---- */
+const EMPTY_MCP = { name: '', command: '' }
+
+function McpSection() {
+  const [list, setList] = useState<McpServer[]>([])
+  const [trusted, setTrusted] = useState<string[]>([])
+  const [draft, setDraft] = useState(EMPTY_MCP)
+  const [probes, setProbes] = useState<Record<string, McpProbe>>({})
+  const [busy, setBusy] = useState('')
+
+  const load = () => {
+    void bridge.mcp.list().then(setList)
+    void bridge.mcp.trusted().then(setTrusted)
+  }
+  useEffect(load, [])
+
+  const save = async (next: McpServer[]) => {
+    const r = await bridge.mcp.set(next)
+    setList(r.list)
+    return r.list
+  }
+
+  const patch = (id: string, p: Partial<McpServer>) => {
+    void save(list.map((s) => (s.id === id ? { ...s, ...p } : s)))
+  }
+
+  const add = async () => {
+    if (!draft.name.trim() || !draft.command.trim()) {
+      useUi.getState().toast('名称与启动命令都要填', 'warn')
+      return
+    }
+    const next = await save([...list, { id: uid('mcp'), name: draft.name.trim().slice(0, 40), command: draft.command.trim(), enabled: true, createdAt: Date.now() }])
+    setDraft(EMPTY_MCP)
+    // 加完就探一次：列不到工具的话，第一次真正调用时会连不上，早知道比晚知道好
+    const first = next[next.length - 1]
+    if (first) void probe(first)
+  }
+
+  const probe = async (s: McpServer) => {
+    setBusy(s.id)
+    const r = await bridge.mcp.probe(s)
+    setProbes((p) => ({ ...p, [s.id]: r }))
+    setBusy('')
+  }
+
+  const usedBy = (id: string) => useAgents.getState().agents.filter((a) => a.tools?.mcpServerIds?.includes(id)).map((a) => a.name)
+
+  return (
+    <div className="set-group" data-testid="mcp-settings">
+      <div className="group-title">MCP server</div>
+      <div className="desc" style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 10 }}>
+        只接 <b>tools</b>：把外部 MCP server 的工具并进模型可调用的清单，不接它的 prompts/resources，也不让它往上下文里塞系统提示。
+        第一版<b>只支持 stdio</b>（本机拉起一条命令，换行分隔的 JSON-RPC）；远程 HTTP/SSE 没做。
+        <br />
+        <b style={{ color: 'var(--danger)' }}>风险：</b>MCP server 就是本机任意代码执行，它的工具以那条命令的权限运行。
+        首次连接会弹窗要你确认；点「始终信任」后这个 server 的工具整组放行（下面可撤销）。
+        哪些 Agent 能用，在各自「文件/命令工具」面板里勾选，没勾的看不到。
+      </div>
+
+      {list.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginBottom: 8 }}>（还没配 MCP server）</div>}
+      {list.map((s) => {
+        const p = probes[s.id]
+        const users = usedBy(s.id)
+        return (
+          <div key={s.id} data-mcp-row style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Switch on={s.enabled !== false} onChange={(v) => patch(s.id, { enabled: v })} label={`启用 ${s.name}`} />
+              <b style={{ fontSize: 13 }}>{s.name}</b>
+              <Badge tone={trusted.includes(s.id) ? 'ok' : 'warn'}>{trusted.includes(s.id) ? '已信任' : '未信任（首次连接要确认）'}</Badge>
+              {users.length > 0 && <span style={{ fontSize: 11.5, color: 'var(--text-3)' }}>被 {users.join('、')} 勾选</span>}
+              <span style={{ flex: 1 }} />
+              <Button variant="ghost" onClick={() => void probe(s)} disabled={busy === s.id}>{busy === s.id ? '连接中…' : '连接并查看工具'}</Button>
+              {trusted.includes(s.id) && (
+                <Button variant="ghost" onClick={() => void bridge.mcp.setTrust(s.id, false).then((r) => setTrusted(r.list))}>撤销信任</Button>
+              )}
+              <Button variant="ghost" onClick={() => void save(list.filter((x) => x.id !== s.id))}>删除</Button>
+            </div>
+            <code style={{ display: 'block', fontSize: 11.5, marginTop: 4, wordBreak: 'break-all', color: 'var(--text-2)' }}>{s.command}</code>
+            {p && (
+              <div style={{ marginTop: 4, fontSize: 11.5, color: p.ok ? 'var(--text-3)' : 'var(--danger)' }} data-mcp-probe={s.id}>
+                {p.message}
+                {p.ok && !!p.tools?.length && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                    {p.tools.map((t) => (
+                      <code key={t.name} title={t.description} style={{ fontSize: 11, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 999 }}>
+                        {t.name}
+                      </code>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      <div className="group-title" style={{ marginTop: 12 }}>新增一个</div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input placeholder="名称" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} style={{ width: 140, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-name" />
+        <input placeholder='启动命令，例如 node "C:\path\to\server.js" 或 npx -y @some/mcp-server' value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-command" />
+        <Button variant="primary" onClick={() => void add()}>添加并探测</Button>
+      </div>
     </div>
   )
 }

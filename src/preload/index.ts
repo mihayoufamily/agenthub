@@ -3,7 +3,7 @@ import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
   LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord,
-  CheckpointManifest, RollbackResult, FileChange, PriceOverride, HookRule
+  CheckpointManifest, RollbackResult, FileChange, PriceOverride, HookRule, McpServer, McpProbe
 } from '../shared/types'
 
 /**
@@ -120,6 +120,14 @@ const api = {
     remove: (id: string) => ipcRenderer.invoke('skills:remove', id) as Promise<{ ok: true }>,
     /** 导入 Agent Skills 标准目录（含 SKILL.md） */
     importDir: () => ipcRenderer.invoke('skills:importDir') as Promise<{ ok: boolean; skill?: Skill; message?: string }>
+  },
+  /** MCP server（tools-only + stdio）：配置在 config，信任标记在主进程 approvals.json */
+  mcp: {
+    list: () => ipcRenderer.invoke('mcp:list') as Promise<McpServer[]>,
+    set: (list: McpServer[]) => ipcRenderer.invoke('mcp:set', list) as Promise<{ ok: boolean; list: McpServer[] }>,
+    probe: (server: McpServer) => ipcRenderer.invoke('mcp:probe', server) as Promise<McpProbe>,
+    trusted: () => ipcRenderer.invoke('mcp:trust') as Promise<string[]>,
+    setTrust: (id: string, trusted: boolean) => ipcRenderer.invoke('mcp:trust:set', id, trusted) as Promise<{ ok: boolean; list: string[] }>
   },
   /** 工具前后 Hook：pre 可否决调用，post 只观察/后处理 */
   hooks: {

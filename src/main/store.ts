@@ -109,6 +109,12 @@ export class Store {
     this.writeJson(this.dirs.config, cfg)
   }
 
+  setMcpServers(list: AppConfig['mcpServers']) {
+    const cfg = this.getConfig()
+    cfg.mcpServers = list
+    this.writeJson(this.dirs.config, cfg)
+  }
+
   /** 导出配置：剥离一切敏感信息（API Key 只在凭据存储，本方法额外确保不含 keyId 明文密钥） */
   exportConfig(): string {
     const cfg = JSON.parse(JSON.stringify(this.getConfig())) as AppConfig

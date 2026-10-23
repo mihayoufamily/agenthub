@@ -1,6 +1,6 @@
 // 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型管理、用量显示
 import React, { useEffect, useRef, useState } from 'react'
-import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel } from '@shared/types'
+import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel, McpServer } from '@shared/types'
 import { useSessions } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
@@ -710,6 +710,12 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   // 白名单存在主进程 approvals.json（不在 agent config 里）：渲染层只能显式提交新规则
   const [rules, setRules] = useState<string[]>([])
   const [ruleDraft, setRuleDraft] = useState('')
+  // MCP：server 列表是全局的，这里只做"这个 Agent 能用哪几个"的勾选
+  const [mcpList, setMcpList] = useState<McpServer[]>([])
+  const [mcpIds, setMcpIds] = useState<string[]>(agent.tools?.mcpServerIds ?? [])
+  useEffect(() => {
+    void bridge.mcp.list().then(setMcpList)
+  }, [])
   useEffect(() => {
     let alive = true
     void bridge.approval.rules(agent.id).then((r) => {
@@ -739,7 +745,8 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
       allowWeb,
       ...(fullAccess ? { access: 'full' as const } : {}),
       ...(allowCommands ? { commandPolicy } : {}),
-      ...(previewWrites ? { previewWrites: true } : {})
+      ...(previewWrites ? { previewWrites: true } : {}),
+      ...(mcpIds.length ? { mcpServerIds: mcpIds } : {})
     }
     updateAgent(agent.id, { tools })
     void bridge.approval.setRules(agent.id, rules.map((r) => r.trim()).filter(Boolean))
@@ -905,6 +912,28 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
                 </div>
               </span>
             </label>
+            {mcpList.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '10px 12px' }} data-testid="mcp-grant-block">
+                <div style={{ fontSize: 12.5, fontWeight: 600 }}>MCP 工具（这个 Agent 能用哪几个）</div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.6 }}>
+                  勾选只是"能不能看到这个 server 的工具"，第一次连它仍会弹窗确认；列表与信任都在「设置 → MCP」。
+                </div>
+                {mcpList.map((s) => {
+                  const on = mcpIds.includes(s.id)
+                  return (
+                    <label key={s.id} style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: 'pointer', fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={(e) => setMcpIds(on ? mcpIds.filter((x) => x !== s.id) : [...mcpIds, s.id])}
+                      />
+                      <span>{s.name}</span>
+                      {s.enabled === false && <span style={{ color: 'var(--warn)', fontSize: 11.5 }}>（在设置里已停用）</span>}
+                    </label>
+                  )
+                })}
+              </div>
+            )}
             <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
               <input type="checkbox" checked={allowWeb} onChange={(e) => setAllowWeb(e.target.checked)} style={{ marginTop: 3 }} />
               <span style={{ lineHeight: 1.6 }}>
