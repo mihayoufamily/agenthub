@@ -18,6 +18,8 @@ jobs:
       - run: npm ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # 注入面（no-danger / eval / new Function / 隐式 eval）由 ESLint 机器拦；0 error 为过，warn 不拦
+      - run: npm run lint
       - run: npm run build
       # 逻辑层回归：不起应用、不花额度。此前 CI 只做构建，427 条断言从未在机器上跑过
       - run: npm run verify
