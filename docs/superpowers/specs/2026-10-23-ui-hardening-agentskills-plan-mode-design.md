@@ -63,6 +63,7 @@
 - **数据模型**：`McpServer`（`src/shared/types.ts:621`）加 `launch?: { bin: string; args: string[] }` 与 `formatVersion?: 2`；`command: string` 降级为只读旧字段。
 - **迁移**：读盘时 `command && !launch` → 置 `invalid_legacy_command` 状态，**禁用但不删除**；`probeServer` 与 connect 统一返回该错误码（界面按错误码渲染，不靠文案匹配），并给「重填」按钮直达表单。
 - **表单**：保持**单个命令输入框**，提交时用已有的引号感知 `splitSegments`（`src/shared/approvals.ts`）切成 argv 数组存下，旁边把 `JSON.stringify([bin, ...args])` 原样摊出供核对。
+  - **实现时改判（2026-10-24 · 控制器裁决 · Ruling U：本条原话一字未改，只在这里加注）**：上线的**不是** `splitSegments`，而是新建的 `src/shared/argv.ts` 里的 `tokenizeCommand`。理由是实测出来的功能差别，不是口味：`splitSegments` 切的是"这条命令由几段子命令组成"（按 `&& || ; |` 断开），**分段符留在结果里、引号也原样保留**，把它当 argv 用会切出 `"C:\Program Files\nodejs\npx.CMD"` 这种带引号的元素，`launch.bin` 直接不可执行；`tokenizeCommand` 才是"按空白切、引号内空白算参数内容、引号本身剥掉"的那一个（`argv.ts:20`）。另附一条同源纠正：`splitSegments` 在 `approvals.ts:18` 至今只服务命令审批，本批没有把它拉去复用，也就没有"一处改动同时打断审批判定"的风险。
   - 否决"一行一个参数"的逐格填写：Windows 上 `npx` 的真身是 `"C:\Program Files\nodejs\npx.CMD" node_modules\npm\bin\npx-cli.js -y <pkg>`，含空格路径 + 含空格参数，逐格手写不可用。
 - **`.cmd` 家族的启动路径**：定为方案 1——用 `comspec /d /c` 显式包一层并按 argv 转义，**只对 `.cmd/.bat` 家族开**，界面上标出"此 server 经 cmd 启动"。执行前有一个**实测前置步**：在本机 Electron 37 内确认 `.bat/.cmd` 在 `shell: false` 下的真实失败形态（ENOENT 还是 EINVAL）；若实测表明 `.cmd` 可直传，则改为真 `shell: false`（方案 2 的简化），并删掉界面上的 cmd 标注。**两种结果都算达成目标，但承诺措辞必须跟实测一致**——不能既支持 npx 又声称纯 `shell: false`。
 - **断言**：旧格式记录不产生任何子进程；命令串里的第二段（用 sentinel 文件 `&& node -e "fs.writeFileSync(...)"`，不用 `calc`，保证 CI 可重复）**不落地**。
@@ -89,14 +90,17 @@
 
 - 每条 Hook 旁显示 `normalizeCommand` 归一后的指纹，**截断并脱敏**（命令里可能带 token）。
 - 指纹只用于肉眼比对，**不参与放行决策**；红字风险文案已有（`src/renderer/src/features/SettingsPage.tsx:505`），不动。
+  - **实现时改判（2026-10-24 · 控制器裁决 · Ruling U：本条原话一字未改，只在这里加注）**：上面那句"截断并脱敏"如果被读成"指纹是对**脱敏后**的串算的"，那就是错的，本批刻意改判为**两条分开的通路**——**脱敏与截断只作用于显示回显**，**指纹对 `normalizeCommand` 归一后的命令原文算**。理由：`redactSecrets` 会把凭据值整段遮成 `***`，两条只有 token 不同的命令在脱敏文本上完全一样，指纹也就一样 —— 用户换了 key 却看见指纹没变，等于这条显示用散列在它最该起作用的那一格上是瞎的。改判后"改任意一个字符（含被遮成 `***` 的凭据值）指纹就变"，而大小写与空白差异仍同指纹，与放行判定用的 `normalizeCommand` 同口径。断言钉在 `verify/fixes-check.mjs`：`显示被遮成一模一样、指纹仍不同（证明哈希不吃 redactSecrets 的输出）`，并用变异实验证明它咬得住。参与放行决策的那一半（"永不参与放行"）原样成立，未改判。
 
 ---
 
 ## 批次 B：工程配套（v0.4.0）
 
-- **B1** `ci.yml` 在 `npm run build` 后加 `npm run verify`（纯逻辑层，不起应用；PR 与 main 都跑）。现状是 CI 只有 `npm run build`，**303 条逻辑断言在 CI 上一条都没执行过**。这条收益高于引入 Vitest：`shared/approvals` 的四个规则早已有正反用例，缺的只是执行。
+- **B1** `ci.yml` 在 `npm run build` 后加 `npm run verify`（纯逻辑层，不起应用；PR 与 main 都跑）。现状是 CI 只有 `npm run build`，**逻辑断言在 CI 上一条都没执行过**（计划期此处印的是"303 条"）。落地后 CI 实际跑到的计数（2026-10-24 全量实测）：`fixes-check` **483 PASS / 0 FAIL** + `deliver` **52 PASS / 0 FAIL** = 逻辑层 **535** 条，且 `verify/run-all.mjs` 的 `SUITES` 给每套件钉了 `min` 下限（`fixes` 483 / `deliver` 52），条数一掉就红；计数不再写死在 YAML 里。这条收益高于引入 Vitest：`shared/approvals` 的四个规则早已有正反用例，缺的只是执行。
 - **B2** `npm audit --omit=dev --audit-level=high`。本机 registry 为 `registry.npmjs.org`（已确认，audit 端点可用）；失败不吞。
 - **B3** ESLint 最小集：error 只开 `react/no-danger`、`no-eval`、`no-new-func`、`no-implied-eval`，`@typescript-eslint/recommended` 全设 warn；起步必须 0 error。价值在于"渲染层注入面 0 命中"从此由机器保证，而不是每次人工复查。
+  - **这句保证在实现后被判为夸大（2026-10-24 · 最终整枝评审 ㊾ · 控制器裁决"改宣称、不改代码"；原话保留在上一条）**：这 5 条 error 规则（原文只列了 4 条，落地时补了 `react/no-danger-with-children`）**管不到** `innerHTML` 直接赋值、`window.open`、`javascript:` URL、动态 `href` —— 这些写法今天 0 命中是**人工维持**的结果，没有机器拦。`react/no-danger` 也看不见经 prop 展开传进去的 HTML。真正由机器守着的只有：JSX 里的 `dangerouslySetInnerHTML`，以及 `eval` / `new Function` / 隐式 eval。如实版本写在 README「未实现 / 已知限制 ❌」，本条以它为准。
+  - 落地后另外补上的两件事（原条目没写）：`linterOptions.noInlineConfig: true`（此前一行 `// eslint-disable-next-line no-eval` 就能静默关掉这台机器）与 `impliedEvalGlobals` 按规则实查范围校准；`verify/**`、`scripts/**` 也已上同样的 5 条 error 规则。当前基线 **0 error / 24 warn**（2026-10-24 实测）。
 - **B4** `release.yml` 平铺修正：现有 `Compress-Archive -Path release/AgentHub-win-x64` 会多套一层目录（与"解压后双击 `AgentHub.exe`"和历史包不符），且 `Compress-Archive` **不展开 glob**，改成 `-Path .../*` 会直接报错。改用 Windows 自带 bsdtar：
   `tar.exe -a -c -f AgentHub-<tag>-win-x64-portable.zip -C release/AgentHub-win-x64 .`
 - **B5** 删本机 `verify/AgentHub-v0.1.0-win-x64-portable.zip`（134MB，未跟踪；`git ls-files '*.zip'` = 0，说明仓库本来就没有二进制，`.gitignore:13` 已覆盖 `verify/*.zip`，无需再加）。**用户本人已授权删除**（决策记录 A14）。删除前先 `git status --porcelain -- <精确路径>` 确认，**只用精确路径，不用通配**。
