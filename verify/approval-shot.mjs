@@ -36,6 +36,21 @@ function waitAppGone(timeoutMs = 30000) {
   }
 }
 
+/**
+ * 修复波 B · 项 1（评审 Minor ㉜）：残留实例不是"警告一下继续跑"级别的事。
+ * 本套件末尾会把 userData 的 config.json 字节快照**回写磁盘**；只要还有一个 AgentHub 实例活着，
+ * 回写目标就可能是那个活实例正在使用的文件（它在退出时又会把自己的内存态盖回去），
+ * 于是用户的配置被留在测试中间态里。所以这里一律中止：抛错 → catch 记一条 FAIL → 非零退出，
+ * 并把 snapshotWriteAllowed 关掉，让 finally 不再碰那个文件（宁可留测试态，也不要写坏活实例）。
+ * 这条不是理论风险：Task 4 的 GREEN 复跑就是被用户 17:18 启动的 AgentHub 挡住的，
+ * 当时的行为正是 WARN 之后继续。
+ */
+function requireAppGone(who) {
+  if (waitAppGone()) return
+  snapshotWriteAllowed = false
+  throw new Error(`残留实例：${who} 30s 内没退干净，AgentHub.exe 仍在运行 —— 中止本套件，拒绝把 userData 快照回写 config.json（先确认没有别的人在用这台机器上的 AgentHub，再重跑）`)
+}
+
 // [10] 要驱动一次真 model:chat（MCP 首次连接信任弹窗在 chat 装配线上才会问人）：
 // 本地 mock OpenAI 兼容服务，与 ui-shot 同款最小形状——GET /models 供连接测试，
 // POST /chat/completions 流一段正文后收尾。
@@ -55,8 +70,12 @@ const mockLlm = http.createServer((req, res) => {
   }
   res.writeHead(404).end('{}')
 })
-await new Promise((r) => mockLlm.listen(0, '127.0.0.1', r))
-const llmBase = `http://127.0.0.1:${mockLlm.address().port}/v1`
+// 修复波 B · 项 1（评审 Minor ㉛）：listen 原来排在 try **之前**，而 try/finally 之间还夹着
+// mkdtempSync 与 spawn ——那两步任一抛异常就根本没有 finally 去 close 这个监听中的 socket，
+// 进程因为活跃 handle 永远不退出：表现是"套件挂住"，不是"套件失败"（挂住的套件在 run-all 里
+// 连退出码都拿不到，比红更糟）。现在 listen 与它后面的每一步都在同一个 try 里，finally 保证 close。
+let llmBase = null
+let dir = null
 
 let pass = 0
 let fail = 0
@@ -64,8 +83,6 @@ const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log(`  PASS  ${name}`) }
   else { fail++; console.log(`  FAIL  ${name}${extra ? ' — ' + extra : ''}`) }
 }
-
-const dir = mkdtempSync(join(tmpdir(), 'ahub-approval-'))
 /** 命令用重定向落一个标记文件：跑没跑过，看文件系统就知道，不用信界面 */
 const cmd = (marker) => `echo hi > ${join(dir, marker)}`
 const fire = (marker) =>
@@ -102,8 +119,14 @@ async function gotoWorkflow(c) {
 // 开发者的配置不留测试态（照本套件对审批历史"先快照、后还原"的约定办，只是这份更大）
 let cfgFile = null
 let configSnapshot = null
-let proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
+// 修复波 B · 项 1（评审 Minor ㉜）：残留实例在场时**拒绝**回写快照（见 requireAppGone）。
+let snapshotWriteAllowed = true
+let proc = null
 try {
+  await new Promise((r) => mockLlm.listen(0, '127.0.0.1', r))
+  llmBase = `http://127.0.0.1:${mockLlm.address().port}/v1`
+  dir = mkdtempSync(join(tmpdir(), 'ahub-approval-'))
+  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
   const page = await waitHttp(PORT, 30000)
   const cdp = new CdpClient(page.webSocketDebuggerUrl)
   cdpRef = cdp
@@ -183,7 +206,7 @@ try {
 
   // ---- 6. 审批历史进了设置页 ----
   console.log('\n[6] 设置页「命令审批」')
-  await js(cdp, 'window.__ahub_debug.settings()')
+  await js(cdp, 'window.__ahub_debug.openSettings()')
   await sleep(600)
   const navOk = await js(cdp, `(() => { const b = [...document.querySelectorAll('.nav-item')].find((x) => x.textContent.includes('命令审批')); if (!b) return false; b.click(); return true })()`)
   ok('设置里有「命令审批」分区', navOk)
@@ -229,7 +252,7 @@ try {
   const srv = { id: `gui-mcp-${Date.now().toString(36)}`, name: 'Mock MCP', command: `"${process.execPath}" "${MOCK_MCP}"`, launch: { bin: process.execPath, args: [MOCK_MCP] }, formatVersion: 2, enabled: true, timeoutMs: 8000 }
   const before = await js(cdp, 'window.agenthub.mcp.list()')
   await js(cdp, `window.agenthub.mcp.set(${JSON.stringify([...before, srv])})`)
-  await js(cdp, 'window.__ahub_debug.settings()')
+  await js(cdp, 'window.__ahub_debug.openSettings()')
   await sleep(600)
   const navMcp = await js(cdp, `(() => { const b = [...document.querySelectorAll('.nav-item')].find((x) => x.textContent.trim() === 'MCP'); if (!b) return false; b.click(); return true })()`)
   ok('设置里有「MCP」分区', navMcp === true)
@@ -482,7 +505,7 @@ try {
   // 顺便把降级门控 env 也带上——它应当**不**生效（缺 --ahub-verify 这一半），
   // 这条就是"用户正常双击永远不会看到假徽章"的真机证据（[12] 是两个条件都齐的正向）。
   try { proc.kill() } catch { /* noop */ }
-  if (!waitAppGone()) console.log('  WARN  旧实例 30s 内没退干净，第二个实例可能拿不到单实例锁')
+  requireAppGone('第一个实例（主实例）')
   proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 1}`], { stdio: 'ignore', env: { ...launchEnv(), AGENTHUB_FORCE_SANDBOX_CRASH: '1' } })
   const page2 = await waitHttp(PORT + 1, 40000)
   const cdp2 = new CdpClient(page2.webSocketDebuggerUrl)
@@ -505,7 +528,7 @@ try {
   // 上一条 [11] 已反证 env 单独不成）。它只把状态呈现为"已降级"，真降级路径走的是同一条渲染分支。
   console.log('\n[12] 兼容模式徽章：门控降级后顶栏出现，且设置里可改策略')
   try { proc.kill() } catch { /* noop */ }
-  if (!waitAppGone()) console.log('  WARN  第二个实例 30s 内没退干净，第三个实例可能拿不到单实例锁')
+  requireAppGone('第二个实例（不带 --ahub-verify 的那个）')
   proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 2}`, '--ahub-verify'], {
     stdio: 'ignore',
     env: { ...launchEnv(), AGENTHUB_FORCE_SANDBOX_CRASH: '1' }
@@ -639,16 +662,36 @@ try {
     (await js(cdp3, 'window.agenthub.config.get()'))?.sandboxFallback === policyBefore,
     String((await js(cdp3, 'window.agenthub.config.get()'))?.sandboxFallback))
 
-  console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
+} catch (e) {
+  // 修复波 B · 项 1：中途抛错要**算一条 FAIL**，汇总行统一在 finally 之后打一次。
+  // 原来异常直接穿透到进程外：exit code 非 0 但根本没有计数行，
+  // run-all 只能报"崩了"，人也看不出跑到第几条断的；而"崩了"与"断言失败"在下游是同一件事。
+  fail++
+  console.log(`  FAIL  套件中止 —— ${e?.stack || e?.message || e}`)
 } finally {
   await sleep(300)
-  try { proc.kill() } catch { /* noop */ }
-  // 应用退出后按字节还原 config.json：导入往返写过的内容（含 agents 的 hasKey 重置）一律回到测试前
-  try {
-    if (configSnapshot) writeFileSync(cfgFile, configSnapshot)
-    else if (cfgFile && existsSync(cfgFile)) rmSync(cfgFile, { force: true })
-  } catch (e) { console.log(`  WARN  config.json 还原失败：${e.message}（需要手工还原 ${cfgFile}）`) }
+  try { proc?.kill() } catch { /* noop */ }
+  // 修复波 B · 项 1（评审 Minor ㉜）：回写快照之前，先确认实例真的退干净了。
+  // 残留实例在场时把字节快照写回去，写的是"那个活实例正在使用的 config.json"，
+  // 而它退出时又会把内存里的测试态盖回来 —— 用户配置就此被留在测试中间态。
+  // （Task 4 的 GREEN 复跑就是这么被用户 17:18 启动的实例挡住的，当时只 WARN 然后继续。）
+  if (!waitAppGone()) snapshotWriteAllowed = false
+  if (snapshotWriteAllowed) {
+    // 应用退出后按字节还原 config.json：导入往返写过的内容（含 agents 的 hasKey 重置）一律回到测试前
+    try {
+      if (configSnapshot) writeFileSync(cfgFile, configSnapshot)
+      else if (cfgFile && existsSync(cfgFile)) rmSync(cfgFile, { force: true })
+    } catch (e) { console.log(`  WARN  config.json 还原失败：${e.message}（需要手工还原 ${cfgFile}）`) }
+  } else {
+    fail++
+    console.log('  FAIL  残留实例，拒绝回写快照 — AgentHub.exe 30s 内没退干净：宁可把 config.json 留在测试现场，也不往活实例的文件里写（快照在内存里，需要手工还原 ' + (cfgFile ?? '未知路径') + '）')
+  }
   await sleep(300)
   try { mockLlm.close() } catch { /* noop */ }
-  rmSync(dir, { recursive: true, force: true })
+  if (dir) rmSync(dir, { recursive: true, force: true })
 }
+console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
+// 修复波 B · 项 1：本套件是九个真机套件里唯一"有 FAIL 也退 0"的（其余都 process.exit(1)）。
+// run-all 靠解析汇总行才看出红，人直接 `node verify/approval-shot.mjs` 拿到的是 0——
+// 中止路径要求非零退出，这条必须补上才成立。
+process.exit(fail > 0 ? 1 : 0)

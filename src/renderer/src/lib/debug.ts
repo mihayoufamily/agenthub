@@ -20,7 +20,9 @@ export function installDebugHooks() {
     workflow: () => {
       useUi.getState().setScreen('workflow')
     },
-    settings: () => useUi.getState().openSettings(),
+    // 设置页入口只有一个名字：openSettings(section?)。
+    // （评审 Minor ㉘：这里原本还并存一个 `settings: () => openSettings()` 别名，语义完全相同，
+    //   让"打开设置"在验证脚本里看起来有两种动作。修复波 B 已把 4 处调用统一到 openSettings 并删掉别名。）
     // 启动一次演示任务（使用当前配置；默认为种子演示 Agent）
     startDemoTask: async (goal = '构建一个登录页面：包含邮箱密码校验、错误提示与设计规范') => {
       const wf = useWorkflow.getState()

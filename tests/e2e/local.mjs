@@ -248,7 +248,7 @@ async function main() {
     eq('删除后会话数 -1', st5.sessions[k0].count, cntBefore - 1)
 
     // ---- 用例 3：设置-关于区（检查更新 / 开机自启入口）----
-    await js(cdp, `(() => { window.__ahub_debug.settings(); return true })()`)
+    await js(cdp, `(() => { window.__ahub_debug.openSettings(); return true })()`)
     await sleep(400)
     await js(cdp, `(() => { [...document.querySelectorAll('.settings-nav .nav-item')].find(b => b.textContent.includes('关于')).click(); return true })()`)
     await sleep(300)
