@@ -6,6 +6,7 @@ import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
 import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe } from '@shared/types'
 import { validateHook } from '@shared/hooks'
+import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
 import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
@@ -579,6 +580,20 @@ function HookSection() {
 /* ---- MCP server（tools-only + stdio） ---- */
 const EMPTY_MCP = { name: '', command: '' }
 
+/**
+ * comspec 分支保存前预检：与主进程 planSpawn 用的是同一个 cmdUnsafeReason（argv.ts 只此一份）。
+ * argv 直传那条路不经 cmd，没有这个限制，所以只在 comspec 计划上检查。
+ */
+function comspecUnsafe(plan: { file: string; args: string[]; comspec: boolean }): { token: string; reason: string }[] {
+  if (!plan.comspec) return []
+  const out: { token: string; reason: string }[] = []
+  for (const t of [plan.file, ...plan.args]) {
+    const reason = cmdUnsafeReason(t)
+    if (reason) out.push({ token: t, reason })
+  }
+  return out
+}
+
 function McpSection() {
   const [list, setList] = useState<McpServer[]>([])
   const [trusted, setTrusted] = useState<string[]>([])
@@ -602,12 +617,33 @@ function McpSection() {
     void save(list.map((s) => (s.id === id ? { ...s, ...p } : s)))
   }
 
+  /** 「重填」：原文塞回草稿、把这条旧记录从列表移除（不是留着再存一条同 id 的）。重填不删信任由主进程裁决 */
+  const refill = async (s: McpServer) => {
+    setDraft({ name: s.name, command: s.command })
+    await save(list.filter((x) => x.id !== s.id))
+  }
+
   const add = async () => {
-    if (!draft.name.trim() || !draft.command.trim()) {
+    const plan = toLaunchPlan(draft.command)
+    if (!draft.name.trim() || !plan) {
       useUi.getState().toast('名称与启动命令都要填', 'warn')
       return
     }
-    const next = await save([...list, { id: uid('mcp'), name: draft.name.trim().slice(0, 40), command: draft.command.trim(), enabled: true, createdAt: Date.now() }])
+    const unsafe = comspecUnsafe(plan)
+    if (unsafe.length > 0) {
+      // 表单里已经染红写明了（mcp-cmd-unsafe），这里再挡一次保存：不能让"看着存上了其实起不来"过关
+      useUi.getState().toast(`该参数经 cmd 无法安全表示，已拦下：${unsafe[0].token}`, 'warn')
+      return
+    }
+    const next = await save([...list, {
+      id: uid('mcp'),
+      name: draft.name.trim().slice(0, 40),
+      command: draft.command.trim(),
+      launch: { bin: plan.file, args: plan.args },
+      formatVersion: 2 as const,
+      enabled: true,
+      createdAt: Date.now()
+    }])
     setDraft(EMPTY_MCP)
     // 加完就探一次：列不到工具的话，第一次真正调用时会连不上，早知道比晚知道好
     const first = next[next.length - 1]
@@ -653,7 +689,19 @@ function McpSection() {
               )}
               <Button variant="ghost" onClick={() => void save(list.filter((x) => x.id !== s.id))}>删除</Button>
             </div>
-            <code style={{ display: 'block', fontSize: 11.5, marginTop: 4, wordBreak: 'break-all', color: 'var(--text-2)' }}>{s.command}</code>
+            <code style={{ display: 'block', fontSize: 11.5, marginTop: 4, wordBreak: 'break-all', color: s.legacyInvalid ? 'var(--text-3)' : 'var(--text-2)' }}>
+              {s.launch ? `${s.launch.bin} ${s.launch.args.join(' ')}`.trim() : s.command}
+            </code>
+            {s.legacyInvalid && (
+              <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }} data-testid="mcp-legacy">
+                旧版单命令配置，已停用。v0.4.0 不再把整条命令交 shell 解析，请重填后保存。
+              </div>
+            )}
+            {s.legacyInvalid && (
+              <Button variant="ghost" style={{ marginTop: 4 }} data-testid="mcp-refill" onClick={() => void refill(s)}>
+                重填
+              </Button>
+            )}
             {p && (
               <div style={{ marginTop: 4, fontSize: 11.5, color: p.ok ? 'var(--text-3)' : 'var(--danger)' }} data-mcp-probe={s.id}>
                 {p.message}
@@ -678,6 +726,25 @@ function McpSection() {
         <input placeholder='启动命令，例如 node "C:\path\to\server.js" 或 npx -y @some/mcp-server' value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-command" />
         <Button variant="primary" onClick={() => void add()}>添加并探测</Button>
       </div>
+      {(() => {
+        const p = toLaunchPlan(draft.command)
+        if (!p) return <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>填一条启动命令，下面会实时显示实际会执行的 argv。</div>
+        const unsafe = comspecUnsafe(p)
+        return (
+          <div style={{ fontSize: 11.5, color: unsafe.length ? 'var(--danger)' : p.comspec ? 'var(--warn)' : 'var(--text-3)', marginTop: 4 }} data-testid="mcp-argv-preview">
+            实际执行：<code style={{ wordBreak: 'break-all' }}>{JSON.stringify([p.file, ...p.args])}</code>
+            {p.comspec && <div data-testid="mcp-via-shell">可执行文件是 .cmd/.bat 或 npx/npm 这类启动器，只能经 cmd 包一层启动（不是 argv 直传）。</div>}
+            {unsafe.length > 0 && (
+              <div data-testid="mcp-cmd-unsafe">
+                {unsafe.map((u, i) => (
+                  <div key={i}>参数 <code style={{ wordBreak: 'break-all' }}>{u.token}</code> 保存不了：{u.reason}</div>
+                ))}
+                改掉它再保存；这一限制只在经 cmd 包一层的启动方式上，argv 直传（node 之类）不受影响。
+              </div>
+            )}
+          </div>
+        )
+      })()}
     </div>
   )
 }

@@ -7,7 +7,7 @@ import { useSessions } from '../stores/sessions'
 import { useSettings } from '../stores/settings'
 import { useApprovals } from '../stores/approvals'
 import { bridge } from '../lib/ipc'
-import type { AgentConfig } from '@shared/types'
+import type { AgentConfig, McpServer } from '@shared/types'
 
 export function installDebugHooks() {
   const w = window as unknown as Record<string, unknown>
@@ -90,6 +90,29 @@ export function installDebugHooks() {
     rollbackCheckpoint: (id: string) => bridge.checkpoint.rollback(id),
     approvalHistory: () => bridge.approval.history(50),
     approvalRules: (agentId?: string) => bridge.approval.rules(agentId),
+    // 设置页直达（验证脚本用；section 传 'mcp' 等分区名）
+    openSettings: (section?: string) => useUi.getState().openSettings(section),
+    closeSettings: () => useUi.getState().closeSettings(),
+    // MCP 真机断言用薄封装：直接转 bridge.mcp.set / bridge.mcp.probe（走真实 IPC，不碰主进程内部）
+    // set 之后关一次再开设置页：McpSection 只在挂载时拉 mcp:list，设置页开着改完必须重挂才看得到新列表
+    setMcpServers: async (list: McpServer[]) => {
+      const r = await bridge.mcp.set(list)
+      const ui = useUi.getState()
+      ui.closeSettings()
+      await new Promise((res) => setTimeout(res, 80))
+      useUi.getState().openSettings('mcp')
+      return r.list
+    },
+    probeMcp: (server: McpServer) => bridge.mcp.probe(server),
+    // 导入往返：读当前配置 → 合入 patch → 走真导入路径（store.importConfig）→ 回读整份配置。
+    // 写的是开发机上真实的 config.json，验证脚本必须先快照、并在 finally 按字节还原
+    configRoundTrip: async (patch: Record<string, unknown>) => {
+      const cur = await bridge.config.get()
+      const merged = { ...cur, ...patch }
+      const r = await bridge.config.importJson(JSON.stringify(merged))
+      const after = await bridge.config.get()
+      return { import: r, config: after }
+    },
     // 工作流产物目录（验证用：设置与还原，避免验证后把用户配置留在测试目录）
     setWorkflowOutputDir: (dir: string) => {
       useWorkflow.getState().patchConfig({ outputDir: dir })

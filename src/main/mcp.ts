@@ -10,7 +10,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { McpServer, McpProbe } from '../shared/types'
-import { needsComspec } from '../shared/argv'
+import { cmdUnsafeReason, needsComspec } from '../shared/argv'
 
 const PROTOCOL_VERSION = '2024-11-05'
 const DEFAULT_TIMEOUT = 15_000
@@ -50,14 +50,12 @@ export interface SpawnPlan {
  * ④ 其余原样直出。`npx -y @scope/pkg`、`npm.cmd --version` 这类常规配置不命中任何拒绝条件。
  * 已知限制（旧实现同样如此，不是这次引入的）：整条命令行里出现第 2 对引号时 cmd 的 /c
  * 会把首尾引号剥掉，`"a b" "c d"` 这种两个带空格参数会起不来（失败是响的，不是注入）。
+ * ①②两条拒收规则抽到了 shared/argv 的 cmdUnsafeReason（设置页要在保存前预演同一条规则），
+ * 这里只是把它转成抛错；改判定必须改那边，别在两边各写一份。
  */
 function comspecToken(tok: string): string {
-  if (tok.includes('"') || tok.includes('%')) {
-    throw new Error(`MCP comspec 分支无法安全表示含 " 或 % 的参数，已拒收：${tok}（cmd 里 \\" 不是转义，% 在引号内也会展开）`)
-  }
-  if (/[&|^<>]/.test(tok)) {
-    throw new Error(`MCP comspec 分支拒收含 cmd 元字符（& | ^ < >）的参数，已拒收：${tok}（实测引号挡不住它们）`)
-  }
+  const unsafe = cmdUnsafeReason(tok)
+  if (unsafe) throw new Error(`MCP comspec 分支无法安全表示该参数，已拒收：${tok}（${unsafe}）`)
   if (!tok || /\s/.test(tok)) return `"${tok}"`
   return tok
 }

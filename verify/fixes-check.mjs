@@ -897,6 +897,23 @@ console.log('\n[V] argv：引号感知切分与 .cmd 家族判定')
     yesFamily.every((b) => av.needsComspec(b) === true) && noFamily.every((b) => av.needsComspec(b) === false),
     `应 true：${yesFamily.map((b) => `${b}=${av.needsComspec(b)}`).join(' ')}；` +
       `应 false：${noFamily.map((b) => `${JSON.stringify(b)}=${av.needsComspec(b)}`).join(' ')}`)
+  // ---- 任务4 Step7①：cmd 拒收规则抽成共享纯函数（渲染进程不能 import 主进程模块，留在 mcp.ts 界面就预演不了）----
+  ok('cmdUnsafeReason 拒收 "x" / 100% / a&b 并给出原因文本（设置页保存前拿同一句话解释给用户）',
+    typeof av.cmdUnsafeReason === 'function' &&
+      ['"x"', '100%', 'a&b'].every((t) => typeof av.cmdUnsafeReason(t) === 'string' && av.cmdUnsafeReason(t).length > 0),
+    typeof av.cmdUnsafeReason === 'function'
+      ? ['"x"', '100%', 'a&b'].map((t) => `${t}→${av.cmdUnsafeReason(t)}`).join('；')
+      : 'cmdUnsafeReason 不存在')
+  ok('cmdUnsafeReason 放行常规参数（-y、@scope/pkg、带空格路径的 npm.cmd 都是 null）',
+    typeof av.cmdUnsafeReason === 'function' &&
+      av.cmdUnsafeReason('-y') === null && av.cmdUnsafeReason('@scope/pkg') === null &&
+      av.cmdUnsafeReason('C:\\Program Files\\nodejs\\npm.cmd') === null,
+    typeof av.cmdUnsafeReason === 'function'
+      ? `""→${av.cmdUnsafeReason('')}  npm.cmd→${av.cmdUnsafeReason('C:\\Program Files\\nodejs\\npm.cmd')}`
+      : 'cmdUnsafeReason 不存在')
+  ok('comspec 拒绝规则只有一处定义：mcp.ts 与设置页都调 argv 的 cmdUnsafeReason',
+    /cmdUnsafeReason/.test(readFileSync(new URL('../src/main/mcp.ts', import.meta.url), 'utf-8')) &&
+      /cmdUnsafeReason/.test(readFileSync(new URL('../src/renderer/src/features/SettingsPage.tsx', import.meta.url), 'utf-8')))
 }
 
 // ---------- W. 配置迁移：旧 MCP 单命令一律作废，且不偷偷删 ----------
@@ -1126,6 +1143,34 @@ child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ c
   ok('对照组：cmd.exe 当 file 再叠 shell:true 确实打出 DEP0190（说明上一条有牙）',
     /DEP0190/.test(String(ctlRun.stderr)), String(ctlRun.stderr).slice(0, 180))
   rmSync(hdir, { recursive: true, force: true })
+
+  // ---- 任务4 Step7②：mcp:list 的形状闸门（迁移层刻意原样透传脏元素后，挡脏数据是消费者的活）----
+  let ml = {}
+  try { ml = await import('../out/shared/mcp-list.js') } catch { /* 未实现时让断言 FAIL，不掀掉整个套件 */ }
+  const dirty = [null, 'x', { id: 'a', name: 'A', command: 'z' }]
+  ok('sanitizeMcpList 只放行形状正确的记录（手改 config.json 里的 null/字符串不再到达渲染层）',
+    typeof ml.sanitizeMcpList === 'function' && ml.sanitizeMcpList(dirty).length === 1 && ml.sanitizeMcpList(dirty)[0].id === 'a',
+    typeof ml.sanitizeMcpList === 'function' ? JSON.stringify(ml.sanitizeMcpList(dirty)) : 'sanitizeMcpList 不存在')
+  ok('sanitizeMcpList 把只有 command 的旧记录标失效停用、带 launch.bin 的不动（与加载期迁移同一口径）',
+    typeof ml.sanitizeMcpList === 'function' && (() => {
+      const l = ml.sanitizeMcpList([
+        { id: 'b', name: 'B', command: 'node x.js', enabled: true },
+        { id: 'c', name: 'C', command: '', launch: { bin: 'node', args: ['x.js'] }, enabled: true }
+      ])
+      return l[0].legacyInvalid === true && l[0].enabled === false && l[1].legacyInvalid === undefined && l[1].enabled === true
+    })())
+  ok('sanitizeMcpList 幂等（跑两遍与一遍逐字节相同，界面还原对比不会被它扰动）',
+    typeof ml.sanitizeMcpList === 'function' &&
+      JSON.stringify(ml.sanitizeMcpList(ml.sanitizeMcpList(dirty))) === JSON.stringify(ml.sanitizeMcpList(dirty)))
+  const ipcSrc = readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf-8')
+  ok('mcp:list 走 sanitizeMcpList；mcp:set 放行 command 为空但 launch 已填的记录（重填不再被静默丢弃）',
+    ipcSrc.includes('sanitizeMcpList(getStore().getConfig().mcpServers)') &&
+      /s\.launch && typeof s\.launch\.bin === 'string' && s\.launch\.bin\.trim\(\)/.test(ipcSrc))
+  ok('MCP 首次信任弹窗显示 launch 的 bin+args，旧格式仍显示原命令并标注"已停用"',
+    (() => {
+      const seg = ipcSrc.slice(ipcSrc.indexOf("tool: 'mcp'"), ipcSrc.indexOf("tool: 'mcp'") + 1200)
+      return /s\.launch\?\.bin/.test(seg) && /s\.command/.test(seg) && seg.includes('已停用')
+    })(), ipcSrc.slice(ipcSrc.indexOf("tool: 'mcp'"), ipcSrc.indexOf("tool: 'mcp'") + 400))
 }
 
 rmSync(tmp, { recursive: true, force: true })

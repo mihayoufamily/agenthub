@@ -9,6 +9,7 @@ import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer } from '../shared/types'
 import { configurePriceOverrides } from '../shared/overrides'
 import { validateHook } from './hooks'
+import { sanitizeMcpList, stampMcpLegacy } from '../shared/mcp-list'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
 import * as mcp from './mcp'
@@ -219,12 +220,19 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   /** 当前应用菜单的加速键清单（验证脚本据此确认 Ctrl+R 刷新等默认键已不再注册） */
   // ---------- MCP server（tools-only，stdio） ----------
-  ipcMain.handle('mcp:list', () => getStore().getConfig().mcpServers ?? [])
+  // mcp:list 只放行形状正确的记录（sanitizeMcpList 可断言）：迁移层刻意把脏元素原样透传，
+  // 手改 config.json 的 null 不该活到渲染层被解引用炸掉设置页/ChatView。
+  ipcMain.handle('mcp:list', () => sanitizeMcpList(getStore().getConfig().mcpServers))
   ipcMain.handle('mcp:set', (_e, list: McpServer[]) => {
     const clean = (Array.isArray(list) ? list : [])
-      .filter((s) => s && typeof s.command === 'string' && s.command.trim() && typeof s.name === 'string' && s.name.trim())
+      // launch 已填好但 command 为空的记录也要放行：「重填」过程中旧 command 会先清空，
+      // 旧条件只认 command，会把这种记录静默丢掉（保存"成功"但列表里没了，最难查的一类）
+      .filter((s) => s && typeof s.name === 'string' && s.name.trim()
+        && ((typeof s.command === 'string' && s.command.trim()) || (s.launch && typeof s.launch.bin === 'string' && s.launch.bin.trim())))
       .slice(0, 20)
-      .map((s) => ({ ...s, id: s.id || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` }))
+      // stampMcpLegacy：只有旧 command 没有 launch 的记录存下时就标失效（与加载期迁移同一口径），
+      // 界面立刻能看到停用横幅与「重填」，不用等下一次冷启动迁移才显形；planSpawn 本来就拒收这类记录
+      .map((s) => stampMcpLegacy({ ...s, id: s.id || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` }))
     getStore().setMcpServers(clean)
     // 删掉的 server 要把信任一起清掉：留着一条没人认领的信任，将来同 id 复用就自动放行了
     const keep = new Set(clean.map((s) => s.id))
@@ -302,6 +310,12 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     const json = fs.readFileSync(r.filePaths[0], 'utf-8')
     return getStore().importConfig(json)
   })
+
+  /**
+   * 程序化导入：与 config:import 走同一个 store.importConfig（真导入路径，只是不弹文件框——
+   * 弹窗没法被 CDP 驱动）。导入往返的验证钩子用它；写的是整份配置，验证脚本必须自己快照并还原。
+   */
+  ipcMain.handle('config:importJson', (_e, json: string) => getStore().importConfig(String(json ?? '')))
 
   // ---------- 凭据 ----------
   ipcMain.handle('credential:save', (_e, keyId: string, secret: string) => {
@@ -417,7 +431,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
               id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
               reqId,
               tool: 'mcp',
-              command: s.command,
+              // 信任弹窗是用户看清"我到底允许了哪条命令"的唯一地方：新格式显示实际执行的
+              // bin+args 整行（command 可能为空，旧写法会弹出空白）；旧格式显示原命令并标注已停用
+              command: s.launch?.bin
+                ? `${s.launch.bin} ${(Array.isArray(s.launch.args) ? s.launch.args : []).join(' ')}`.trim()
+                : `${(s.command ?? '').trim()}${s.legacyInvalid ? '（已停用，v0.4.0 不再用旧单命令启动）' : ''}`,
               dir: grant?.dir ?? '',
               reason: `首次连接 MCP server「${s.name}」：它的工具会以这条命令的权限在本机执行`,
               uncovered: [],

@@ -46,7 +46,9 @@ const api = {
     setWorkflowDefaults: (wd: AppConfig['workflowDefaults']) => ipcRenderer.invoke('workflowDefaults:set', wd),
     setPresets: (list: AppConfig['presets']) => ipcRenderer.invoke('presets:set', list),
     exportFile: () => ipcRenderer.invoke('config:export'),
-    importFile: () => ipcRenderer.invoke('config:import')
+    importFile: () => ipcRenderer.invoke('config:import'),
+    /** 程序化导入（与文件导入同走 store.importConfig；验证脚本的往返断言用，界面不提供入口） */
+    importJson: (json: string) => ipcRenderer.invoke('config:importJson', json) as Promise<{ ok: boolean; message: string }>
   },
   credentials: {
     save: (keyId: string, secret: string) => ipcRenderer.invoke('credential:save', keyId, secret),

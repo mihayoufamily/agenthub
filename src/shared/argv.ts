@@ -61,6 +61,23 @@ export function needsComspec(bin: string): boolean {
   return !/[/\\]/.test(b) && /^(npx|npm|pnpm|yarn)$/i.test(b)
 }
 
+/**
+ * comspec 分支的拒收判定（纯函数）：返回该 token 无法安全表示的原因，可用则返回 null。
+ * 规则与 src/main/mcp.ts 的 comspecToken 是同一条——抽到这里是因为渲染进程不能 import
+ * 主进程模块，规则留在 mcp.ts 里设置页就永远预演不了；mcp.ts 与表单必须都调这一个函数。
+ * ① 含 `"` 或 `%`：cmd 里 `\"` 不是转义（`\` 只是普通字符，引号区在下一个 `"` 处关掉），
+ *   且 `%` 即使在引号内也照样展开——含这两种字符的 token 在这一分支无法安全表示；
+ * ② 含 `& | ^ < >`：本机实测（fixes-check [X] 段哨兵断言）引号挡不住它们——
+ *   cmd 的 /c 会剥掉首尾引号对，token 尾巴落在引号区外，元字符就成了真分隔符。
+ * 其余（含 -y、@scope/pkg、带空格路径）都是 null：空格由调用方包引号处理，那是构造不是风险。
+ */
+export function cmdUnsafeReason(token: string): string | null {
+  const t = token ?? ''
+  if (t.includes('"') || t.includes('%')) return '含 " 或 %（cmd 里 \\" 不是转义，% 在引号内也会展开），无法安全表示'
+  if (/[&|^<>]/.test(t)) return '含 cmd 元字符（& | ^ < >），实测引号挡不住它们'
+  return null
+}
+
 /** 由命令串算出启动计划；切不出可执行文件时返回 null，由调用方如实报错（不起空进程） */
 export function toLaunchPlan(command: string): LaunchPlan | null {
   const parts = tokenizeCommand(command)

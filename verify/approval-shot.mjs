@@ -39,6 +39,10 @@ const modalReason = () => js(cdpRef, `document.querySelector('[data-approval-mod
 const pendingCount = () => js(cdpRef, 'window.__ahub_debug.approvals().length')
 
 let cdpRef = null
+// 导入往返断言（第 9 节）会写真实的 config.json：快照按文件字节取，进程退出后按字节还原——
+// 开发者的配置不留测试态（照本套件对审批历史"先快照、后还原"的约定办，只是这份更大）
+let cfgFile = null
+let configSnapshot = null
 const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
 try {
   const page = await waitHttp(PORT, 30000)
@@ -48,6 +52,8 @@ try {
   await cdp.send('Runtime.enable')
   await waitJs(cdp, '!!window.__ahub_debug && !!window.agenthub', 30000)
   const historyBefore = await js(cdp, 'window.agenthub.approval.history(500)')
+  cfgFile = join((await js(cdp, 'window.agenthub.app.info()')).userDataPath, 'config.json')
+  configSnapshot = existsSync(cfgFile) ? readFileSync(cfgFile) : null
 
   // ---- 1. 不在白名单 → 弹确认，且此刻命令还没执行 ----
   console.log('\n[1] 未批准的命令不会执行')
@@ -143,7 +149,8 @@ try {
 
   // ---- 8. MCP：设置页配置、探测、信任与撤销（客户端本身在 logic 层测） ----
   console.log('\n[8] MCP 设置页与信任开关')
-  const srv = { id: `gui-mcp-${Date.now().toString(36)}`, name: 'Mock MCP', command: `"${process.execPath}" "${MOCK_MCP}"`, enabled: true, timeoutMs: 8000 }
+  // launch 是新格式的启动依据（v0.4.0 起 planSpawn 只认 argv，command 是只读原文）
+  const srv = { id: `gui-mcp-${Date.now().toString(36)}`, name: 'Mock MCP', command: `"${process.execPath}" "${MOCK_MCP}"`, launch: { bin: process.execPath, args: [MOCK_MCP] }, formatVersion: 2, enabled: true, timeoutMs: 8000 }
   const before = await js(cdp, 'window.agenthub.mcp.list()')
   await js(cdp, `window.agenthub.mcp.set(${JSON.stringify([...before, srv])})`)
   await js(cdp, 'window.__ahub_debug.settings()')
@@ -162,9 +169,75 @@ try {
   ok('配置已还原', JSON.stringify(await js(cdp, 'window.agenthub.mcp.list()')) === JSON.stringify(before))
   await js(cdp, 'window.__ahub_debug.workbench()')
 
+  // ---- 8b. MCP 新表单：argv 预览、.cmd 标注、legacy 停用（任务4 Step 5 真机断言）----
+  const trustedBefore8 = await js(cdp, 'window.agenthub.mcp.trusted()')
+  await js(cdp, `window.__ahub_debug.setMcpServers([{ id:'legacy1', name:'旧版样例', command:'\\"node\\" \\"x.js\\"', enabled:true }])`)
+  await js(cdp, 'window.__ahub_debug.openSettings("mcp")')
+  await sleep(500)
+  const legacy = await js(cdp, '!!document.querySelector(\'[data-testid="mcp-legacy"]\')')
+  ok('旧版单命令配置在界面上被标停用（不是让用户自己猜为什么连不上）', legacy === true)
+  const stillListed = await js(cdp, 'document.body.innerText.includes("旧版样例")')
+  ok('标停用但不删除记录（原命令还看得见）', stillListed === true)
+  const probeLegacy = await js(cdp, `window.__ahub_debug.probeMcp({ id:'legacy1', name:'旧版样例', command:'"node" "x.js"' })`)
+  ok('探测旧格式返回 invalid_legacy_command 码', String(probeLegacy?.message ?? '').includes('invalid_legacy_command'), JSON.stringify(probeLegacy))
+  await js(cdp, `window.__ahub_debug.setMcpServers([{ id:'ok1', name:'新格式', command:'node x.js', launch:{ bin:'node', args:['x.js'] }, formatVersion:2, enabled:true }])`)
+  await sleep(400)
+  const noLegacy = await js(cdp, '!!document.querySelector(\'[data-testid="mcp-legacy"]\')')
+  ok('新格式不再挂停用横幅', noLegacy === false)
+  await js(cdp, 'window.__ahub_debug.setMcpServers([])')
+
+  // 表单预演：实时 argv 预览 + comspec 披露 + 保存前的拒收原因（规则与主进程同一条 cmdUnsafeReason）
+  const typeInto = (valueExpr) =>
+    js(cdp, `(() => { const el = document.querySelector('[data-testid="mcp-command"]'); if (!el) return false; const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; set.call(el, ${valueExpr}); el.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+  await typeInto(`'npx.cmd -y @scope/pkg'`)
+  await sleep(250)
+  const previewText = String(await js(cdp, `document.querySelector('[data-testid="mcp-argv-preview"]')?.textContent ?? ''`))
+  const viaShell = await js(cdp, '!!document.querySelector(\'[data-testid="mcp-via-shell"]\')')
+  ok('表单实时预演 argv，并如实标注 .cmd 家族要经 cmd 包一层（不冒充纯 argv 直传）',
+    previewText.includes('npx.cmd') && previewText.includes('@scope/pkg') && viaShell === true, previewText.slice(0, 160))
+  // 注意取值：tokenizeCommand 会把引号剥掉，表单里构造不出含 " 的 token；
+  // % 能活着切进 argv（cmd 引号内也展开），是表单这一侧真实可达的拒收样本
+  await typeInto(`'npx.cmd --tag=%USERPROFILE%'`)
+  await sleep(250)
+  const unsafeText = String(await js(cdp, `document.querySelector('[data-testid="mcp-cmd-unsafe"]')?.textContent ?? ''`))
+  ok('保存前就把拒收规则写在界面上：点名是哪个 token、为什么（不必等保存后静默连不上）',
+    unsafeText.includes('--tag=%USERPROFILE%'), unsafeText.slice(0, 160))
+  // 现场还原：列表回 before、信任回测前（mcp:set 会连带清掉不再存在的 id 的信任，这是它的正确行为，测试自己负责复原）
+  await js(cdp, `window.__ahub_debug.setMcpServers(${JSON.stringify(before)})`)
+  for (const id of trustedBefore8) await js(cdp, `window.agenthub.mcp.setTrust(${JSON.stringify(id)}, true)`)
+  const trusted8 = await js(cdp, 'window.agenthub.mcp.trusted()')
+  ok('MCP 表单测试已还原：配置列表与信任都回到测试前',
+    JSON.stringify(await js(cdp, 'window.agenthub.mcp.list()')) === JSON.stringify(before) &&
+      trusted8.length === trustedBefore8.length && trustedBefore8.every((id) => trusted8.includes(id)))
+
+  // ---- 9. 导入往返（任务2 遗留的真机收口；本节写真实 config.json，脚本末尾按字节还原）----
+  console.log('\n[9] MCP 导入往返：旧记录标失效、脏元素不进取渲染层')
+  const rt = await js(cdp, `window.__ahub_debug.configRoundTrip({ mcpServers: [{ id:'rt-old', name:'导入旧版', command:'node x.js', enabled:true }, null, { id:'rt-new', name:'导入新版', command:'node y.js', launch:{ bin:'node', args:['y.js'] }, enabled:true }] })`)
+  ok('导入保住 mcpServers 且旧单命令当场被标失效停用（v0.3.0 会整键丢掉）',
+    rt?.import?.ok === true && Array.isArray(rt?.config?.mcpServers) && rt.config.mcpServers.length === 3 &&
+      rt.config.mcpServers[0]?.legacyInvalid === true && rt.config.mcpServers[0]?.enabled === false,
+    JSON.stringify(rt?.config?.mcpServers)?.slice(0, 240))
+  const rtList = await js(cdp, 'window.agenthub.mcp.list()')
+  ok('脏元素（null）留在 config 里但被 mcp:list 挡下——挡脏数据是消费者的约定',
+    Array.isArray(rtList) && rtList.length === 2 && rtList.every((s) => s && typeof s.id === 'string'), JSON.stringify(rtList).slice(0, 240))
+  await js(cdp, 'window.__ahub_debug.closeSettings()')
+  await sleep(120)
+  await js(cdp, 'window.__ahub_debug.openSettings("mcp")')
+  await sleep(500)
+  const rtBody = String(await js(cdp, 'document.body.innerText'))
+  const rtBanner = await js(cdp, `document.querySelectorAll('[data-testid="mcp-legacy"]').length`)
+  ok('脏配置下设置页照常渲染：两条记录都看得见、旧版挂着停用横幅',
+    rtBody.includes('导入旧版') && rtBody.includes('导入新版') && rtBanner === 1, rtBody.slice(0, 120))
+
   console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 } finally {
   await sleep(300)
   try { proc.kill() } catch { /* noop */ }
+  // 应用退出后按字节还原 config.json：导入往返写过的内容（含 agents 的 hasKey 重置）一律回到测试前
+  try {
+    if (configSnapshot) writeFileSync(cfgFile, configSnapshot)
+    else if (cfgFile && existsSync(cfgFile)) rmSync(cfgFile, { force: true })
+  } catch (e) { console.log(`  WARN  config.json 还原失败：${e.message}（需要手工还原 ${cfgFile}）`) }
+  await sleep(300)
   rmSync(dir, { recursive: true, force: true })
 }
