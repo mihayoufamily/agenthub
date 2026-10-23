@@ -45,7 +45,9 @@ const injectionRules = {
 }
 
 export default [
-  { ignores: ['out/**', 'dist/**', 'release/**', 'node_modules/**', 'verify/shots*/**'] },
+  // `.worktrees/**` 也要挡：ESLint 9 的 flat config **不自动吃 .gitignore**，而 worktree 就建在
+  // 仓库里面——从 main 根目录跑 lint 会走进 .worktrees/*/dist/ 去扫构建产物（实测多出一条警告）。
+  { ignores: ['out/**', 'dist/**', 'release/**', 'node_modules/**', 'verify/shots*/**', '.worktrees/**', '.superpowers/**'] },
   // 顶层默认：对所有被 lint 的文件生效（含 eslint.config.mjs 自己）。
   // 单独成一个 block——把 linterOptions 塞进上面那个只有 ignores 的对象里，会让它从
   // "全局忽略"退化成"某个 config 的局部排除"，out/dist/release/node_modules 就又被 lint 了。
