@@ -864,6 +864,24 @@ console.log('\n[T] 接线：repo map 与上下文折叠真的被用上')
   ok('概览只按传入目录生成，读不到返回空（不创建目录）', ipc.includes("repomap:get") && !/repomap[\s\S]{0,80}mkdirSync/.test(ipc))
 }
 
+// ---------- V. argv 切分（MCP 不再用 shell 字符串启动的前置） ----------
+console.log('\n[V] argv：引号感知切分与 .cmd 家族判定')
+{
+  const av = await import('../out/shared/argv.js')
+  ok('普通参数按空格切', av.tokenizeCommand('node server.js -y pkg').join('|') === 'node|server.js|-y|pkg')
+  // 关键用例：npx 在 Windows 的真身带空格路径，切错就起不来
+  const win = av.tokenizeCommand('"C:\\Program Files\\nodejs\\npx.CMD" -y @some/mcp-server')
+  ok('带空格路径整体算一个参数且不拆碎', win.length === 3 && win[0] === 'C:\\Program Files\\nodejs\\npx.CMD', JSON.stringify(win))
+  ok('单引号同样受保护', av.tokenizeCommand("node 'my server.js'").join('|') === "node|my server.js")
+  ok('多余空白与制表符不产生空参数', av.tokenizeCommand('  a   b \t c  ').join('|') === 'a|b|c')
+  ok('空串与纯空白切出空数组', av.tokenizeCommand('   ').length === 0)
+  ok('引号不成对时把已读内容当一段交出不吞字符', av.tokenizeCommand('node "a b').join('|') === 'node|a b', JSON.stringify(av.tokenizeCommand('node "a b')))
+  ok('.cmd 判定大小写不敏感', av.needsComspec('NPM.CMD') === true && av.needsComspec('npx.cmd') === true)
+  ok('.bat 也算 .cmd 家族', av.needsComspec('x.BaT') === true)
+  ok('.exe / 裸名不算（不该白绕一层 comspec）', av.needsComspec('node.exe') === false && av.needsComspec('node') === false)
+  ok('无扩展名不算', av.needsComspec('server') === false)
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)
