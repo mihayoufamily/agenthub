@@ -35,14 +35,16 @@ export type WorkflowRole = 'planner' | 'executor' | 'reviewer'
 const PLANNER_PROMPT =
   '你是工作流中的"规划 Agent"。职责：把任务目标拆解为可执行步骤，并给出可检查的验收标准。\n' +
   '只输出一个 JSON 对象，不要输出其它任何内容，格式：\n' +
-  '{"conclusion": "面向用户的规划说明（2-4 句话）", "checklist": [{"text": "任务步骤或验收标准，一句一项"}]}\n' +
-  '要求：checklist 3-6 项；每项必须可被第三方独立检查；不要虚构无法验证的标准；纯文本任务按内容质量定标准。'
+  '{"conclusion": "面向用户的规划说明（2-4 句话）", "checklist": [{"text": "任务步骤或验收标准，一句一项", "files": ["这一步应当落到哪个文件（用相对文件名）"]}]}\n' +
+  '要求：checklist 3-6 项；每项必须可被第三方独立检查；不要虚构无法验证的标准；' +
+  '纯文本任务按内容质量定标准；files 只在确实对应某个文件时填，没有对应文件就留空数组，绝不编造文件名。'
 
 const REVIEWER_PROMPT =
   '你是工作流中的"审核 Agent"。对照验收清单逐项检查执行结果，不因执行方自称完成而放行；无法核实的内容按 issue 处理并说明。\n' +
   '只输出一个 JSON 对象，不要输出其它任何内容，格式：\n' +
-  '{"conclusion": "审核总结（通过情况、问题与建议）", "checklist": [{"text": "验收项", "verdict": "pass"}]}\n' +
-  '要求：checklist 与验收清单一一对应（可补充关键新发现项）；verdict 只能是 "pass" 或 "issue"；不许为了放行而放宽标准。'
+  '{"conclusion": "审核总结（通过情况、问题与建议）", "checklist": [{"text": "验收项", "verdict": "pass", "files": ["支撑这一结论的真实文件名"]}]}\n' +
+  '要求：checklist 与验收清单一一对应（可补充关键新发现项）；verdict 只能是 "pass" 或 "issue"；' +
+  '不许为了放行而放宽标准；files 只填你在产物目录里真实核对过的文件，没核对到就留空并把该项判 issue。'
 
 const EXEC_HEAD = '你是工作流中的"执行 Agent"。按规划清单完成任务并如实报告。\n'
 const EXEC_TAIL =
@@ -202,7 +204,7 @@ export function parseRoleOutput(raw: string): ParsedRoleOutput | null {
     try {
       const obj = JSON.parse(range) as {
         conclusion?: unknown
-        checklist?: { text?: unknown; verdict?: unknown; done?: unknown }[]
+        checklist?: { text?: unknown; verdict?: unknown; done?: unknown; files?: unknown }[]
       }
       if (typeof obj.conclusion !== 'string' || !obj.conclusion.trim()) continue
       const checklist = Array.isArray(obj.checklist)
@@ -211,10 +213,15 @@ export function parseRoleOutput(raw: string): ParsedRoleOutput | null {
             .slice(0, 12)
             .map((it) => {
               const verdict = it.verdict === 'pass' || it.verdict === 'issue' ? it.verdict : undefined
+              // 文件指向只收字符串、去重、限数量：模型给的东西一律先当不可信输入处理
+              const files = Array.isArray(it.files)
+                ? Array.from(new Set(it.files.filter((f): f is string => typeof f === 'string' && !!f.trim()).map((f) => f.trim().slice(0, 120)))).slice(0, 8)
+                : []
               return {
                 text: String(it.text).slice(0, 200),
                 done: verdict === 'pass' ? true : verdict === 'issue' ? false : it.done !== false,
-                ...(verdict ? { verdict } : {})
+                ...(verdict ? { verdict } : {}),
+                ...(files.length ? { files } : {})
               } satisfies ChecklistItem
             })
         : undefined

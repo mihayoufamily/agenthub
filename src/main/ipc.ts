@@ -600,9 +600,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   // ---------- 改动检查点（回滚） ----------
-  ipcMain.handle('checkpoint:manifest', (_e, id: string) => {
+  ipcMain.handle('checkpoint:manifest', async (_e, id: string) => {
     const m = checkpoints.manifestOf(String(id ?? ''))
-    return { manifest: m, summary: checkpoints.summarize(m) }
+    return { manifest: m, summary: checkpoints.summarize(m), delta: await checkpoints.deltaOf(String(id ?? '')) }
   })
   ipcMain.handle('checkpoint:rollback', async (_e, id: string) => {
     return checkpoints.rollback(String(id ?? ''))
@@ -648,6 +648,22 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   /** 读取某工作目录下的项目约定文件（AGENTS.md / CLAUDE.md）；目录为空或不存在返回空数组 */
   ipcMain.handle('conv:read', (_e, dir?: string) => readConventions(typeof dir === 'string' ? dir : undefined))
+
+  /** 产物目录的文件清单（验收项↔文件映射要拿真实目录核对，不能只信角色说的话） */
+  ipcMain.handle('artifact:ls', async () => {
+    const dir = workflowOutDir(getStore)
+    if (!dir) return { ok: false, files: [], message: '产物目录不可用' }
+    const { files, truncated } = await checkpoints.listDirFiles(dir)
+    const out: { rel: string; bytes: number }[] = []
+    for (const rel of files) {
+      try {
+        out.push({ rel, bytes: (await stat(join(dir, rel))).size })
+      } catch {
+        out.push({ rel, bytes: 0 })
+      }
+    }
+    return { ok: true, dir, files: out, truncated }
+  })
 
   /**
    * 确保并返回 AgentHub 自建工作区目录：<文档>/AgentHub-workspaces/<name>。

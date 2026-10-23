@@ -267,6 +267,11 @@ export interface ChecklistItem {
   done: boolean
   /** 审核结论 */
   verdict?: 'pass' | 'issue'
+  /**
+   * 这条验收项对应到产物目录里的哪些文件（角色自己给的，不虚构：
+   * 界面会拿真实目录核对，指到不存在的文件会标出来）
+   */
+  files?: string[]
 }
 
 export interface ProcessEvent {
@@ -536,6 +541,19 @@ export interface CheckpointManifest {
   /** 已存过原件副本的相对路径 */
   backed: string[]
   entries: FileChange[]
+  /** 开工前拍的目录文件清单（相对路径）；没拍成则缺省，界面要能说"对照不可用" */
+  baseline?: string[]
+  baselineAt?: number
+  /** 清单超过上限被截断：对照结果只是部分 */
+  baselineTruncated?: boolean
+}
+
+/** 目录与基线的差集（含命令与 CLI 造成的改动，回滚清单不覆盖这些） */
+export interface CheckpointDelta {
+  added: string[]
+  removed: string[]
+  baseline: number
+  truncated?: boolean
 }
 
 /** 回滚结果（逐项如实汇报，部分失败不粉饰成成功） */

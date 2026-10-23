@@ -692,6 +692,60 @@ console.log('\n[N] MCP：连得上、列得出、调用得到，坏消息不打�
   ok('工具清单不是数组时不炸', mc.mcpToolDefs([]).defs.length === 0)
 }
 
+// ---------- O. 交付可验收：基线对照 + 验收项↔文件 ----------
+console.log('\n[O] 交付验收：目录基线对照、验收项指向的文件要核对')
+{
+  const ac = await import('../out/shared/acceptance.js')
+  const files = ['src/app.tsx', 'README.md', 'a/x.md', 'b/x.md']
+  ok('整相对路径命中', ac.matchFileRef('src/app.tsx', files).rel === 'src/app.tsx')
+  ok('./ 前缀与反斜杠都归一', ac.matchFileRef('.\\src\\app.tsx', files).found && ac.matchFileRef('./README.md', files).found)
+  ok('大小写不敏感（Windows 习惯）', ac.matchFileRef('SRC/APP.TSX', files).found)
+  ok('只给文件名且唯一时按名字命中并说明', ac.matchFileRef('README.md', ['src/README.md']).by === 'name')
+  ok('文件名撞车时不猜，判为没找到', ac.matchFileRef('x.md', files).found === false)
+  ok('空引用不命中', ac.matchFileRef('   ', files).found === false)
+  ok('不在目录里的引用如实报 missing', ac.matchFileRef('ghost.ts', files).found === false)
+
+  // 基线对照：copy-on-write 清单之外，目录实际变化也要能对上（含命令/CLI 造成的）
+  const cp2 = await import('../out/main/checkpoints.js')
+  const root = mkdtempSync(join(tmpdir(), 'ahub-accept-'))
+  const work = join(root, 'out-dir')
+  mkdirSync(work, { recursive: true })
+  writeFileSync(join(work, 'old.md'), 'old\n')
+  cp2.init(join(root, 'cps'))
+  await cp2.start('acc-1', work)
+  const m0 = cp2.manifestOf('acc-1')
+  ok('开工前拍到基线（只记已有文件）', m0?.baseline?.length === 1 && m0.baseline[0] === 'old.md', JSON.stringify(m0?.baseline))
+  const d0 = await cp2.deltaOf('acc-1')
+  ok('什么都没动时对照为空', d0 && d0.added.length === 0 && d0.removed.length === 0)
+  // 命令造成的改动：工具层没登记，但目录对照看得见
+  writeFileSync(join(work, 'by-cmd.txt'), 'cmd\n')
+  rmSync(join(work, 'old.md'))
+  const d1 = await cp2.deltaOf('acc-1')
+  ok('目录对照能看到工具层之外的新增与消失', d1?.added.includes('by-cmd.txt') && d1?.removed.includes('old.md'), JSON.stringify(d1))
+  ok('没基线时对照返回 null（界面说"对照不可用"而不是假装没变）', (await cp2.deltaOf('nope')) === null)
+  // 返工复用同一检查点：基线不能被新一轮覆盖
+  await cp2.start('acc-1', work)
+  ok('返工不重拍基线（回到任务开始前，不是上一轮开始前）', (cp2.manifestOf('acc-1')?.baseline ?? []).length === 1)
+  rmSync(root, { recursive: true, force: true })
+}
+
+// ---------- P. 交付界面确实接住了这些（源码级接线检查） ----------
+console.log('\n[P] 接线：验收对照与回滚入口真的进了界面')
+{
+  const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf-8')
+  const tv = read('../src/renderer/src/features/TaskView.tsx')
+  ok('交付卡片用真实目录核对验收项指向的文件', tv.includes('matchFileRef') && tv.includes('bridge.artifacts.ls()'))
+  ok('核对不到的文件当场标红（不替模型兜底）', /file-ref.*missing|'missing'/.test(tv))
+  ok('交付卡片挂了改动清单与回滚入口', tv.includes('<CheckpointBar id={run.id}') && tv.includes('!run.demo &&'))
+  const wf = read('../src/renderer/src/stores/workflow.ts')
+  ok('多文件交付才生成产物索引', wf.includes('ls.files.length < 2') && wf.includes('产物索引.md'))
+  ok('索引里的文件指向也过一遍核对', /matchFileRef\(ref, known\)/.test(wf))
+  const rp = read('../src/renderer/src/lib/rolePrompts.ts')
+  ok('规划与审核都被要求只在真实核对过时填文件名', rp.includes('绝不编造文件名') && rp.includes('没核对到就留空并把该项判 issue'))
+  const ck = read('../src/main/checkpoints.ts')
+  ok('基线只记清单不复制内容（开销与仓库大小无关）', ck.includes('MAX_BASELINE') && !/baseline.*copyFile/.test(ck))
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

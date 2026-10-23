@@ -3,7 +3,7 @@ import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
   LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord,
-  CheckpointManifest, RollbackResult, FileChange, PriceOverride, HookRule, McpServer, McpProbe
+  CheckpointManifest, CheckpointDelta, RollbackResult, FileChange, PriceOverride, HookRule, McpServer, McpProbe
 } from '../shared/types'
 
 /**
@@ -159,7 +159,15 @@ const api = {
     /** 当前生效的工作流产物目录（用户在执行设置里选的；未选为主进程默认值） */
     dir: () => ipcRenderer.invoke('artifact:dir') as Promise<string>,    /** 由 AgentHub 落盘一篇文本产物：固定写入工作流产物目录，渲染层只能给文件名 */
     write: (fileName: string, content: string, checkpointId?: string) =>
-      ipcRenderer.invoke('artifact:write', fileName, content, checkpointId) as Promise<{ ok: boolean; path?: string; message?: string; checkpoint?: string }>
+      ipcRenderer.invoke('artifact:write', fileName, content, checkpointId) as Promise<{ ok: boolean; path?: string; message?: string; checkpoint?: string }>,
+    /** 产物目录真实文件清单（核对"验收项↔文件"用；主进程给，不让渲染层自己猜目录） */
+    ls: () => ipcRenderer.invoke('artifact:ls') as Promise<{
+      ok: boolean
+      dir?: string
+      files: { rel: string; bytes: number }[]
+      truncated?: boolean
+      message?: string
+    }>
   },
   /** 改动检查点：工具层文件改动的备份清单与整体回滚（不覆盖 run_command 与 CLI 自己的写盘） */
   checkpoint: {
@@ -167,6 +175,7 @@ const api = {
       ipcRenderer.invoke('checkpoint:manifest', id) as Promise<{
         manifest: CheckpointManifest | null
         summary: { total: number; created: number; modified: number; deleted: number; moved: number; unbacked: string[] }
+        delta: CheckpointDelta | null
       }>,
     rollback: (id: string) => ipcRenderer.invoke('checkpoint:rollback', id) as Promise<RollbackResult>,
     prune: (id: string) => ipcRenderer.invoke('checkpoint:prune', id) as Promise<{ ok: boolean }>

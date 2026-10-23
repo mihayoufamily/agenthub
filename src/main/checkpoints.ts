@@ -17,6 +17,68 @@ import type { FileChange, CheckpointManifest } from '../shared/types'
 const MAX_BACKUP = 8 * 1024 * 1024 // 单文件备份上限，超过就如实标"未备份"
 const MAX_DIFF_SIDE = 256 * 1024 // 参与行级 diff 的单侧字节上限
 const MAX_DIFF_LEN = 4000
+const MAX_BASELINE = 5000 // 基线清单最多记多少个文件
+/** 基线/对照时跳过的目录（与工具层搜索同一口径） */
+const SKIP_DIRS = new Set(['node_modules', '.git', '.workbuddy', 'dist', 'out', 'release'])
+
+/** 目录里的文件清单（相对路径，跳过依赖与版本库；超限如实标注）。导出给产物索引与验收对照用 */
+export async function listDirFiles(root: string, limit = MAX_BASELINE): Promise<{ files: string[]; truncated: boolean }> {
+  return listFiles(root, limit)
+}
+
+async function listFiles(root: string, limit = MAX_BASELINE): Promise<{ files: string[]; truncated: boolean }> {
+  const out: string[] = []
+  let truncated = false
+  const walk = async (dir: string) => {
+    if (out.length >= limit) {
+      truncated = true
+      return
+    }
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name)) continue
+        await walk(join(dir, e.name))
+      } else {
+        const rel = relativeOf(root, join(dir, e.name))
+        if (rel) out.push(rel)
+        if (out.length >= limit) {
+          truncated = true
+          return
+        }
+      }
+    }
+  }
+  await walk(root)
+  return { files: out, truncated }
+}
+
+/**
+ * 开工前拍一张目录基线（只记路径清单，不复制内容——内容靠 copy-on-write 的原件副本）。
+ * 有了它，交付时才能说"相比开始前新增/消失了哪些文件"，其中包含 run_command
+ * 与 CLI 自己造成的改动——回滚清单管不到那些，但对照能看到。
+ */
+async function captureBaseline(m: CheckpointManifest): Promise<CheckpointManifest> {
+  const { files, truncated } = await listFiles(m.dir)
+  const next = { ...m, baseline: files, baselineAt: Date.now(), ...(truncated ? { baselineTruncated: true } : {}) }
+  writeManifest(next)
+  return next
+}
+
+/** 当前目录与基线的差集（新增 / 消失）。没有基线时返回 null，界面据此说"没拍成" */
+export async function deltaOf(id: string): Promise<{ added: string[]; removed: string[]; baseline: number; truncated?: boolean } | null> {
+  const m = readManifest(id)
+  if (!m?.baseline) return null
+  const now = await listFiles(m.dir)
+  const before = new Set(m.baseline)
+  const nowSet = new Set(now.files)
+  return {
+    added: now.files.filter((f) => !before.has(f)),
+    removed: m.baseline.filter((f) => !nowSet.has(f)),
+    baseline: m.baseline.length,
+    ...(m.baselineTruncated || now.truncated ? { truncated: true } : {})
+  }
+}
 
 let baseDir = ''
 
@@ -65,7 +127,8 @@ function writeManifest(m: CheckpointManifest) {
 export async function start(id: string, dir: string): Promise<CheckpointManifest | null> {
   if (!baseDir || !safeId(id)) return null
   const cur = readManifest(id)
-  if (cur) return cur
+  // 已有清单（返工/续跑）就复用：基线必须停在任务开始前那一刻，不能被新一轮覆盖
+  if (cur) return cur.baseline ? cur : captureBaseline(cur)
   const m: CheckpointManifest = { id, dir: resolvePath(dir || '.'), createdAt: Date.now(), backed: [], entries: [] }
   try {
     await fs.mkdir(join(baseDir, id, 'files'), { recursive: true })
@@ -73,7 +136,7 @@ export async function start(id: string, dir: string): Promise<CheckpointManifest
     return null
   }
   writeManifest(m)
-  return m
+  return captureBaseline(m)
 }
 
 /** 该路径是否已经存过原始副本（决定"这是不是它在本检查点里的第一次改动"） */

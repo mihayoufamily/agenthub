@@ -190,6 +190,20 @@
 .check-item.issue .mark { color: var(--danger); }
 .check-item.pass .mark { color: var(--ok); }
 
+/* 验收项↔文件映射：角色报的文件名要拿真实目录核对过才算数 */
+.check-files { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+.file-ref {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11.5px; line-height: 1.5; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-2); background: var(--surface-2); max-width: 100%;
+}
+.file-ref code, .file-ref { word-break: break-all; }
+.file-ref.ok { border-color: rgba(22, 163, 74, .45); }
+.file-ref.missing { border-color: var(--danger); color: var(--danger); background: rgba(220, 38, 38, .06); }
+.file-ref-note { font-size: 11px; color: var(--text-3); }
+.file-ref-open { background: none; border: 0; padding: 0 2px; font: inherit; font-size: 11px; color: var(--accent, #b45309); cursor: pointer; text-decoration: underline; }
+
+
 /* 产物行 */
 .artifact-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .artifact-chip {

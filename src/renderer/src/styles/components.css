@@ -269,6 +269,10 @@
 }
 .cp-warn { margin-top: 4px; font-size: 11.5px; color: var(--danger); }
 .cp-note { margin-top: 8px; font-size: 11px; line-height: 1.6; color: var(--text-3); }
+.cp-delta { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.cp-delta-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 4px; }
+.cp-delta-row { display: flex; gap: 8px; align-items: center; font-size: 11.5px; padding: 2px 0; }
+.cp-delta-row code { word-break: break-all; }
 .tool-diff { margin: 6px 0 0; padding: 8px 10px; max-height: 180px; overflow: auto; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: var(--text-2); }
 
 /* ---- Toast ---- */

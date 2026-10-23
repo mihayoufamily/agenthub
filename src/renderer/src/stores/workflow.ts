@@ -9,6 +9,7 @@ import type {
 } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { renderConventionsBlock } from '@shared/conventions'
+import { matchFileRef } from '@shared/acceptance'
 import { uid, chunkText, sleep, clamp, safeName } from '../lib/utils'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -511,6 +512,53 @@ function buildDeliveryConclusion(run: WorkflowRun, verdicts: ChecklistItem[], ex
   return lines.join('')
 }
 
+/**
+ * 多文件交付时生成一篇"产物索引"：目标、文件清单（大小与来源）、验收项↔文件对照。
+ * 只在目录里确实有 2 个以上文件时才写——一篇产物不需要目录页，多写一篇废文件反而是噪音。
+ */
+async function writeArtifactIndex(
+  run: WorkflowRun,
+  checklist: ChecklistItem[],
+  setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void
+): Promise<string | null> {
+  const ls = await bridge.artifacts.ls()
+  if (!ls.ok || ls.files.length < 2) return null
+  const known = ls.files.map((f) => f.rel)
+  const lines: string[] = [
+    `# 产物索引：${run.goal}`,
+    '',
+    `> 任务 ${run.id} · 第 ${run.round} 轮 · 由 AgentHub 在交付时生成`,
+    '',
+    `产物目录：${ls.dir ?? run.outputDir ?? '（未记录）'}`,
+    '',
+    '## 文件清单',
+    ''
+  ]
+  for (const f of ls.files) {
+    const byTool = run.cards.some((c) => (c.artifacts ?? []).some((a) => a.path && a.path.replace(/\\/g, '/').toLowerCase().endsWith(f.rel.toLowerCase())))
+    lines.push(`- \`${f.rel}\`（${(f.bytes / 1024).toFixed(1)} KB）${byTool ? ' · 执行方写盘' : ' · 目录里存在（来源未记入工具清单）'}`)
+  }
+  if (ls.truncated) lines.push('', `（目录文件过多，清单只列了前 5000 个）`)
+  const withFiles = checklist.filter((c) => c.files?.length)
+  if (withFiles.length) {
+    lines.push('', '## 验收项 ↔ 文件', '')
+    for (const c of withFiles) {
+      const refs = (c.files ?? []).map((ref) => {
+        const m = matchFileRef(ref, known)
+        return m.found ? `\`${m.rel}\`${m.by === 'name' ? '（按文件名匹配）' : ''}` : `~~${ref}~~（目录里找不到）`
+      })
+      lines.push(`- ${c.text} → ${refs.join('、')}｜判定：${c.verdict === 'issue' ? '未通过' : c.verdict === 'pass' ? '通过' : c.done ? '完成' : '未完成'}`)
+    }
+  }
+  const name = '产物索引.md'
+  const r = await bridge.artifacts.write(name, lines.join('\n'), run.id)
+  if (!r.ok || !r.path) {
+    setRun((x) => ({ ...x, notes: [...(x.notes ?? []), `产物索引生成失败（${r.message ?? '未知原因'}）`] }))
+    return null
+  }
+  return r.path
+}
+
 /** 交付卡片生成 */
 async function deliver(
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
@@ -530,6 +578,8 @@ async function deliver(
     ? demoDeliveryConclusion(run.goal)
     : buildDeliveryConclusion(run, lastReview?.checklist ?? [], !!lastExec?.demo)
   await streamToCard(run, dCard.id, conclusion, setRun, isCancelled)
+  // 多文件交付才生成索引；写完把它登记成本次产物，交付卡片与导出记录都看得到
+  const indexPath = run.demo || !run.outputDir ? null : await writeArtifactIndex(run, lastReview?.checklist ?? [], setRun)
   const elapsed = Date.now() - run.startedAt
   setRun((r) => ({
     ...r,
@@ -540,7 +590,7 @@ async function deliver(
     cards: updateCard(r.cards, dCard.id, {
       status: 'done',
       checklist: run.demo ? demoReviewChecklist(999) : (lastReview?.checklist ?? []),
-      ...(run.demo ? { artifacts: demoArtifacts(999) } : {})
+      ...(run.demo ? { artifacts: demoArtifacts(999) } : indexPath ? { artifacts: withFileArtifact(dCard, indexPath, 'app') } : {})
     })
   }))
   get().saveRun()

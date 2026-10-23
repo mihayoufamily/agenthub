@@ -106,6 +106,22 @@ const ctx = { goal: '写一个脚本', round: 1, maxRounds: 3, outputDir: 'D:\\a
   const parsed = parseRoleOutput('{"conclusion":"完成","checklist":[{"text":"a","done":true}]}')
   ok('结构化输出解析仍可用', parsed?.conclusion === '完成' && parsed.checklist?.length === 1)
 }
+{
+  // 验收项↔文件：角色报的文件名先当不可信输入处理
+  const p = parseRoleOutput('{"conclusion":"完成","checklist":[{"text":"有入口文件","verdict":"pass","files":["./src/app.tsx",42,"","README.md","README.md"]}]}')
+  const it = p?.checklist?.[0]
+  ok('收下文件指向并按原样去重', JSON.stringify(it?.files) === JSON.stringify(['./src/app.tsx', 'README.md']), JSON.stringify(it?.files))
+  ok('非字符串与空串的文件项被丢掉', it?.files.every((f) => typeof f === 'string' && f))
+  ok('没填 files 时不留空字段（界面不显示"0 个文件"这种噪音）', parseRoleOutput('{"conclusion":"x","checklist":[{"text":"a","verdict":"pass"}]}')?.checklist?.[0].files === undefined)
+  const many = parseRoleOutput(`{"conclusion":"x","checklist":[{"text":"a","files":${JSON.stringify(Array.from({ length: 20 }, (_, i) => `f${i}.ts`))}}]}`)
+  ok('单条最多收 8 个文件指向', (many?.checklist?.[0].files.length ?? 0) === 8, String(many?.checklist?.[0].files.length))
+  const long = parseRoleOutput(`{"conclusion":"x","checklist":[{"text":"a","files":["${'x'.repeat(300)}.ts"]}]}`)
+  ok('超长文件名被截住而不是原样收下', (long?.checklist?.[0].files[0].length ?? 999) <= 120)
+  // 规划与审核的提示词都要写清"没核对过就别填"，否则这个字段会被编造内容填满
+  const rpSrc = readFileSync(new URL('../src/renderer/src/lib/rolePrompts.ts', import.meta.url), 'utf-8')
+  ok('审核方被要求只填真实核对过的文件', rpSrc.includes('没核对到就留空并把该项判 issue'))
+  ok('规划方被要求不编造文件名', rpSrc.includes('绝不编造文件名'))
+}
 
 const { matchKeyBinding, formatKeyBinding, safeName, validateKeyBinding } = loadTs('../src/renderer/src/lib/utils.ts', 'utils')
 // pricing 现在会值导入 shared/overrides，单文件 transpile 会断链：直接用编译产物，

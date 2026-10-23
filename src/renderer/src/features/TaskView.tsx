@@ -9,6 +9,8 @@ import { Collapse } from '../components/Collapse'
 import { Composer } from '../components/Composer'
 import { OutputDirChip } from '../components/OutputDir'
 import { CheckpointBar } from '../components/CheckpointBar'
+import { bridge } from '../lib/ipc'
+import { matchFileRef } from '@shared/acceptance'
 import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls } from '../lib/utils'
 
@@ -241,6 +243,76 @@ const STATUS_BADGE: Record<string, 'ok' | 'info' | 'warn' | 'danger' | 'default'
   budget_limit: 'warn'
 }
 
+/**
+ * 验收对照：审核结论 + 每条验收项指向的文件。
+ * 文件名是角色自己报的，必须拿真实目录核对过才算数——指到不存在的文件要当场标红，
+ * 不能让它把"我写了 a.ts"当成既成事实传给用户。
+ */
+function AcceptanceList({ run }: { run: WorkflowRun }) {
+  const items = run.cards.filter((c) => c.role === 'reviewer').slice(-1)[0]?.checklist ?? []
+  const [dirFiles, setDirFiles] = useState<string[] | null>(null)
+  const [truncated, setTruncated] = useState(false)
+
+  useEffect(() => {
+    if (run.demo || !items.some((i) => i.files?.length)) return
+    let alive = true
+    void bridge.artifacts.ls().then((r) => {
+      if (!alive) return
+      setDirFiles(r.files.map((f) => f.rel))
+      setTruncated(!!r.truncated)
+    })
+    return () => {
+      alive = false
+    }
+  }, [run.id, run.demo])
+
+  const warn = sameSourceWarning(run)
+  if (!items.length) return null
+
+  return (
+    <>
+      {warn && (
+        <div style={{ color: '#9a6700', background: 'rgba(180,83,9,0.08)', borderRadius: 8, padding: '6px 10px', marginBottom: 8, fontSize: 12.5, lineHeight: 1.6 }}>
+          {warn}
+        </div>
+      )}
+      <div className="checklist">
+        {items.map((it, i) => (
+          <div key={i} className={cls('check-item', it.verdict === 'pass' ? 'pass' : 'issue')}>
+            <span className="mark"><Icon name={it.verdict === 'issue' ? 'close' : 'check'} size={13} /></span>
+            <span>
+              {it.text}
+              {!!it.files?.length && (
+                <span className="check-files">
+                  {it.files.map((ref) => {
+                    const m = dirFiles ? matchFileRef(ref, dirFiles) : null
+                    return (
+                      <span
+                        key={ref}
+                        className={cls('file-ref', m?.found ? 'ok' : 'missing')}
+                        title={m?.found ? `目录里核对到：${m.rel}${m.by === 'name' ? '（按文件名匹配，路径可能不精确）' : ''}` : '产物目录里找不到这个文件'}
+                      >
+                        <Icon name="file" size={10} />
+                        {ref}
+                        {m?.found && dirFiles && m.rel !== ref && <span className="file-ref-note"> → {m.rel}</span>}
+                        {m?.found && !truncated && dirFiles && (
+                          <button className="file-ref-open" onClick={() => void openLocalPath(`${run.outputDir ?? ''}/${m.rel}`)}>打开</button>
+                        )}
+                      </span>
+                    )
+                  })}
+                  {dirFiles === null && <span className="file-ref-note">（未核对）</span>}
+                </span>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+      {truncated && <div className="cp-note">产物目录文件过多，对照只取了前 5000 个。</div>}
+    </>
+  )
+}
+
 function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
   if (card.role === 'delivery') {
     return <DeliveryCard run={run} />
@@ -405,19 +477,7 @@ function DeliveryCard({ run }: { run: WorkflowRun }) {
         <div className="dc-section-title">已完成内容</div>
         <div className="word-break">{run.cards.filter((c) => c.role === 'delivery').slice(-1)[0]?.conclusion}</div>
         <div className="dc-section-title">验收对照</div>
-        {sameSourceWarning(run) && (
-          <div style={{ color: '#9a6700', background: 'rgba(180,83,9,0.08)', borderRadius: 8, padding: '6px 10px', marginBottom: 8, fontSize: 12.5, lineHeight: 1.6 }}>
-            {sameSourceWarning(run)}
-          </div>
-        )}
-        <div className="checklist">
-          {(run.cards.filter((c) => c.role === 'reviewer').slice(-1)[0]?.checklist ?? []).map((it, i) => (
-            <div key={i} className={cls('check-item', it.verdict === 'pass' ? 'pass' : 'issue')}>
-              <span className="mark"><Icon name={it.verdict === 'issue' ? 'close' : 'check'} size={13} /></span>
-              <span>{it.text}</span>
-            </div>
-          ))}
-        </div>
+        <AcceptanceList run={run} />
         <div className="dc-section-title">产物与操作</div>
         {files.length > 0 && (
           <div className="artifact-row" style={{ marginBottom: 10 }}>
