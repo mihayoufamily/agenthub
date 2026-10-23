@@ -23,7 +23,8 @@ export function migrateV1toV2(raw: McpConfigShape): McpConfigShape {
       // 脏数据（config.json 被手改过、或被更早的版本写坏）原样透传：
       // 对 null 解引用会抛 TypeError 掀掉整个 getConfig()（它外面没有 try/catch），
       // 对字符串/数字做 { ...s } 会伪造出一条 {0:'x',legacyInvalid:true,enabled:false} 的假记录并写回磁盘。
-      // 消费者侧（ipc.ts 挑 server、设置页列表）本来就用 !!s 挡脏数据，这里保持一致、不替它编数据。
+      // 挡脏数据是消费者的活（ipc.ts 挑 server 已经用 !!s；mcp:list 与设置页列表还没有，留给 Task 3/4），
+      // 迁移层不认的记录也别替它编一个出来。
       if (!s || typeof s !== 'object') return s
       const bin = typeof s.launch?.bin === 'string' ? s.launch.bin.trim() : ''
       return bin
