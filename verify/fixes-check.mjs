@@ -898,6 +898,34 @@ console.log('\n[V] argv：引号感知切分与 .cmd 家族判定')
       `应 false：${noFamily.map((b) => `${JSON.stringify(b)}=${av.needsComspec(b)}`).join(' ')}`)
 }
 
+// ---------- W. 配置迁移：旧 MCP 单命令一律作废，且不偷偷删 ----------
+console.log('\n[W] migrateV1toV2：legacy MCP 标失效、sandboxFallback 补默认')
+{
+  const cm = await import('../out/shared/config-migration.js')
+  const base = {
+    schemaVersion: 1,
+    mcpServers: [
+      { id: 'old', name: '旧版', command: '"C:\\Program Files\\nodejs\\node.exe" s.js', enabled: true },
+      // enabled 显式写 true：与 old 同一起跑线，才看得出"旧的一律禁用、launch 完好的原样放过"
+      { id: 'new', name: '新版', command: 'node s.js', launch: { bin: 'node', args: ['s.js'] }, enabled: true, formatVersion: 2 },
+      { id: 'blank', name: '空壳', command: '  ', launch: { bin: '', args: [] }, formatVersion: 2 }
+    ]
+  }
+  const out1 = cm.migrateV1toV2(JSON.parse(JSON.stringify(base)))
+  const old = out1.mcpServers.find((s) => s.id === 'old')
+  const neu = out1.mcpServers.find((s) => s.id === 'new')
+  const blank = out1.mcpServers.find((s) => s.id === 'blank')
+  ok('只有 command 无 launch 的旧记录被标失效', old.legacyInvalid === true, JSON.stringify(old))
+  ok('标失效同时被禁用（免得界面还显示成可用）', old.enabled === false)
+  ok('标失效不删除记录（重填时名字与原命令还在）', old.name === '旧版' && old.command.includes('node.exe'))
+  ok('已有 launch 的记录原样放过且清掉失效标记', neu.legacyInvalid === false && neu.launch.bin === 'node' && neu.enabled === true, JSON.stringify(neu))
+  ok('launch.bin 为空串也算旧格式（不认字段存在就当可用）', blank.legacyInvalid === true && blank.enabled === false)
+  ok('sandboxFallback 缺省补 auto（老环境不至于突然开不了机）', out1.sandboxFallback === 'auto', String(out1.sandboxFallback))
+  ok('已声明 ask 的策略不被改写', cm.migrateV1toV2({ sandboxFallback: 'ask' }).sandboxFallback === 'ask')
+  ok('没有 mcpServers 的旧配置照样能迁移，不抛异常', cm.migrateV1toV2({}).mcpServers === undefined)
+  ok('幂等：迁移两次与一次结果相同', JSON.stringify(cm.migrateV1toV2(cm.migrateV1toV2(JSON.parse(JSON.stringify(base))))) === JSON.stringify(out1))
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

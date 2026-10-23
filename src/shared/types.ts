@@ -435,6 +435,8 @@ export interface AppConfig {
   hooks?: HookRule[]
   /** MCP server 全局列表（各 Agent 在工具面板勾选启用；信任标记在主进程侧） */
   mcpServers?: McpServer[]
+  /** 沙箱/GPU 崩溃自动降级策略：auto=降级后提示一次，ask=降级前问，off=不降级直接失败 */
+  sandboxFallback?: 'auto' | 'ask' | 'off'
   /**
    * 自定义单价（元 / 1M tokens）：内置表是手写快照，价格变了或没收录的模型由你自己填，
    * 带填写日期，界面据此说明金额是按哪份数据折算的。
@@ -621,8 +623,14 @@ export interface HookRun {
 export interface McpServer {
   id: string
   name: string
-  /** 整条启动命令（shell 语法） */
+  /** 旧版整条启动命令（shell 语法）。v0.4.0 起仅作只读原文与失效判定依据，不再用于启动 */
   command: string
+  /** v0.4.0 起的启动方式：可执行文件 + 参数数组，spawn 时不经 shell 解释 */
+  launch?: { bin: string; args: string[] }
+  /** 配置格式版本；缺省视为 1（旧版单命令） */
+  formatVersion?: 2
+  /** 迁移判定为旧版单命令：已禁用，等用户重填 */
+  legacyInvalid?: boolean
   /** 附加环境变量 */
   env?: Record<string, string>
   /** 缺省视为启用 */

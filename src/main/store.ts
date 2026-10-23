@@ -1,4 +1,5 @@
 import { app, safeStorage } from 'electron'
+import { migrateV1toV2, type McpConfigShape } from '../shared/config-migration'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs'
 import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
@@ -62,13 +63,20 @@ export class Store {
   getConfig(): AppConfig {
     type RawCfg = Partial<AppConfig> & Record<string, unknown>
     let raw: RawCfg = this.readJson<RawCfg>(this.dirs.config, {} as RawCfg)
-    // 迁移链：v0(空/旧结构) -> v1
+    // 迁移链：v0(空/旧结构) -> v1 -> v2。规则在 shared/config-migration.ts，这里只读写盘
     const v = (raw as { schemaVersion?: number }).schemaVersion ?? 0
+    let changed = false
     if (v < 1) {
       raw = migrateV0toV1(raw) as RawCfg
       raw.schemaVersion = 1
-      this.writeJson(this.dirs.config, raw)
+      changed = true
     }
+    if (v < 2) {
+      raw = migrateV1toV2(raw as McpConfigShape) as RawCfg
+      raw.schemaVersion = 2
+      changed = true
+    }
+    if (changed) this.writeJson(this.dirs.config, raw)
     return raw as AppConfig
   }
 
