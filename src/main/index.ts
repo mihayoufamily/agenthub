@@ -7,7 +7,7 @@ import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
 import { configurePriceOverrides } from '../shared/overrides'
 import { navDecision } from '../shared/winnav'
-import { decideFallback, forcedCompatCrashEnabled, normalizePolicy } from '../shared/compat'
+import { decideFallback, forcedCompatCrashEnabled, normalizePolicy, gpuRelaunchAllowed, compatHintPending, SANDBOX_CRASH_THRESHOLD, FORCE_SANDBOX_CRASH_ENV, COMPAT_HINT_ENV } from '../shared/compat'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 import * as ledger from './ledger'
 
@@ -48,9 +48,38 @@ if (process.env.AGENTHUB_NO_SANDBOX === '1') {
 // 两道闸缺一不可（decideFallback 之外的另一个纯函数 forcedCompatCrashEnabled）：
 // argv 必须带 --ahub-verify，且 env 显式为 '1'。用户正常双击不带该开关——
 // 就算环境里残留了这个变量，也绝不会被显示成一个凭空的假徽章。
-if (forcedCompatCrashEnabled(process.argv, process.env.AGENTHUB_FORCE_SANDBOX_CRASH)) {
+if (forcedCompatCrashEnabled(process.argv, process.env[FORCE_SANDBOX_CRASH_ENV])) {
   compatState = { noSandbox: true, noGpu: false, reason: 'sandbox(forced)' }
   console.log('[main] 验证门控：按已降级状态呈现徽章')
+}
+
+// Windows toast 的前置条件：不声明 AppUserModelId 时 Notification.show() 在部分机器上被系统静默丢弃
+// （评审 finding 2：此前全仓没设过，"降级后提示一次"基本没人看到过）。值与 electron-builder.yml 的
+// appId 一致，NSIS 安装后的开始菜单快捷方式带同一个 AUMID，toast 才有归属、才会呈现。
+if (process.platform === 'win32') app.setAppUserModelId('com.agenthub.app')
+
+/**
+ * 降级后的一次性提示（评审 finding 2）：**由 relaunch 起来的新实例在 ready-to-show 之后发**。
+ * 旧写法是 Notification().show() 紧跟 app.relaunch()+app.quit() 两行——发通知的进程自己就是
+ * 要退出的那个，toast 还没被系统拿出来就被带走了。现在降级实例只置 COMPAT_HINT_ENV 交接标志，
+ * 新实例窗口真正显示出来后在这里发一次（非阻塞、失败只记日志——真正"看得见"靠常驻徽章）。
+ */
+let compatHintFired = false
+function maybeShowCompatHint() {
+  if (compatHintFired) return
+  if (!compatHintPending(process.env[COMPAT_HINT_ENV], compatState.noSandbox)) return
+  compatHintFired = true
+  delete process.env[COMPAT_HINT_ENV]
+  try {
+    new Notification({
+      title: '已启用兼容模式（Chromium 沙箱已关闭）',
+      body: '顶栏徽章会一直标明当前状态；在「设置 → 关于」可改成每次问我、或不再自动降级。',
+      silent: false
+    }).show()
+    console.log('[main] 兼容模式一次性提示已在新实例发出')
+  } catch (e) {
+    console.log(`[main] 兼容模式提示通知失败（不影响已救活的窗口）：${String(e)}`)
+  }
 }
 
 function loadWindowState(): WindowState {
@@ -290,6 +319,8 @@ function createWindow() {
   win.once('ready-to-show', () => {
     shown = true
     win.show()
+    // 一次性提示只能在"活着"的实例里发（评审 finding 2）：窗口已经能呈现了才通知
+    maybeShowCompatHint()
   })
   // 窗口显示前渲染进程连续崩溃（典型表现：双击后无任何反应）时，
   // 自动以兼容模式重启一次（禁用 Chromium 沙箱）。正常机器不触发、沙箱保持开启。
@@ -298,8 +329,17 @@ function createWindow() {
     if (shown || preShowCrashes >= 99) return
     preShowCrashes += 1
     console.log(`[main] 窗口显示前渲染进程异常（${details.reason}），计数 ${preShowCrashes}`)
-    // 降级阶梯：第 1 次崩溃先试 --disable-gpu（GPU 驱动异常常见）；仍崩再禁 Chromium 沙箱
+    // 降级阶梯：第 1 次崩溃先试 --disable-gpu（GPU 驱动异常常见）；仍崩再禁 Chromium 沙箱。
+    // 策略 off 覆盖整条阶梯（评审 finding 4）：连 GPU 这级兜底也不做自动重启，直接报启动失败并说明两种成因。
     if (preShowCrashes === 1 && process.env.AGENTHUB_NO_GPU !== '1') {
+      const gpuPolicy = normalizePolicy(store?.getConfig().sandboxFallback)
+      if (!gpuRelaunchAllowed(gpuPolicy)) {
+        console.log('[main] sandboxFallback=off：不做任何自动重启（含 GPU 软件渲染兜底），按启动失败处理')
+        dialog.showErrorBox('AgentHub 启动失败', '渲染进程在窗口出现前崩溃。可能的成因有两个：GPU/显卡驱动异常，或安全软件破坏 Chromium 沙箱。\n\n你已选择「不自动降级」，应用不做任何自动重启。可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。')
+        setQuitting()
+        app.quit()
+        return
+      }
       console.log('[main] 自动降级为软件渲染重启（AGENTHUB_NO_GPU=1）')
       delete process.env.ELECTRON_RUN_AS_NODE
       process.env.AGENTHUB_NO_GPU = '1'
@@ -309,8 +349,9 @@ function createWindow() {
       app.quit()
       return
     }
-    // 沙箱这一级：判断在 shared/compat.decideFallback（纯函数、逻辑层逐条断言过），这里只执行动作
-    if (preShowCrashes >= 2) {
+    // 沙箱这一级：判断在 shared/compat.decideFallback（纯函数、逻辑层逐条断言过），这里只执行动作。
+    // 进入条件与决策层共用同一个 SANDBOX_CRASH_THRESHOLD——再抄一遍 `>= 2` 就是第二份真相（评审 finding 1）
+    if (preShowCrashes >= SANDBOX_CRASH_THRESHOLD) {
       // 已经在兼容模式下还连续崩：参数一样、重启只会原地打转，交给下面的"没救活"路径（窗口不出来）
       if (process.env.AGENTHUB_NO_SANDBOX === '1') {
         console.log('[main] 已在兼容模式（沙箱已关）仍连续崩溃，不再重复降级重启')
@@ -318,23 +359,41 @@ function createWindow() {
       }
       const policy = normalizePolicy(store?.getConfig().sandboxFallback)
       const action = decideFallback(policy, preShowCrashes)
+      if (action === 'none') {
+        // 防御性兜底：进入条件与决策表共用同一常量，这条按理应不可达；留着是为了两处一旦漂移时
+        // 什么都不做，而不是让本不该执行的降级穿过 fail/ask 分支直接 relaunch（评审 finding 1）
+        console.log('[main] decideFallback 判定未到沙箱级（不应到达这里），不执行任何降级动作')
+        return
+      }
       if (action === 'fail') {
         console.log('[main] sandboxFallback=off：不自动降级，按启动失败处理')
-        dialog.showErrorBox('AgentHub 启动失败', '渲染进程连续异常，且你已选择「不自动降级」。\n\n可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。')
+        dialog.showErrorBox('AgentHub 启动失败', '渲染进程连续崩溃，可能的成因有两个：GPU/显卡驱动异常，或安全软件破坏 Chromium 沙箱。且你已选择「不自动降级」，应用不做任何自动重启。\n\n可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。')
         setQuitting()
         app.quit()
         return
       }
       if (action === 'ask') {
-        const pick = dialog.showMessageBoxSync(win, {
-          type: 'warning',
-          title: 'AgentHub 启动异常',
-          message: '渲染进程连续崩溃，通常与本机的安全软件拦截 Chromium 沙箱有关。',
-          detail: '禁用沙箱可降低渲染进程隔离（本应用只加载本地页面）。是否以此方式重启？',
-          buttons: ['以兼容模式重启', '不重启，退出'],
-          defaultId: 0,
-          cancelId: 1
-        })
+        // showMessageBoxSync 在窗口已销毁/异常时会 throw；抛出逸出崩溃处理器会连主进程一起带走——
+        // 与本任务"崩了也要把人救活"的目标正相反。守卫 + try，异常一律按「用户拒绝」fail-closed（不重启、退出）
+        let pick = 1
+        try {
+          if (win.isDestroyed()) {
+            console.log('[main] ask：窗口已销毁、问不了，按用户拒绝处理（不重启）')
+          } else {
+            pick = dialog.showMessageBoxSync(win, {
+              type: 'warning',
+              title: 'AgentHub 启动异常',
+              message: '渲染进程连续崩溃，通常与本机的安全软件拦截 Chromium 沙箱有关。',
+              detail: '禁用沙箱可降低渲染进程隔离（本应用只加载本地页面）。是否以此方式重启？',
+              buttons: ['以兼容模式重启', '不重启，退出'],
+              defaultId: 0,
+              cancelId: 1
+            })
+          }
+        } catch (e) {
+          console.log(`[main] ask：确认弹窗抛出异常，按用户拒绝处理（不重启）：${String(e)}`)
+          pick = 1
+        }
         if (pick !== 0) {
           setQuitting()
           app.quit()
@@ -347,16 +406,16 @@ function createWindow() {
       process.env.AGENTHUB_NO_SANDBOX = '1'
       // 标记重启来源：新实例在拿不到单实例锁时短暂等待（旧实例退出与锁释放存在竞态）
       process.env.AGENTHUB_RELAUNCH = '1'
-      // 首次真的降级了才提示一次；auto 用非阻塞气泡，不打断启动
-      if (!existsSync(join(app.getPath('userData'), 'compat-acknowledged.json'))) {
+      // 首次真的降级才交接一次性提示。这里**不发通知**（本进程紧接着 quit，toast 发出去等于没发——评审 finding 2），
+      // 只置 COMPAT_HINT_ENV；relaunch 起来的新实例在 ready-to-show 后经 maybeShowCompatHint 发那一次
+      const ackPath = join(app.getPath('userData'), 'compat-acknowledged.json')
+      if (!existsSync(ackPath)) {
         try {
-          writeFileSync(join(app.getPath('userData'), 'compat-acknowledged.json'), JSON.stringify({ firstAt: Date.now() }))
-          new Notification({
-            title: '已启用兼容模式（Chromium 沙箱已关闭）',
-            body: '在「设置 → 关于」可改成每次问我、或不再自动降级。',
-            silent: false
-          }).show()
-        } catch { /* 提示失败不影响已经救活的窗口 */ }
+          writeFileSync(ackPath, JSON.stringify({ firstAt: Date.now() }))
+          process.env[COMPAT_HINT_ENV] = '1'
+        } catch (e) {
+          console.log(`[main] 兼容模式提示标记写入失败（不影响降级重启本身）：${String(e)}`)
+        }
       }
       // 保留全部启动参数（含 --shots 验证模式），重启后行为一致
       app.relaunch({ args: process.argv.slice(1) })

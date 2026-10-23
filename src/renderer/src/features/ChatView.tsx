@@ -14,7 +14,6 @@ import { CliModelOptions } from '../components/CliModels'
 import { ThinkingText } from '../components/Thinking'
 import { UsagePanel } from '../components/UsagePanel'
 import { CheckpointBar } from '../components/CheckpointBar'
-import { CompatBadge } from '../components/CompatBadge'
 import { digestThinking } from '../lib/thinking'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
 import { contextWindowOf, estimateTokens, estimateCost, fmtCost, visionOf } from '@shared/pricing'
@@ -172,8 +171,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           )}
         </div>
         </div>
-        {/* 兼容模式徽章：有 Agent 时顶栏在 ChatView 这里，只挂 Workbench 的空状态就等于平时看不见 */}
-        <CompatBadge />
+        {/* 兼容模式徽章不在这里挂：它单挂在 Shell（工作站/工作流两种模式共用一个挂载点），见 Shell.tsx */}
         <div className="spacer" />
         <Button variant="ghost" onClick={() => void exportSession(agent.id)} title="导出当前 Agent 的聊天记录为 Markdown">
           <Icon name="download" size={14} /> 导出会话

@@ -6,6 +6,7 @@
 // 第 11 节会不带开关重启一次，反证通道确实没注册、门控确实不生效。
 // 本套件起三个实例（单实例锁，逐个等上一个退净）：主实例 + 无验证开关 + 带降级门控，
 // 分别覆盖审批/导入、闸门反证、以及兼容模式徽章的正反两向（[0] 反向在主实例里）。
+// 徽章单挂在 Shell（工作站/工作流共用外壳），正反两向都在**两种模式**下各断一次（评审 finding 3）。
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -79,11 +80,20 @@ const modalReason = () => js(cdpRef, `document.querySelector('[data-approval-mod
 const pendingCount = () => js(cdpRef, 'window.__ahub_debug.approvals().length')
 
 let cdpRef = null
-/** 徽章挂在 .wb-topbar：启动早期还停在 splash/加载态，重试到顶栏真的渲染出来为止 */
+/** 工作屏渲染完成的锚点：空状态/有 Agent 两种顶栏都带 .wb-topbar（徽章本身单挂在 Shell，不在这条栏里） */
 async function gotoWorkbench(c) {
   for (let i = 0; i < 24; i++) {
     await js(c, 'window.__ahub_debug.workbench()')
     if (await js(c, "!!document.querySelector('.wb-topbar')")) return true
+    await sleep(500)
+  }
+  return false
+}
+/** 工作流屏渲染完成的锚点：WorkflowHome 的 .wf-configbar / TaskView 的 .wf-topbar 任一出现 */
+async function gotoWorkflow(c) {
+  for (let i = 0; i < 24; i++) {
+    await js(c, 'window.__ahub_debug.workflow()')
+    if (await js(c, "!!document.querySelector('.wf-configbar') || !!document.querySelector('.wf-topbar')")) return true
     await sleep(500)
   }
   return false
@@ -115,6 +125,11 @@ try {
   const badgeAbsent = await js(cdp, 'document.body.innerText.includes("兼容模式")')
   ok('正常启动不显示兼容模式徽章（不是常驻噪音）', badgeAbsent === false)
   ok('DOM 里也没有徽章节点，reason 为空', (await js(cdp, "!!document.querySelector('[data-compat-badge]')")) === false && (compatNormal?.reason ?? '') === '', JSON.stringify(compatNormal))
+  // 徽章单挂 Shell（评审 finding 3）后，反向也要覆盖工作流屏：没降级时两种模式都不该出现
+  const onWf0 = await gotoWorkflow(cdp)
+  ok('工作流屏也渲染出来了（反向断言在两种模式都有挂载点，不是空转）', onWf0 === true)
+  ok('正常启动切进工作流模式同样没有徽章节点（常驻≠噪音：没降级两种模式都不出现）',
+    onWf0 && (await js(cdp, "document.querySelectorAll('[data-compat-badge]').length")) === 0)
 
   // ---- 1. 不在白名单 → 弹确认，且此刻命令还没执行 ----
   console.log('\n[1] 未批准的命令不会执行')
@@ -453,6 +468,16 @@ try {
   ok('reason 标明降级来源（供人核对不是凭空显示）', String(compat3?.reason ?? '').includes('sandbox'), JSON.stringify(compat3))
   const badgeText3 = String(await js(cdp3, `document.querySelector('[data-compat-badge]')?.textContent ?? ''`))
   ok('徽章措辞说的是实际关掉的东西（渲染沙箱），不是配置里写了什么', badgeText3.includes('渲染沙箱已关闭'), badgeText3)
+  // 评审 finding 3：徽章单挂 Shell 要覆盖两种模式——数量断言"只挂一处"，工作流断言"换屏不消失"
+  const badgeCountWb = await js(cdp3, "document.querySelectorAll('[data-compat-badge]').length")
+  ok('工作站内徽章恰好一枚（Shell 单挂，不再是 Workbench/ChatView 两处各挂一份）', badgeCountWb === 1, String(badgeCountWb))
+  const onWf12 = await gotoWorkflow(cdp3)
+  const badgeInWf = onWf12 ? await waitJs(cdp3, "document.querySelectorAll('[data-compat-badge]').length === 1", 12000) : false
+  ok('Ctrl+M 进工作流模式徽章仍在（沙箱被关掉这件事换屏也看得见——用户"可见"那一半）',
+    badgeInWf === true, `onWorkflow=${onWf12}`)
+  const wfBadgeText = String(await js(cdp3, `document.querySelector('[data-compat-badge]')?.textContent ?? ''`))
+  ok('工作流模式下的徽章措辞与工作站内一致（两种模式读同一份主进程事实，不是各屏各猜）',
+    wfBadgeText === badgeText3, wfBadgeText)
   // 「可改」那一半：一次性提示之后，设置 → 关于 还得有常驻入口（三态都能选、能落盘、能改回）
   await js(cdp3, 'window.__ahub_debug.openSettings("about")')
   await sleep(600)

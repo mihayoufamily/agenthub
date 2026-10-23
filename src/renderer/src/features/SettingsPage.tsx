@@ -997,8 +997,15 @@ function AboutSection() {
   const [checking, setChecking] = useState(false)
   // 兼容模式（A4）：状态从主进程读（app:compat 只报事实），策略写回走 config 那条既有路径
   const [compat, setCompat] = useState<CompatState | null>(null)
+  // 读取失败与"还没读到"要分开：混成一个 null 时三态选择器会永久卡在「读取中…」、连入口都没了（评审一行项）
+  const [compatError, setCompatError] = useState(false)
   const [savingPolicy, setSavingPolicy] = useState<SandboxFallbackPolicy | null>(null)
-  const reloadCompat = () => { void bridge.app.compat().then(setCompat).catch(() => setCompat(null)) }
+  const reloadCompat = () => {
+    setCompatError(false)
+    void bridge.app.compat()
+      .then((s) => { setCompat(s); setCompatError(false) })
+      .catch(() => { setCompat(null); setCompatError(true) })
+  }
 
   useEffect(() => {
     bridge.autostart.get().then((on) => setAutostart(on)).catch(() => setAutostart(null))
@@ -1054,19 +1061,27 @@ function AboutSection() {
       <Row
         label="兼容模式状态"
         desc={compat === null
-          ? '读取中……读不到主进程状态时这里不猜（宁可空着，也不写"沙箱正常"）'
+          ? compatError
+            ? '读取主进程状态失败（通道或本机读取异常）。这里仍不猜状态；用下方「重试」再读一次。'
+            : '读取中……读不到主进程状态时这里不猜（宁可空着，也不写"沙箱正常"）'
           : compatBadgeText(compat) === null
             ? '本机没有降级：Chromium 沙箱与硬件加速都按默认方式运行。'
             : `${compatBadgeText(compat)}（原因：${compat.reason || '未知'}）。这是本机现在的真实状态，不是配置里写了什么。`}
       />
       <Row
-        label="沙箱降级策略"
-        desc="渲染进程在窗口出现前连续崩溃时，要不要替你关掉 Chromium 沙箱重启。改完自下一次降级起生效（本次运行不变）。"
+        label="降级策略"
+        desc="渲染进程在窗口出现前崩溃时，要不要自动降级重启。策略覆盖整条阶梯：「不自动降级」= 不做任何自动重启（含 GPU 软件渲染兜底）。改完自下一次降级起生效（本次运行不变）。"
       >
         {compat === null ? (
-          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>读取中…</span>
+          compatError ? (
+            <Button variant="secondary" style={{ height: 28 }} data-testid="compat-retry" onClick={reloadCompat}>
+              重试读取
+            </Button>
+          ) : (
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>读取中…</span>
+          )
         ) : (
-          <div className="seg" role="radiogroup" aria-label="沙箱降级策略">
+          <div className="seg" role="radiogroup" aria-label="降级策略">
             {SANDBOX_FALLBACK_OPTIONS.map((o) => (
               <button
                 key={o.value}
@@ -1082,7 +1097,13 @@ function AboutSection() {
                   setSavingPolicy(o.value)
                   const r = await bridge.config.setSandboxFallback(o.value).catch(() => null)
                   setSavingPolicy(null)
-                  if (!r) { useUi.getState().toast('保存降级策略失败：主进程没有回应', 'error'); return }
+                  if (!r) {
+                    // 不武断归因："没拿到回应"既可能是主进程通道异常，也可能是本地写盘失败——
+                    // 如实说"未确认生效"，并回读一次让界面跟着主进程的事实走
+                    useUi.getState().toast('保存降级策略失败：未确认写入（本地写盘或主进程通道都可能失败），当前值以主进程回读为准', 'error')
+                    reloadCompat()
+                    return
+                  }
                   if (!r.ok) { useUi.getState().toast(r.message ?? '保存降级策略失败（未写入）', 'error'); return }
                   reloadCompat()
                   useUi.getState().toast(`降级策略已设为「${o.label}」，自下一次降级起生效`, 'ok')

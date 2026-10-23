@@ -40,6 +40,13 @@ export const VERIFY_SWITCH = '--ahub-verify'
 export const FORCE_SANDBOX_CRASH_ENV = 'AGENTHUB_FORCE_SANDBOX_CRASH'
 
 /**
+ * 一次性提示的跨 relaunch 交接标志（评审 finding 2）：降级实例只置这个 env 就退出，
+ * 通知由 **relaunch 起来的新实例** 在 ready-to-show 之后发——旧写法在 app.quit() 前两行
+ * 发 Notification，基本等于没发（进程自己都还没退出，toast 还没机会呈现就被带走）。
+ */
+export const COMPAT_HINT_ENV = 'AGENTHUB_COMPAT_HINT'
+
+/**
  * 策略归一：脏值（手改 config.json、旧版本没写过这个键、大小写不对）一律回 auto。
  * 取向是"不让老机器因为一次脏数据突然开不了机"，也不是"突然变成每次都要点确认"。
  */
@@ -52,6 +59,7 @@ export function normalizePolicy(policy: unknown): SandboxFallbackPolicy {
  *
  * 只看两件事：崩了几次、用户选了什么策略。**不看**当前是否已经开着沙箱——
  * 那条由调用方挡（已经在兼容模式里还继续崩，重启用同样的参数只会原地打转）。
+ * GPU 那一级（第 1 次崩溃）不归本函数管，见 gpuRelaunchAllowed：off 时整条阶梯都不自动重启。
  */
 export function decideFallback(policy: unknown, crashCount: unknown): FallbackAction {
   const n = typeof crashCount === 'number' && Number.isFinite(crashCount) ? crashCount : 0
@@ -60,6 +68,25 @@ export function decideFallback(policy: unknown, crashCount: unknown): FallbackAc
   if (p === 'off') return 'fail'
   if (p === 'ask') return 'ask'
   return 'downgrade-silent'
+}
+
+/**
+ * GPU 那一级（第 1 次崩溃的 --disable-gpu 软件渲染兜底）该不该自动重启。
+ * 用户裁决（评审 finding 4）：`off` 的含义是**整条阶梯都不做自动重启**，不是只管沙箱那一级——
+ * 选 off 的人要的是"别替我静默改启动方式"，哪怕改的是 GPU。auto/ask 保持原样：GPU 自动、沙箱按策略。
+ * 脏值经 normalizePolicy 回 auto（与 decideFallback 同一取向：别让脏数据把机器锁在门外）。
+ */
+export function gpuRelaunchAllowed(policy: unknown): boolean {
+  return normalizePolicy(policy) !== 'off'
+}
+
+/**
+ * 降级后的一次性提示该不该由"relaunch 起来的新实例"发（评审 finding 2 的判定半边）。
+ * 两个条件都要：交接标志恰好是 '1'（脏标志不发）、且本进程确实是沙箱被关着的降级态
+ * （没降级却提示"已启用兼容模式"就是虚报）。执行器在 ready-to-show 之后调。
+ */
+export function compatHintPending(envValue: unknown, noSandbox: unknown): boolean {
+  return envValue === '1' && noSandbox === true
 }
 
 /**
@@ -88,14 +115,16 @@ export function forcedCompatCrashEnabled(argv: unknown, envValue: unknown): bool
 }
 
 /**
- * 三条策略的界面文案：一处定义，设置页的选择器与首次降级的提示都从这里取。
+ * 三条策略的界面文案：一处定义，设置页的选择器与三条说明共用这一份（改了表就跟着变）。
  * 每条都要说清两件事——它做什么、它的代价是什么（尤其 off：不是"更安全"，是可能开不了机）。
+ * 措辞红线：只承诺**能被断言**的东西——常驻徽章是保证，系统 toast 只是尽力（依赖 Windows
+ * 通知能力，本机没有已注册快捷方式时可能被丢弃），所以 auto 写"不保证送达"。
  */
 export const SANDBOX_FALLBACK_OPTIONS: readonly { value: SandboxFallbackPolicy; label: string; desc: string }[] = [
   {
     value: 'auto',
     label: '自动降级',
-    desc: '渲染进程连续崩溃后直接以兼容模式重启（关闭 Chromium 沙箱），起来后非阻塞提示一次。代价：渲染进程隔离等级下降，但不会被启动流程拦住。'
+    desc: '渲染进程连续崩溃后直接以兼容模式重启（关闭 Chromium 沙箱），重启后顶栏常驻徽章写明现状，系统通知尽力发一次、不保证送达。代价：渲染进程隔离等级下降，但不会被启动流程拦住。'
   },
   {
     value: 'ask',
@@ -105,12 +134,6 @@ export const SANDBOX_FALLBACK_OPTIONS: readonly { value: SandboxFallbackPolicy; 
   {
     value: 'off',
     label: '不自动降级',
-    desc: '绝不擅自关闭 Chromium 沙箱：沙箱被安全软件破坏的机器会直接报「启动失败」，要自己运行 start-compat-mode.cmd 进兼容模式。代价很直白——这台机器可能就开不了机。'
+    desc: '不做任何自动重启（含 GPU 软件渲染兜底）：窗口出现前崩溃就直接报「启动失败」并说明两种可能成因，要自己运行 start-compat-mode.cmd 进兼容模式。代价很直白——这台机器可能就开不了机。'
   }
 ]
-
-/** 按值取选项（设置页与提示文案都用它，避免到处 find(...) 各写一遍兜底） */
-export function sandboxFallbackOption(policy: unknown) {
-  const p = normalizePolicy(policy)
-  return SANDBOX_FALLBACK_OPTIONS.find((o) => o.value === p) ?? SANDBOX_FALLBACK_OPTIONS[0]
-}

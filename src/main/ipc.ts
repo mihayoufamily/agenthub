@@ -10,7 +10,7 @@ import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, 
 import { configurePriceOverrides } from '../shared/overrides'
 import { validateHook } from './hooks'
 import { sanitizeMcpList, stampMcpLegacy } from '../shared/mcp-list'
-import { normalizePolicy } from '../shared/compat'
+import { normalizePolicy, VERIFY_SWITCH } from '../shared/compat'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
 import * as mcp from './mcp'
@@ -332,7 +332,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
    * ② 入口先拒非字符串与超限 payload：旧写法 String(json ?? '') 会把任意大的字符串（甚至数字/对象）
    *   塞进主线程 JSON.parse，没有边界。与 config:import 同一个 importConfig，无额外能力，只有额外收敛。
    */
-  if (process.argv.includes('--ahub-verify')) {
+  if (process.argv.includes(VERIFY_SWITCH)) {
     const MAX_IMPORT_JSON = 8 * 1024 * 1024
     ipcMain.handle('config:importJson', (_e, json: unknown) => {
       if (typeof json !== 'string') return { ok: false, message: 'config:importJson 只接受字符串参数' }

@@ -1301,9 +1301,13 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
     typeof cf?.decideFallback === 'function' && typeof cf?.compatBadgeText === 'function' &&
       typeof cf?.forcedCompatCrashEnabled === 'function' && typeof cf?.normalizePolicy === 'function')
   ok('shared/compat.js 不 import electron/fs（共享层保持纯净，渲染进程才敢引）', (() => {
+    // 模式本身先自测：裸 'fs'、'fs/promises'、带 node: 前缀的都得命中——原来只盯 'node:fs' 是漏的
+    const banned = /(^|\n)\s*import[^;]*from\s+['"](?:node:)?(?:electron|fs(?:\/promises)?)['"]/
+    if (!banned.test("import { readFileSync } from 'fs'\n") || !banned.test("import fp from 'fs/promises'\n") ||
+      !banned.test("import e from 'electron'\n") || banned.test("import { t } from './types'\n")) return false
     try {
       const src = readFileSync(new URL('../src/shared/compat.ts', import.meta.url), 'utf-8')
-      return !/(^|\n)\s*import[^;]*from\s+['"]electron['"]/.test(src) && !/(^|\n)\s*import[^;]*from\s+['"]node:fs['"]/.test(src)
+      return !banned.test(src)
     } catch { return false }
   })())
   // --- 阈值：沙箱这一级只从第 2 次崩溃开始（第 1 次是软件渲染降级）---
@@ -1342,7 +1346,7 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
   ok('门控：argv 非数组（脏入参）不抛异常，按不生效处理',
     cf?.forcedCompatCrashEnabled(undefined, '1') === false && cf?.forcedCompatCrashEnabled(null, '1') === false)
   // --- 设置页选择器的文案：三条都要说清"做什么"和"代价"（off 的代价是开不了机）---
-  ok('策略选项恰好三条且都带说明（设置 → 关于 的选择器与通知文案共用一份）',
+  ok('策略选项恰好三条且都带说明（设置 → 关于 的选择器与三条说明块共用一份）',
     Array.isArray(cf?.SANDBOX_FALLBACK_OPTIONS) && cf.SANDBOX_FALLBACK_OPTIONS.length === 3 &&
       ['auto', 'ask', 'off'].every((p) => {
         const o = cf.SANDBOX_FALLBACK_OPTIONS.find((x) => x.value === p)
@@ -1352,6 +1356,49 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
     (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc ?? '').includes('启动失败') &&
       (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc ?? '').includes('兼容模式'),
     cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc)
+  // --- 评审修复轮（Task 6 findings 1/2/4 + 一行项）：执行器兜底、off 覆盖整条阶梯、提示跨 relaunch ---
+  const mainSrc = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf-8')
+  const ipcSrc = readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf-8')
+  ok('执行器对 action=none 有显式兜底（决策表四个动作不许剩一个靠落空穿过；finding 1）',
+    /action === 'none'/.test(mainSrc))
+  ok('沙箱级进入条件取共享常量 SANDBOX_CRASH_THRESHOLD，源码里不再抄第二个 >=2 字面量（finding 1）',
+    /preShowCrashes >= SANDBOX_CRASH_THRESHOLD/.test(mainSrc) && !/preShowCrashes >= 2\b/.test(mainSrc))
+  ok('off：GPU 那一级也不自动重启（gpuRelaunchAllowed=false）；auto/ask/脏值照常放行（finding 4）',
+    cf?.gpuRelaunchAllowed?.('off') === false &&
+      ['auto', 'ask', undefined, 'WHATEVER'].every((p) => cf?.gpuRelaunchAllowed?.(p) === true))
+  ok('off 文案如实写明「不做任何自动重启（含 GPU 软件渲染兜底）」（finding 4）',
+    (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc ?? '').includes('不做任何自动重启') &&
+      (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc ?? '').includes('软件渲染'),
+    cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc)
+  ok('auto 文案不再把 toast 当保证——指向常驻徽章并言明通知不保证送达（finding 2）',
+    (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'auto')?.desc ?? '').includes('徽章') &&
+      (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'auto')?.desc ?? '').includes('不保证'),
+    cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'auto')?.desc)
+  ok('提示交接标志是共享常量 COMPAT_HINT_ENV=AGENTHUB_COMPAT_HINT（两侧读同一个值，不各写各的字符串）',
+    cf?.COMPAT_HINT_ENV === 'AGENTHUB_COMPAT_HINT')
+  ok('compatHintPending：标志恰为 1 且沙箱真的关着才算该提示（脏标志/没降级都不发）',
+    cf?.compatHintPending?.('1', true) === true && cf?.compatHintPending?.('1', false) === false &&
+      ['0', '', undefined, 1, true].every((v) => cf?.compatHintPending?.(v, true) === false))
+  ok('一次性提示改由 relaunch 后的新实例在 ready-to-show 之后发（旧写法在 quit 前两行发，等于没发；finding 2）',
+    /function maybeShowCompatHint/.test(mainSrc) &&
+      /ready-to-show[\s\S]{0,260}maybeShowCompatHint\(\)/.test(mainSrc) &&
+      /process\.env\[COMPAT_HINT_ENV\] = '1'/.test(mainSrc))
+  ok('win32 声明了与 electron-builder appId 一致的 AppUserModelId（Windows toast 的前置条件）',
+    /process\.platform === 'win32'/.test(mainSrc) && /setAppUserModelId\('com\.agenthub\.app'\)/.test(mainSrc))
+  ok('ack 标记文件路径只算一次（join 双写收拢，两处各算会漂移）',
+    (mainSrc.match(/compat-acknowledged\.json/g) ?? []).length === 1)
+  ok('ask 弹窗有窗口销毁守卫、抛异常按「用户拒绝」处理（fail-closed 不重启，不让 throw 掐死进程）',
+    /win\.isDestroyed\(\)/.test(mainSrc) && /catch \(e\) \{[\s\S]{0,200}?pick = 1/.test(mainSrc))
+  ok('ipc.ts 的验证开关改为引用共享常量 VERIFY_SWITCH（注释声称共用、实际原来各写各的）',
+    /process\.argv\.includes\(VERIFY_SWITCH\)/.test(ipcSrc) && /from '\.\.\/shared\/compat'/.test(ipcSrc))
+  ok('index.ts 门控 env 名改为引用共享常量 FORCE_SANDBOX_CRASH_ENV',
+    /process\.env\[FORCE_SANDBOX_CRASH_ENV\]/.test(mainSrc))
+  // --- 设置页「可改」入口：app:compat 读失败不能永远卡在「读取中…」---
+  const settingsSrc = readFileSync(new URL('../src/renderer/src/features/SettingsPage.tsx', import.meta.url), 'utf-8')
+  ok('app:compat 读失败时给出重试入口（不是永久「读取中…」把三态选择器锁死）',
+    /data-testid="compat-retry"/.test(settingsSrc) && /compatError/.test(settingsSrc))
+  ok('策略保存失败的 toast 不再断言「主进程没有回应」（也可能是本地写盘失败）',
+    !settingsSrc.includes('保存降级策略失败：主进程没有回应'))
 }
 
 rmSync(tmp, { recursive: true, force: true })
