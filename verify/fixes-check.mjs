@@ -1,6 +1,6 @@
 // 本轮修复的功能验证（直接调用编译产物 out/，不经 GUI、不 mock 被测代码）
 // 用法：node verify/fixes-check.mjs
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,6 +15,43 @@ let fail = 0
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log(`  PASS  ${name}`) }
   else { fail++; console.log(`  FAIL  ${name}${extra ? ' — ' + extra : ''}`) }
+}
+
+// shared 层禁引清单（src/shared/** 要在纯 node 与渲染两端同构可用）：
+// electron / fs / crypto…… 一律不许。本轮的真实违例形态就是有人把指纹改成 require('node:crypto')。
+const SHARED_BANNED_MODS = 'electron|crypto|os|path|util|net|http|https|child_process|fs(?:/promises)?'
+// 五种写法都要有牙：import…from / export…from / 裸 side-effect import / require(…) / 动态 import(…)
+// （原 [Z]/[Z2] 各抄了一份只认 import…from 的正则，Task 6 的评审实测：require('node:fs') 静默滑过）
+const SHARED_BANNED_RE = new RegExp(
+  `(?:import|export)[^;]*?\\bfrom\\s*['"](?:node:)?(?:${SHARED_BANNED_MODS})['"]` +
+    `|import\\s*['"](?:node:)?(?:${SHARED_BANNED_MODS})['"]` +
+    `|(?:require|import)\\s*\\(\\s*['"](?:node:)?(?:${SHARED_BANNED_MODS})['"]\\s*\\)`,
+)
+// [Z]/[Z2] 共用的纯度断言（Task 6 那条的四项自测原样保留，再补新增形态）：
+// 返回 true＝干净；返回字符串＝失败原因（自测破了比源码命中更难查，必须先报出来）。
+function assertSharedPure(relPath) {
+  const shapeCases = [
+    ["import { readFileSync } from 'fs'\n", true],
+    ["import fp from 'fs/promises'\n", true],
+    ["import e from 'electron'\n", true],
+    ["import { t } from './types'\n", false],
+    ["const fsx = require('node:fs')\n", true],
+    ["export { readFileSync } from 'node:fs'\n", true],
+    ["import 'node:fs'\n", true],
+    ["import { createHash } from 'node:crypto'\n", true],
+    ["const c = require('crypto')\n", true],
+    ["const c = require('./crypto-lite')\n", false],
+    ["import { t } from '@shared/types'\n", false],
+  ]
+  const broken = shapeCases.filter(([src, want]) => SHARED_BANNED_RE.test(src) !== want)
+  if (broken.length) return `检测模式自测破了：${broken.map(([s, w]) => `${JSON.stringify(s)}（应${w ? '命中' : '不命中'}）`).join(' / ')}`
+  try {
+    const src = readFileSync(new URL(`../${relPath}`, import.meta.url), 'utf-8')
+    const hit = src.match(SHARED_BANNED_RE)
+    return hit ? `源码里出现被禁引用：${hit[0].slice(0, 90)}` : true
+  } catch (e) {
+    return `读不到 ${relPath}：${e && e.message}`
+  }
 }
 
 // ---------- A/B. glob 匹配器 + search_files ----------
@@ -1300,16 +1337,9 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
   ok('shared/compat.js 存在且只导出纯函数（decideFallback/compatBadgeText/forcedCompatCrashEnabled）',
     typeof cf?.decideFallback === 'function' && typeof cf?.compatBadgeText === 'function' &&
       typeof cf?.forcedCompatCrashEnabled === 'function' && typeof cf?.normalizePolicy === 'function')
-  ok('shared/compat.js 不 import electron/fs（共享层保持纯净，渲染进程才敢引）', (() => {
-    // 模式本身先自测：裸 'fs'、'fs/promises'、带 node: 前缀的都得命中——原来只盯 'node:fs' 是漏的
-    const banned = /(^|\n)\s*import[^;]*from\s+['"](?:node:)?(?:electron|fs(?:\/promises)?)['"]/
-    if (!banned.test("import { readFileSync } from 'fs'\n") || !banned.test("import fp from 'fs/promises'\n") ||
-      !banned.test("import e from 'electron'\n") || banned.test("import { t } from './types'\n")) return false
-    try {
-      const src = readFileSync(new URL('../src/shared/compat.ts', import.meta.url), 'utf-8')
-      return !banned.test(src)
-    } catch { return false }
-  })())
+  const compatPure = assertSharedPure('src/shared/compat.ts')
+  ok('shared/compat.js 不 import electron/fs（共享层保持纯净，渲染进程才敢引；五种引用形态合一进 assertSharedPure 且模式先自测）',
+    compatPure === true, compatPure === true ? '' : String(compatPure))
   // --- 阈值：沙箱这一级只从第 2 次崩溃开始（第 1 次是软件渲染降级）---
   ok('崩溃 0 次不动作', cf?.decideFallback('auto', 0) === 'none', String(cf?.decideFallback('auto', 0)))
   ok('崩溃 1 次不进沙箱级（先走 AGENTHUB_NO_GPU 那一级）', cf?.decideFallback('auto', 1) === 'none')
@@ -1401,26 +1431,92 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
     !settingsSrc.includes('保存降级策略失败：主进程没有回应'))
 }
 
-// ---------- Z2. Hook 命令指纹：能肉眼比对，但不泄露 token，也不参与放行（Task 7）----------
+// ---------- Z2. Hook 命令指纹：逐字哈希原文、显示另走脱敏、绝不参与放行（Task 7 + 评审修复）----------
 // Hook 的信任模型是"配了就是授权了、不逐条问"，所以界面上必须能一眼认出"这条命令还是不是我写的那条"。
-// 指纹是非加密散列（shared 层要在纯 node 与渲染两端同构可用），只做显示，绝不进 checkCommand 的判定链；
-// 显示前先脱敏，因为 Hook 命令常有人直接写 --api-key=...，而 Hook 行是普通文本框，旁边回显什么就都看得见。
+// 评审实测 f908535 产物：旧的"先脱敏再哈希"让 5000 个互不相同的 api-key 值全并成同一个指纹（1mvpy9wd07yf）——
+// 换 key 恰是用户最常见的编辑，等于指纹对最该看出来的改动失明。修复后指纹对 **原文** 逐字计算；
+// redactSecrets 只留在显示回显那一半（且扩到冒号/Basic/-u user:pass@/裸 key 关键字等真实写法）。
+// 指纹是非加密散列（shared 层不用 crypto），只做显示，绝不进 checkCommand 的判定链——
+// "不参与放行"现在由源码级断言钉住（src/main/** 不许出现 fingerprintCommand），不再只靠一条近似判定断言兜着。
 console.log('\n[Z2] Hook 命令指纹与脱敏')
 {
   const ap = await import('../out/shared/approvals.js')
-  const bannedImport = /(^|\n)\s*import[^;]*from\s+['"](?:node:)?(?:electron|fs(?:\/promises)?)['"]/
-  ok('redactSecrets / fingerprintCommand 已导出，且 shared/approvals.ts 不 import electron/fs（渲染进程敢直接引）', (() => {
-    if (typeof ap?.redactSecrets !== 'function' || typeof ap?.fingerprintCommand !== 'function') return false
-    try { return !bannedImport.test(readFileSync(new URL('../src/shared/approvals.ts', import.meta.url), 'utf-8')) } catch { return false }
-  })(), `redactSecrets=${typeof ap?.redactSecrets} fingerprintCommand=${typeof ap?.fingerprintCommand}（两个都是 function 仍 FAIL 时＝源码里出现了 electron/fs 的 import）`)
+  const approvalsPure = assertSharedPure('src/shared/approvals.ts')
+  ok('redactSecrets / fingerprintCommand 已导出，且 shared/approvals.ts 不引 electron/fs/node:*（渲染进程敢直接引）',
+    typeof ap?.redactSecrets === 'function' && typeof ap?.fingerprintCommand === 'function' && approvalsPure === true,
+    `redactSecrets=${typeof ap?.redactSecrets} fingerprintCommand=${typeof ap?.fingerprintCommand}${approvalsPure === true ? '' : '；' + approvalsPure}`)
   ok('归一后指纹稳定（空白/大小写不影响）', ap.fingerprintCommand('FOO  BAR') === ap.fingerprintCommand('foo bar'))
   ok('不同命令指纹不同', ap.fingerprintCommand('a.exe') !== ap.fingerprintCommand('b.exe'))
   ok('长度适合界面显示', ap.fingerprintCommand('node x.js').length === 12 && /^[a-z0-9]+$/.test(ap.fingerprintCommand('node x.js')), ap.fingerprintCommand('node x.js'))
-  ok('API_KEY=xxx 被遮成前缀+省略号', !ap.redactSecrets('node x.js --api-key=abcdef0123456789').includes('abcdef0123456789'), ap.redactSecrets('node x.js --api-key=abcdef0123456789'))
+  // —— 本轮修复的核心：指纹哈希原文。f908535 产物上这三条全红（两条同指纹 / 5000→1 / 显示相同处指纹不动）——
+  ok('只换 api-key 的值，指纹必须变（旧脱敏前置哈希的失明点）',
+    ap.fingerprintCommand('node x.js --api-key=AAAA1111') !== ap.fingerprintCommand('node x.js --api-key=BBBB2222'),
+    `${ap.fingerprintCommand('node x.js --api-key=AAAA1111')} vs ${ap.fingerprintCommand('node x.js --api-key=BBBB2222')}`)
+  const keyFps = new Set()
+  for (let i = 0; i < 500; i++) keyFps.add(ap.fingerprintCommand(`node x.js --api-key=K${i}xx`))
+  ok('500 个互不相同的 key 值出 500 个互不相同的指纹（评审实测旧产物 5000→1）', keyFps.size === 500, `实际 ${keyFps.size} 个`)
+  ok('显示被遮成一模一样、指纹仍不同（证明哈希不吃 redactSecrets 的输出）',
+    ap.redactSecrets('node secret helperA.js') === ap.redactSecrets('node secret helperB.js') &&
+      ap.fingerprintCommand('node secret helperA.js') !== ap.fingerprintCommand('node secret helperB.js'),
+    `显示="${ap.redactSecrets('node secret helperA.js')}" / "${ap.redactSecrets('node secret helperB.js')}"`)
+  ok('空串与 undefined/null 归到同一个钉死指纹值（?? 是承重线；不再用自反式永真比较）',
+    ap.fingerprintCommand('') === 'ztntfp9zloz0' && ap.fingerprintCommand(undefined) === 'ztntfp9zloz0' &&
+      ap.fingerprintCommand(null) === 'ztntfp9zloz0' && ap.redactSecrets('') === '',
+    `''→${ap.fingerprintCommand('')} undefined→${ap.fingerprintCommand(undefined)} null→${ap.fingerprintCommand(null)}`)
+  // —— 显示半边：redactSecrets 的覆盖面与误伤面（断言名原来写"前缀+省略号"，实际替换是 ***，一并改正）——
+  ok('API_KEY=xxx 被遮成 ***', !ap.redactSecrets('node x.js --api-key=abcdef0123456789').includes('abcdef0123456789'), ap.redactSecrets('node x.js --api-key=abcdef0123456789'))
   ok('Bearer token 也遮', !ap.redactSecrets('curl -H "Authorization: Bearer ghp_abcdefghijklmnop"').includes('ghp_abcdefghijklmnop'))
+  // 评审点名、f908535 产物原样漏出的写法（下面五条在旧产物上全红）：
+  ok('冒号写法 X-Api-Token: <值> 遮（旧实现关键词后要求 [=/空白]，冒号不命中）', (() => {
+    const r = ap.redactSecrets('curl -H "X-Api-Token: ghp_abcdefghijklmnop"')
+    return !r.includes('ghp_abcdefghijklmnop') && r.includes('X-Api-Token')
+  })(), ap.redactSecrets('curl -H "X-Api-Token: ghp_abcdefghijklmnop"'))
+  ok('非 Bearer 的 Authorization: Basic <值> 也遮（旧实现只认 Bearer）', (() => {
+    const r = ap.redactSecrets('curl -H "Authorization: Basic dXNlcjpwYXNzdzEy"')
+    return !r.includes('dXNlcjpwYXNzdzEy') && r.includes('Basic')
+  })(), ap.redactSecrets('curl -H "Authorization: Basic dXNlcjpwYXNzdzEy"'))
+  ok('curl -u user:pass@host 遮掉口令、留出行名', (() => {
+    const r = ap.redactSecrets('curl -u alice:sekret123@api.example.com')
+    return !r.includes('sekret123') && r.includes('alice')
+  })(), ap.redactSecrets('curl -u alice:sekret123@api.example.com'))
+  ok('aws_access_key_id=AKIA… 遮（旧实现裸 key 不在关键字里，要求 api 前缀）', (() => {
+    const r = ap.redactSecrets('node x.js --aws_access_key_id=AKIAIOSFODNN7EXAMPLE')
+    return !r.includes('AKIAIOSFODNN7EXAMPLE') && r.includes('aws_access_key_id')
+  })(), ap.redactSecrets('node x.js --aws_access_key_id=AKIAIOSFODNN7EXAMPLE'))
+  ok('短凭据也遮：--api-key=abc（旧实现值长下限 4，abc 明文显示）', (() => {
+    const r = ap.redactSecrets('node x.js --api-key=abc')
+    return !r.includes('abc') && r.includes('api-key')
+  })(), ap.redactSecrets('node x.js --api-key=abc'))
   ok('普通命令脱敏后原样可读', ap.redactSecrets('npm run build') === 'npm run build')
-  ok('空串不抛异常', ap.fingerprintCommand('') === ap.fingerprintCommand('') && ap.redactSecrets('') === '')
+  // 误伤面（评审点名的两个案例）：文件名里的下划线造不出 [=:] 或"关键词后整段无 @/:"的边界，不许误遮；
+  // `secret <空格> 词` 与 `PASSWORD hunter2` 同形，无法廉价区分——裁决接受这一处误遮（只损显示，不改执行）。
+  ok('python token_counter.py 不被误遮', ap.redactSecrets('python token_counter.py') === 'python token_counter.py', ap.redactSecrets('python token_counter.py'))
+  ok('node secret helper.js 接受误遮（与"强关键字+空格+值"真实形态同形，显示专属，Hook 仍执行原文）',
+    ap.redactSecrets('node secret helper.js') === 'node secret ***', ap.redactSecrets('node secret helper.js'))
+  // —— "指纹永不参与放行"改成源码级钉死：判定链所在的 src/main/** 里不许出现 fingerprintCommand ——
+  const mainFpHits = []
+  {
+    const root = join(fileURLToPath(new URL('..', import.meta.url)), 'src', 'main')
+    const walk = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name)
+        if (e.isDirectory()) walk(p)
+        else if (e.name.endsWith('.ts') && readFileSync(p, 'utf-8').includes('fingerprintCommand')) mainFpHits.push(p)
+      }
+    }
+    walk(root)
+  }
+  ok('src/main/** 没有任何文件引用 fingerprintCommand（显示件不进判定链）', mainFpHits.length === 0, `命中文件：${mainFpHits.join(', ')}`)
   ok('指纹与危险形态判定互不影响（判定仍走 checkCommand）', ap.checkCommand('rm -rf x', ['rm -rf x']).allowed === false)
+  // —— 文案诚实性：界面与 JSDoc 必须说同一句真话（逐字哈希原文 + 永不放行），溢出防护落在源头上 ——
+  const settingsZ2 = readFileSync(new URL('../src/renderer/src/features/SettingsPage.tsx', import.meta.url), 'utf-8')
+  const approvalsZ2 = readFileSync(new URL('../src/shared/approvals.ts', import.meta.url), 'utf-8')
+  ok('界面文案与 shared 层注释同口径：改任意一个字符（含被遮凭据）指纹就变、且声明不参与放行判定',
+    settingsZ2.includes('改任意一个字符') && settingsZ2.includes('放行判定') &&
+      approvalsZ2.includes('改任意一个字符') && approvalsZ2.includes('放行判定'),
+    'SettingsPage 风险句与 approvals.ts 指纹 JSDoc 各须含「改任意一个字符」「放行判定」')
+  ok('指纹回显 div 带 wordBreak: break-all（160 字符凭据/base64/URL 不撑出横向滚动条）',
+    /<div style=\{\{[^}]*wordBreak: 'break-all'\s*\}\}\s*data-testid="hook-fingerprint"/.test(settingsZ2))
 }
 
 rmSync(tmp, { recursive: true, force: true })

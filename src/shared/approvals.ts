@@ -109,18 +109,50 @@ export function rulesToAdd(uncovered: string[]): string[] {
 }
 
 /**
- * 遮掉看起来像凭据的片段。Hook 命令常有人直接写 `--api-key=...`，
- * 界面回显与账本都会带上它，指纹显示前必须先脱敏。
+ * 遮掉看起来像凭据的片段。**只服务显示回显这一半**：指纹对原文计算，不经过本函数（见 fingerprintCommand）。
+ * Hook 命令常有人直接写凭据，旁边回显什么就都看得见，显示前必须脱敏——这是"那行输入框万一改成
+ * type=password"式的纵深防御，不是保密承诺（命令原文本来就明文存在用户配置里）。
+ * 覆盖面（评审点名、旧实现漏掉的写法都补上了）：
+ * - 关键词后跟 = 或 :（允许两侧留白与引号）：--api-key=xxx、X-Api-Token: xxx、aws_access_key_id=AKIA…
+ *   （裸 key/token/secret/password… 均在列，关键词尾巴允许 _id、2 这类标识符后缀）；
+ * - 强关键词后跟空格加一个"看着不像路径/URL"的值：PASSWORD hunter2（文件名里的下划线/点造不出这个边界）；
+ * - Authorization: <任意 scheme> <值>（不止 Bearer）、独立的 Bearer <值>；
+ * - curl -u user:pass@host 遮口令、留 user 便于认行。
+ * 值的长度下限是 3（--api-key=abc 也是凭据；旧实现下限 4 会把短值明文显示出去）。
+ * 已知误伤：node secret helper.js 会被遮——`secret<空格>词` 与 `PASSWORD hunter2` 同形，无法廉价区分，
+ * 裁决接受（只损可读性，Hook 执行的仍是原始命令）；python token_counter.py 不误遮（下划线接不出边界）。
  */
 export function redactSecrets(s: string): string {
   return (s ?? '')
-    .replace(/((?:api[_-]?key|token|secret|password|passwd|pwd)[=\s]+)([^\s"']{4,})/gi, '$1***')
-    .replace(/(Bearer\s+)([A-Za-z0-9._\-]{6,})/gi, '$1***')
+    // ① 关键词 + [=:] 边界 + 值。边界必须是 = 或 :——token_counter.py 里 token 后面是下划线，
+    //    造不出这个边界，所以文件名整体不误伤。
+    .replace(/((?:api[_-]?key|access[_-]?key|key|token|secret|password|passwd|pwd|credential)([a-z0-9_]{0,16})([ \t]*[=:][ \t]*)(["']?))[^\s"',;]{3,}/gi, '$1***')
+    // ② 关键词 + 空格 + 值（PASSWORD hunter2、--api-key xxxx 这类分隔写法）。
+    //    值里含 : 或 @ 的多半是 URL/路径（postgres://、a:b@c），遮了只剩噪音，放过。
+    .replace(/((?:api[_-]?key|access[_-]?key|token|secret|password|passwd|pwd|credential)[ \t]+)(["']?)[^\s"',;@]{3,}(?![^ \t]*[@:])/gi, '$1$2***')
+    // ③ Authorization 头：任意认证方案（Basic/Digest/自定义），遮掉值本体、方案名留着。
+    .replace(/((?:Proxy-)?Authorization[ \t]*:[ \t]*(?:[A-Za-z][A-Za-z0-9+.-]*[ \t]+)?(["']?))[^\s"',;]{3,}/gi, '$1$2***')
+    // ④ 脱离 Authorization 前单独出现的 Bearer <值>。
+    .replace(/(Bearer[ \t]+)(["']?)[^\s"',;]{3,}/gi, '$1$2***')
+    // ⑤ curl -u user:pass@host —— 只遮 @ 前的口令段，user 与主机留着才认得出这条命令。
+    .replace(/(\s-{1,2}u(?:ser)?[ \t]+["']?)([^\s"',;]+:)([^\s"',;@]+)(?=@)/gi, '$1$2***')
 }
 
-/** 12 位指纹：只给人肉眼比对"这条命令变没变过"，不参与任何放行判定 */
+/**
+ * 12 位指纹：对 normalizeCommand(s ?? '') 逐字计算**命令原文**——改任意一个字符（包括显示时被遮成
+ * *** 的凭据）指纹就会变；它只用于肉眼确认「这条命令是不是我原来那条」，永远不参与放行判定。
+ * 为什么哈希原文、而不是旧版的"先脱敏再哈希"：用户最常见的编辑就是换 key，旧构造把 key 值全遮成
+ * 同一个 *** 后再散列——实测 5000 个互不相同的 api-key 值并成同一个指纹，恰好在最该看出来的改动上
+ * 失明，等于虚假宣传。
+ * 为什么哈希原文不算多泄露：Hook 命令本来就明文存在用户配置里（src/main/store.ts 的 setHooks
+ * 写进 config.json），设置页就在输入框里不脱敏地显示全文；一个 12 位仅显示用散列，对一个已持有
+ * 那份配置/那个界面的人来说不含任何新信息。想靠指纹防泄露是用错了工具——那是加密的事，
+ * 而 shared 层不许动 crypto（纯 node 与渲染两端同构可用），所以这里只是 Math.imul 显示件，
+ * 绝不是安全原语，src/main/** 判定链引用它会被 fixes-check 的源码断言拦下。
+ * undefined/null：`s ?? ''` 是承重线，脏入参归到与空串同一个指纹（'' = ztntfp9zloz0），不抛异常。
+ */
 export function fingerprintCommand(s: string): string {
-  const base = normalizeCommand(redactSecrets(s))
+  const base = normalizeCommand(s ?? '')
   // 与项目里其它 id 生成同思路：不用 crypto（shared 层要在纯 node 与浏览器两端同构可用）
   let h1 = 0x811c9dc5
   let h2 = 0x1000193
