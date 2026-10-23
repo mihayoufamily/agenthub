@@ -236,26 +236,30 @@ function createWindow() {
     }
   })
   // 窗口导航兜底：本应用只加载本地页面，任何跳外部的东西都该去系统浏览器，不该留在窗口里
+  const navDevUrl = devServerUrl ?? null
   // 外链在新窗口/标签请求时直接转浏览器打开（裸 deny 会让将来出现的 target=_blank 点了没反应）
   win.webContents.setWindowOpenHandler(({ url }) => {
-    const act = navDecision(url, devServerUrl ?? null)
+    const act = navDecision(url, navDevUrl)
     if (act === 'external') void shell.openExternal(url)
     return { action: 'deny' }
   })
   // 同窗口导航：自己的页面放行，外链挡下后转系统浏览器
-  win.webContents.on('will-navigate', (e, url) => {
-    const act = navDecision(url, devServerUrl ?? null)
+  win.webContents.on('will-navigate', (e) => {
+    const url = e.url
+    const act = navDecision(url, navDevUrl)
     if (act === 'allow') return
     e.preventDefault()
     if (act === 'external') void shell.openExternal(url)
     else console.log(`[main] 已拦截非法导航：${url.slice(0, 120)}`)
   })
   // 服务端 3xx 也算导航，不拦就等于绕过上面两条
-  win.webContents.on('will-redirect', (e, url) => {
-    const act = navDecision(url, devServerUrl ?? null)
+  win.webContents.on('will-redirect', (e) => {
+    const url = e.url
+    const act = navDecision(url, navDevUrl)
     if (act === 'allow') return
     e.preventDefault()
     if (act === 'external') void shell.openExternal(url)
+    else console.log(`[main] 已拦截非法重定向：${url.slice(0, 120)}`)
   })
   if (ws.maximized) win.maximize()
   let shown = false

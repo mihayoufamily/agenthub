@@ -1206,6 +1206,24 @@ console.log('\n[Y] navDecision')
   ok('非法 URL 当拦，不抛异常', wn.navDecision('::::', dev) === 'block')
   ok('空串当拦', wn.navDecision('', dev) === 'block')
   ok('devServerUrl 为 null 时 http://localhost 不放行', wn.navDecision('http://localhost:5173/', null) === 'external')
+
+  // 评审补漏（4 个绕过串 + 1 个合法深路径）：归一化后必须挡住 ..、%2e%2e、反斜杠遍历
+  ok('file:// 用 .. 从 renderer 目录逃出后拦掉（归一化后 marker 消失）',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/../../../../Windows/System32/hosts', null) === 'block')
+  ok('file:// 用 %2e%2e 编码点段逃逸也拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e/%2e%2e/%2e%2e/Windows/System32/hosts', null) === 'block')
+  ok('file:// 用 Windows 反斜杠 ..\\.. 逃逸也拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/..\\..\\Windows\\System32\\hosts', null) === 'block')
+  // 已知残留：便携版安装根不可预知（纯函数不读 fs/electron），marker 结尾匹配仍放行；
+  // 攻击者要落在这条得先能写进构建产物目录（等同任意代码执行），不归本函数管，此处钉住其行为
+  ok('file:// 任意根下的 renderer 产物路径仍放行（便携版残留，钉住行为）',
+    wn.navDecision('file:///C:/Users/anything/resources/app/dist/renderer/x.html', null) === 'allow')
+  // 合法 renderer 根之后再用 .. 逃逸 → 归一化后落在 renderer 之外，必须拦
+  ok('renderer 合法根之后用 .. 逃逸也拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/notes/../../evil.html', null) === 'block')
+  // 归一化不能误伤合法深路径（回归护栏）
+  ok('renderer 子目录下的合法页面仍放行',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/sub/dir/page.html', null) === 'allow')
 }
 
 rmSync(tmp, { recursive: true, force: true })
