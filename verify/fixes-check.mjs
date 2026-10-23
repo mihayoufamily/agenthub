@@ -670,11 +670,18 @@ console.log('\n[M] Hooks：pre 可否决 / post 只观察 / 参数只走环境�
   })(), `HOOK_COMMAND_MAX_LENGTH=${HOOK_MAX} 上限内=${JSON.stringify(hk.validateHook({ event: 'pre', command: 'x'.repeat(HOOK_MAX || 1) }))} 超限=${JSON.stringify(hk.validateHook({ event: 'pre', command: 'x'.repeat((HOOK_MAX || 1) + 1) }))}`)
   const ipcSrcM = readSrcSafe('src/main/ipc.ts')
   const settingsSrcM = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
-  ok('hooks:set 仍用 validateHook 当闸门（所以上限作用在进入的数据上；界面新增那条也直接把消息显示出来）',
+  // 复审 finding：旧写法 `[hooks:set …]{0,240}validateHook\(` 现在被**代码注释**满足了——
+  // ipc.ts:255 那句"闸门抽到 shared/hooks.partitionHookRules（内部逐条跑 validateHook(h)"里的
+  // ASCII `validateHook(` 就落在 240 字符窗口内，而处理函数本体早已改调 partitionHookRules。
+  // 断言因注释而绿 = 没有断言。改锚真实调用点 `partitionHookRules(list)`（注释里是全角括号，
+  // 匹配不上），窗口取 400（240 够不着第 259 行的调用）。
+  // "闸门内部逐条跑 validateHook"这件事不再用源码窗口去猜——它由上面那条 HOOK_MAX 断言与
+  // 下面那条"rejected 用的是 validateHook 既有文案"按**行为**兜住。
+  ok('hooks:set 的闸门是 partitionHookRules 的真实调用点（它逐条跑 validateHook 这件事由上面的 HOOK_MAX 与下面的 rejected 文案两条按行为兜；界面新增那条也直接把消息显示出来）',
     ipcSrcM.error === null && settingsSrcM.error === null &&
-      /ipcMain\.handle\(\s*'hooks:set'[\s\S]{0,240}validateHook\(/.test(ipcSrcM.text) &&
+      /ipcMain\.handle\(\s*'hooks:set'[\s\S]{0,400}partitionHookRules\(list\)/.test(ipcSrcM.text) &&
       /validateHook\(draft\)/.test(settingsSrcM.text),
-    `${ipcSrcM.error ?? ''}${settingsSrcM.error ?? ''}没找到 hooks:set→validateHook 或 SettingsPage 的 add()→validateHook`)
+    `${ipcSrcM.error ?? ''}${settingsSrcM.error ?? ''}没找到 hooks:set→partitionHookRules(list) 或 SettingsPage 的 add()→validateHook`)
 
   // ---- 修复波 A · 项 3：hooks:set 不再静默删掉整表里校验不通过的旧规则 ----
   // 缺陷：旧写法是 `list.filter((h) => validateHook(h).ok).slice(0, 40)`——对**整表**重校验并按 ok 过滤，
@@ -2197,9 +2204,9 @@ console.log('\n[Z4] ESLint：noInlineConfig 关不掉注入面那 5 条 error �
     `exit=${unreachable.status} 输出=${unreachable.out.slice(0, 300)}`)
   const cfgZ4 = readSrcSafe('eslint.config.mjs')
   ok('eslint.config.mjs 读得到', cfgZ4.error === null, cfgZ4.error ?? '')
-  ok('两处 config block 都声明 linterOptions.noInlineConfig: true（顶层默认 + src/** 块）',
-    cfgZ4.error === null && (cfgZ4.text.match(/noInlineConfig:\s*true/g) ?? []).length >= 2,
-    `命中 ${(cfgZ4.text.match(/noInlineConfig:\s*true/g) ?? []).length} 处（应 ≥2）`)
+  ok('三处 config block 都声明 linterOptions.noInlineConfig: true（顶层默认 + src/** + verify|scripts/**）',
+    cfgZ4.error === null && (cfgZ4.text.match(/noInlineConfig:\s*true/g) ?? []).length >= 3,
+    `命中 ${(cfgZ4.text.match(/noInlineConfig:\s*true/g) ?? []).length} 处（应 ≥3；复审指出旧名字写"两处"而实际三处）`)
   ok('impliedEvalGlobals 补齐 execScript，并删掉规则够不着的 7 个名字（不是"保留但注释说明"那一档）',
     cfgZ4.error === null && cfgZ4.text.includes("'execScript'") &&
       ['setImmediate', 'requestAnimationFrame', 'requestIdleCallback', 'msSetImmediate', 'msSetInterval', 'msRequestAnimationFrame', 'msRequestIdleCallback']

@@ -544,7 +544,7 @@ function HookSection() {
       <RejectedNotice
         testId="hook-rejected"
         rejected={rejected}
-        note="它们原样留在配置里（没有替你删）："
+        note="逐条原因如下。其中规则本体因校验不通过被拒的仍原样留在配置里（改短还是删掉由你决定）；碎片（null / 字符串 / 数字）与超出条数上限的不会落盘："
       />
       {rules.map((h) => (
         <div key={h.id} data-hook-row style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
