@@ -260,7 +260,7 @@ console.log('\n[I] readConventions（进目录自动读约定，不用手抄进�
   ok('常驻要求排在项目约定之后（后写的更贴近执行者）', rp.indexOf('ctx.conventions') < rp.indexOf('agentSystemPrompt?.trim()'))
   // 两条链路都要接上：工作站对话 + 工作流角色
   ok('工作站对话接了约定注入', readFileSync(new URL('../src/renderer/src/stores/sessions.ts', import.meta.url), 'utf-8').includes('renderConventionsBlock'))
-  ok('工作流引擎接了约定注入', readFileSync(new URL('../src/renderer/src/stores/workflow.ts', import.meta.url), 'utf-8').includes('conventionsBlock(outputDir)'))
+  ok('工作流引擎接了目录上下文注入', readFileSync(new URL('../src/renderer/src/stores/workflow.ts', import.meta.url), 'utf-8').includes('dirContextBlock(outputDir)'))
   rmSync(dir, { recursive: true, force: true })
   rmSync(big, { recursive: true, force: true })
 }
@@ -795,6 +795,73 @@ console.log('\n[R] 长期记忆：按目标检索、不相关不给、沉淀有�
   const sessSrc = readFileSync(new URL('../src/renderer/src/stores/sessions.ts', import.meta.url), 'utf-8')
   ok('工作流与工作站两条链路都带检索结果', wfSrc.includes('memoryBlockFor(ctx.goal') && sessSrc.includes('memoryBlockFor(text,'))
   ok('沉淀有条数上限（不会只涨不缩）', stSrc.includes('slice(-MAX_MEMORY)'))
+}
+
+// ---------- S. repo map 与长对话压缩 ----------
+console.log('\n[S] 代码库概览（顶层声明扫描）+ 装不下时折叠最旧轮次')
+{
+  const rm = await import('../out/shared/repomap.js')
+  const ts = [
+    'import { x } from "y"',
+    '/** function 注释里的假符号 */',
+    '// export function 被注释掉的()',
+    'export function login(user) {',
+    '  const inner = () => 1',
+    '  return inner',
+    '}',
+    'export class Session {}',
+    'export interface User { id: string }',
+    'const make = () => {}',
+    'function helper() {}'
+  ].join('\n')
+  const syms = rm.extractSymbols('src/auth.ts', ts)
+  ok('认出顶层 function/class/interface/箭头常量', syms.includes('login') && syms.includes('Session') && syms.includes('User') && syms.includes('make'), syms.join(','))
+  ok('注释里的声明不算符号', !syms.some((s) => s.includes('假符号') || s.includes('被注释掉的')))
+  ok('函数体里缩进的局部变量不算顶层符号', !syms.includes('inner'))
+  ok('不认识的类型返回空而不是瞎猜', rm.extractSymbols('README.md', '# 标题\nclass Foo {}').length === 0)
+  ok('Python / Go / Rust 各自的顶层声明都认', rm.extractSymbols('a.py', 'def go():\n    pass\nclass T:\n    pass').join(',') === 'go,T' && rm.extractSymbols('a.go', 'func main() {}\ntype Cfg struct{}').join(',') === 'main,Cfg' && rm.extractSymbols('a.rs', 'pub fn run() {}\nstruct S {}').join(',') === 'run,S')
+  ok('单文件符号数有上限', rm.extractSymbols('a.ts', Array.from({ length: 40 }, (_, i) => `export function f${i}() {}`).join('\n')).length === 14)
+
+  const files = [
+    { rel: 'src/a.ts', bytes: 2048, symbols: ['a'] },
+    { rel: 'src/b.ts', bytes: 1024, symbols: [] }
+  ]
+  const big = rm.renderRepoMap(files, 6000, files.length)
+  ok('概览标出"是猜的不是 AST"', big.text.includes('不是 AST/LSP') && big.text.includes('别当事实用'))
+  ok('没认出符号的文件如实标注而不是隐掉', big.text.includes('未识别到顶层符号'))
+  const small = rm.renderRepoMap(files, 30, files.length)
+  ok('装不下时说明省略了几个', small.truncated === true && small.omitted > 0 && small.text.includes('未列出'), JSON.stringify(small).slice(0, 160))
+  ok('一个文件都没有时不产出空标题', rm.renderRepoMap([], 6000, 0).text === '')
+
+  const cx = await import('../out/shared/context.js')
+  const t = (role, len) => ({ role, text: '字'.repeat(len) })
+  const turns = [t('user', 300), t('assistant', 300), t('user', 300), t('assistant', 300), t('user', 50), t('assistant', 50)]
+  const fit1 = cx.fitHistory(turns, 100000)
+  ok('装得下时一条都不折', fit1.folded.length === 0 && fit1.kept.length === turns.length)
+  const fit2 = cx.fitHistory(turns, 400)
+  ok('装不下只折最旧的', fit2.folded.length === 2 && fit2.kept[fit2.kept.length - 1] === turns[turns.length - 1])
+  ok('再挤也保留最近几轮（不能把当前问题折掉）', cx.fitHistory(turns, 1).kept.length === cx.MIN_RECENT_TURNS)
+  const fold = cx.foldTranscript(fit2.folded)
+  ok('摘要写明是规则式压缩且原文未发送', fold.includes('规则式压缩') && fold.includes('原文本轮未发送'))
+  ok('摘要按角色标出谁说的并限长', fold.includes('我：') && fold.includes('助手：') && fold.length < 1400, String(fold.length))
+  ok('没折叠时不产出摘要块', cx.foldTranscript([]) === '')
+  const many = Array.from({ length: 60 }, (_, i) => ({ role: 'user', text: `第${i}条 ${'话'.repeat(80)}` }))
+  const big2 = cx.foldTranscript(many)
+  ok('摘要自身也有上限（不反客为主）', big2.length < 1600 && big2.includes('未列入摘要'), String(big2.length))
+}
+
+// ---------- T. 接线：概览与压缩真的进了链路 ----------
+console.log('\n[T] 接线：repo map 与上下文折叠真的被用上')
+{
+  const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf-8')
+  const ses = read('../src/renderer/src/stores/sessions.ts')
+  ok('对话按 token 预算折叠而不是只裁条数', ses.includes('fitHistory(') && ses.includes('CONTEXT_BUDGET_RATIO'))
+  ok('预算按该连接真实窗口算（不是拍脑袋固定值）', ses.includes('contextWindowOf('))
+  ok('工作站对话带代码库概览', ses.includes('bridge.repomap.get(convDir)'))
+  const wf = read('../src/renderer/src/stores/workflow.ts')
+  ok('工作流三个角色都带目录上下文（约定 + 概览）', wf.includes('dirContextBlock(outputDir)') && wf.includes('bridge.repomap.get(dir)'))
+  const ipc = read('../src/main/ipc.ts')
+  ok('概览只按传入目录生成，读不到返回空（不创建目录）', ipc.includes("repomap:get") && !/repomap[\s\S]{0,80}mkdirSync/.test(ipc))
 }
 
 rmSync(tmp, { recursive: true, force: true })

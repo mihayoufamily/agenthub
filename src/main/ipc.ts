@@ -14,6 +14,7 @@ import * as approvals from './approvals'
 import * as mcp from './mcp'
 import * as checkpoints from './checkpoints'
 import { readConventions } from './conventions'
+import { buildRepoMap } from './repomap'
 import { checkUpdate } from './updater'
 import * as ledger from './ledger'
 import { setBusy } from './lifecycle'
@@ -648,6 +649,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   /** 读取某工作目录下的项目约定文件（AGENTS.md / CLAUDE.md）；目录为空或不存在返回空数组 */
   ipcMain.handle('conv:read', (_e, dir?: string) => readConventions(typeof dir === 'string' ? dir : undefined))
+
+  /** 工作目录的 repo map（大项目里让模型先看到地图，而不是靠 grep 摸黑） */
+  ipcMain.handle('repomap:get', async (_e, dir?: string) => buildRepoMap(typeof dir === 'string' ? dir : undefined))
 
   /** 产物目录的文件清单（验收项↔文件映射要拿真实目录核对，不能只信角色说的话） */
   ipcMain.handle('artifact:ls', async () => {

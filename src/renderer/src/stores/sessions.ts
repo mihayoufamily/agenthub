@@ -4,7 +4,8 @@ import { create } from 'zustand'
 import type { AgentSession, ChatMessage, Attachment, Skill } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
-import { estimateCost } from '@shared/pricing'
+import { estimateCost, estimateTokens, contextWindowOf } from '@shared/pricing'
+import { CONTEXT_BUDGET_RATIO, fitHistory, foldTranscript } from '@shared/context'
 import { renderConventionsBlock } from '@shared/conventions'
 import { memoryBlockFor } from '@shared/retrieval'
 import { useAgents } from './agents'
@@ -236,6 +237,11 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           const block = renderConventionsBlock(await bridge.conv.read(convDir))
           if (block) systemBlocks.push(block)
         } catch { /* 约定文件读不到不影响本次对话（多数目录本来就没有） */ }
+        // 代码库概览：大项目里没有地图就只能反复 grep，一次任务能把上下文烧光
+        try {
+          const map = await bridge.repomap.get(convDir)
+          if (map.text) systemBlocks.push(map.text)
+        } catch { /* 没地图不影响干活 */ }
       }
       // 历史记忆按本轮提问检索（全量塞既贵又把模型带偏，无关的宁可不给）
       const mem = memoryBlockFor(text, useSettings.getState().memory)
@@ -259,13 +265,27 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           systemBlocks.push(`【本机已启用的 Skill（本次未引用；需要时可要求使用其内容）】\n${rest.map((s) => `- ${s.name}：${s.desc || '（无描述）'}`).join('\n')}`)
         }
       } catch { /* 清单拉不到不影响本次对话 */ }
-      const history = [
-        ...systemBlocks.map((content) => ({ role: 'system', content })),
-        ...(activeOf(get(), agentId)?.messages ?? [])
+      // 先按条数开窗，再按 token 预算折叠最旧的轮次：以前只裁条数，
+      // 长会话要么撑爆窗口报错、要么悄悄丢掉上下文，现在改成明确标出的规则式摘要
+      const turns = (activeOf(get(), agentId)?.messages ?? [])
         // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位）
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.error && !m.demo && !m.streaming && m.id !== msgId)
         .slice(-HISTORY_WINDOW)
-        .map((m) => ({
+      const sysTokens = systemBlocks.reduce((n, b) => n + estimateTokens(b), 0)
+      const win = contextWindowOf(agent.modelConfig?.modelId ?? agent.model, agent.modelConfig?.contextWindow ?? agent.cliConfig?.contextWindow)
+      const budget = Math.max(2000, Math.floor(win * CONTEXT_BUDGET_RATIO) - sysTokens)
+      const { folded } = fitHistory(
+        turns.map((m) => ({ role: m.role as 'user' | 'assistant', text: m.text, ...(m.reasoning ? { reasoning: m.reasoning } : {}), ts: m.ts })),
+        budget
+      )
+      // fitHistory 只会从最旧的一端往里折，所以"折了几条"就是"要跳过错几条"，
+      // 按条数对齐原消息（不用内容回找，重复文本会认错）
+      const keptMsgs = turns.slice(folded.length)
+      const foldNote = folded.length ? [{ role: 'system', content: foldTranscript(folded) }] : []
+      const history = [
+        ...systemBlocks.map((content) => ({ role: 'system', content })),
+        ...foldNote,
+        ...keptMsgs.map((m) => ({
           role: m.role,
           content: m.id === userMsg.id ? m.text + attachmentText + cliImageText : m.text,
           // 图片只随本轮 user 消息发出（历史消息里的图片不重复发，避免每轮都驮着 base64）

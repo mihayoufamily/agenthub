@@ -184,6 +184,10 @@ const api = {
   conv: {
     read: (dir?: string) => ipcRenderer.invoke('conv:read', dir) as Promise<ConventionFile[]>
   },
+  /** 工作目录概览（正则扫顶层声明，不是 AST/LSP；读不到就空串） */
+  repomap: {
+    get: (dir?: string) => ipcRenderer.invoke('repomap:get', dir) as Promise<{ text: string; files: number; scanned: number; omitted: number; truncated: boolean }>
+  },
   /** 命令审批：白名单规则由主进程持有（渲染层改不动它，只能显式提交新规则） */
   approval: {
     pending: () => ipcRenderer.invoke('approval:pending') as Promise<ApprovalRequest[]>,

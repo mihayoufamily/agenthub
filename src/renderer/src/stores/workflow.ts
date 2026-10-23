@@ -21,14 +21,22 @@ import {
 } from '../lib/demo'
 import { type RunContext, type WorkflowRole, type ExecutorCapability, buildRoleMessages, parseRoleOutput } from '../lib/rolePrompts'
 
-/** 读产物目录下的项目约定（AGENTS.md / CLAUDE.md）并拼成注入段落；读不到就返回空串不干扰流程 */
-async function conventionsBlock(dir?: string): Promise<string> {
+/**
+ * 工作目录的上下文块：项目约定原文 + 代码库概览。
+ * 两个都是"关于这个目录的事实"，读不到就缺省，绝不为了凑内容编一段概览出来。
+ */
+async function dirContextBlock(dir?: string): Promise<string> {
   if (!dir) return ''
+  const blocks: string[] = []
   try {
-    return renderConventionsBlock(await bridge.conv.read(dir))
-  } catch {
-    return ''
-  }
+    const conv = renderConventionsBlock(await bridge.conv.read(dir))
+    if (conv) blocks.push(conv)
+  } catch { /* 约定文件读不到不干扰流程（多数目录本来就没有） */ }
+  try {
+    const map = await bridge.repomap.get(dir)
+    if (map.text) blocks.push(map.text)
+  } catch { /* 没地图不影响干活 */ }
+  return blocks.join('\n\n')
 }
 
 interface WorkflowState {
@@ -855,7 +863,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       .map((a) => `\n[附件：${a.name}]\n${a.content}`)
       .join('')
     // 产物目录里若放着项目约定文件，整轮任务自动带上（三个角色都带：规划要按约定定验收标准）
-    const conventions = await conventionsBlock(outputDir)
+    const conventions = await dirContextBlock(outputDir)
     const run: WorkflowRun = {
       id: uid('run'),
       goal,
@@ -1240,7 +1248,7 @@ async function resumeRework(get: () => WorkflowState, set: (partial: Partial<Wor
   // 返工沿用本次任务的产物目录（旧记录未记录时按当前配置解析一次并回填）
   const outputDir = run.outputDir || (await bridge.artifacts.dir())
   if (!run.outputDir) setRun((r) => ({ ...r, outputDir }))
-  const reworkConventions = await conventionsBlock(outputDir)
+  const reworkConventions = await dirContextBlock(outputDir)
   const ctx: RunContext = {
     goal: run.goal,
     round,

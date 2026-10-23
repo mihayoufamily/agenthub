@@ -522,6 +522,13 @@ export interface ConventionFile {
   truncated?: boolean
 }
 
+/** repo map 的单文件条目（概览注入用） */
+export interface RepoMapFile {
+  rel: string
+  bytes?: number
+  symbols: string[]
+}
+
 /** 一次工具层文件改动的登记条目（回滚清单与交付验收共用） */
 export interface FileChange {
   /** 绝对路径 */
