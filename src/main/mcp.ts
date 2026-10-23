@@ -10,10 +10,39 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { McpServer, McpProbe } from '../shared/types'
+import { needsComspec } from '../shared/argv'
 
 const PROTOCOL_VERSION = '2024-11-05'
 const DEFAULT_TIMEOUT = 15_000
 const MAX_BODY = 512 * 1024
+
+/** 旧版单命令配置的拒收码：界面按这个码渲染，不靠文案匹配 */
+export const MCP_LEGACY_CODE = 'invalid_legacy_command'
+
+/**
+ * 把配置换算成一次 spawn 的入参（纯裁决，逻辑层可直接断言）。
+ * 三种结果：
+ * ① 有 launch → 数组直传，shell:false；
+ * ② 只有旧 command → 抛 legacy 错误码，等用户重填（不猜拆，也不删记录）；
+ * ③ .cmd/.bat 家族 → 用 comspec 包一层。②是用户 2026-10-23 拍定的，③是 Windows 的现实。
+ */
+export function planSpawn(server: McpServer): { file: string; args: string[]; shell: boolean } {
+  const bin = (server.launch?.bin ?? '').trim()
+  const args = Array.isArray(server.launch?.args) ? server.launch.args.filter((a) => typeof a === 'string') : []
+  if (!bin) {
+    // 没 launch 只有 command：旧格式。v0.4.0 明确不作废式兼容——不自动拆分
+    if ((server.command ?? '').trim()) throw new Error(`${MCP_LEGACY_CODE}：该 server 是旧版单命令配置，已停用，请在设置里重填`)
+    throw new Error('MCP server 没有启动命令')
+  }
+  if (needsComspec(bin)) {
+    // 重新拼成一条 cmd 能吃的串：路径含空格必须带引号，否则 cmd 会在空格处断开
+    const quote = (s: string) => (/(^".*"$)|^\S+$/.test(s) ? s : `"${s.replace(/"/g, '\\"')}"`)
+    const line = [bin, ...args].map(quote).join(' ')
+    const comspec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe'
+    return { file: comspec, args: ['/d', '/c', line], shell: true }
+  }
+  return { file: bin, args, shell: false }
+}
 
 export interface McpToolInfo {
   name: string
@@ -52,9 +81,12 @@ export class McpClient {
   }
 
   private start() {
-    const cmd = this.server.command?.trim()
-    if (!cmd) throw new Error('MCP server 没有启动命令')
-    const child = spawn(cmd, { shell: true, windowsHide: true, ...(this.server.env ? { env: { ...process.env, ...this.server.env } } : {}) })
+    const plan = planSpawn(this.server)
+    const child = spawn(plan.file, plan.args, {
+      shell: plan.shell,
+      windowsHide: true,
+      ...(this.server.env ? { env: { ...process.env, ...this.server.env } } : {})
+    })
     this.proc = child
     child.stdout?.on('data', (b: Buffer) => this.onData(b.toString('utf8')))
     child.stderr?.on('data', () => { /* server 的日志不该混进协议流 */ })

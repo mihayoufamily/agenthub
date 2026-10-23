@@ -627,7 +627,7 @@ console.log('\n[N] MCP：连得上、列得出、调用得到，坏消息不打�
   const node = process.execPath
   // 绝对路径：不依赖跑批时的 cwd
   const MOCK = fileURLToPath(new URL('./mock-mcp-server.mjs', import.meta.url))
-  const srv = (extra = {}) => ({ id: 'mock', name: 'Mock MCP', command: `"${node}" "${MOCK}"`, timeoutMs: 8000, ...extra })
+  const srv = (extra = {}) => ({ id: 'mock', name: 'Mock MCP', command: `"${node}" "${MOCK}"`, launch: { bin: node, args: [MOCK] }, formatVersion: 2, timeoutMs: 8000, ...extra })
   const waitExit = async (c, ms = 3000) => {
     const s0 = Date.now()
     while (c.running && Date.now() - s0 < ms) await new Promise((r) => setTimeout(r, 100))
@@ -678,7 +678,7 @@ console.log('\n[N] MCP：连得上、列得出、调用得到，坏消息不打�
   // 命令为空 / 命令不存在：要如实失败，不能挂死
   const bad = await mc.probeServer({ id: 'x', name: '空', command: '' })
   ok('没配命令时如实失败', bad.ok === false && bad.message.includes('没有启动命令'), bad.message)
-  const missing = await mc.probeServer({ id: 'x', name: '缺', command: '"__no_such_binary_xyz__" --version', timeoutMs: 4000 })
+  const missing = await mc.probeServer({ id: 'x', name: '缺', command: '', launch: { bin: '__no_such_binary_xyz__', args: ['--version'] }, formatVersion: 2, timeoutMs: 4000 })
   ok('命令起不来时如实报启动失败（不假装连上了）', missing.ok === false && missing.message.includes('连接失败'), missing.message)
 
   // 函数表：名字要符合 OpenAI 的字符集，且能反查回 server+工具
@@ -971,6 +971,53 @@ console.log('\n[W2] importConfig 保字段')
   ok('store.ts 的 importConfig 改走 normalizeImported，且不再各写各的版本号',
     wired && storeJs.includes('SCHEMA_HEAD') && !storeJs.includes('CURRENT_SCHEMA_VERSION'),
     `importConfig→normalizeImported=${wired} 用 SCHEMA_HEAD=${storeJs.includes('SCHEMA_HEAD')} 旧常量残留=${storeJs.includes('CURRENT_SCHEMA_VERSION')}`)
+}
+
+// ---------- X. MCP 起进程：argv 直传、旧格式拒绝、shell 语法不生效 ----------
+console.log('\n[X] MCP planSpawn：不再把整条命令交 shell 解释')
+{
+  const mc = await import('../out/main/mcp.js')
+  const node = process.execPath
+  const MOCK = fileURLToPath(new URL('./mock-mcp-server.mjs', import.meta.url))
+  const good = { id: 'g', name: 'G', command: `"${node}" "${MOCK}"`, launch: { bin: node, args: [MOCK] }, formatVersion: 2 }
+
+  const plan = mc.planSpawn(good)
+  ok('有 launch 时按数组直传且不开 shell', plan.shell === false && plan.file === node && plan.args[0] === MOCK, JSON.stringify(plan))
+  ok('只有 command 无 launch 时抛 legacy 错误码', (() => {
+    try { mc.planSpawn({ id: 'l', name: 'L', command: `"${node}" "${MOCK}"` }); return false }
+    catch (e) { return String(e.message).startsWith(mc.MCP_LEGACY_CODE) }
+  })())
+  // 用户拍定"旧配置一律作废重填"：即使带着 formatVersion:2，launch.bin 为空也不能回退去切 command
+  ok('launch.bin 为空一律按旧格式拒收，不回退切分', (() => {
+    try { mc.planSpawn({ id: 'c', name: 'C', command: 'x y', launch: { bin: '', args: [] }, formatVersion: 2 }); return false }
+    catch (e) { return String(e.message).startsWith(mc.MCP_LEGACY_CODE) }
+  })())
+  const cm = mc.planSpawn({ id: 'n', name: 'N', command: '', launch: { bin: 'C:\\Program Files\\nodejs\\npx.CMD', args: ['-y', 'pkg'] }, formatVersion: 2 })
+  ok('.cmd 家族才包 comspec', cm.shell === true && cm.file.toLowerCase().includes('cmd.exe') && cm.args[0] === '/d' && cm.args[1] === '/c', JSON.stringify(cm))
+  ok('comspec 那条把带空格的可执行文件加引号、普通参数不加', cm.args[2] === '"C:\\Program Files\\nodejs\\npx.CMD" -y pkg', cm.args[2])
+  ok('.bat 也走 comspec（判定只认扩展名家族，不认具体文件）', mc.planSpawn({ id: 'b', name: 'B', command: '', launch: { bin: 'run.bat', args: [] }, formatVersion: 2 }).shell === true)
+  ok('argv 数组里出现的空格路径在直传分支保持单个元素不被再切', (() => {
+    const p = mc.planSpawn({ id: 'd', name: 'D', command: '', launch: { bin: node, args: ['C:\\a b\\s.js'] }, formatVersion: 2 })
+    return p.shell === false && p.args.length === 1 && p.args[0] === 'C:\\a b\\s.js'
+  })())
+  let empty = ''
+  try { mc.planSpawn({ id: 'e', name: 'E', command: '', launch: { bin: '  ', args: [] }, formatVersion: 2 }) } catch (e) { empty = e.message }
+  ok('可执行文件为空时如实报错而不是起个空进程', empty.includes('没有启动命令'), empty)
+
+  // 真起一次：新格式连得上
+  const p = await mc.probeServer(good)
+  ok('新格式（launch）能正常探到工具', p.ok === true && (p.tools?.length ?? 0) === 3, JSON.stringify(p).slice(0, 140))
+
+  // sentinel：命令串里藏第二段，若还有 shell 解释就会写出文件
+  const dir = mkdtempSync(join(tmpdir(), 'ahub-mcp-'))
+  const marker = join(dir, 'pwned.txt').replace(/\\/g, '/')
+  const legacy = { id: 'm', name: 'M', command: `"${node}" "${MOCK}" && node -e "require('fs').writeFileSync('${marker}',1)"` }
+  const lp = await mc.probeServer(legacy)
+  ok('旧格式记录根本连不上（不猜拆）', lp.ok === false && lp.message.includes(mc.MCP_LEGACY_CODE), lp.message)
+  ok('&& 之后的第二段没被执行（sentinel 文件不存在）', !existsSync(join(dir, 'pwned.txt')))
+  const viaLaunchBad = await mc.probeServer({ id: 'm2', name: 'M2', command: '', launch: { bin: node, args: [MOCK, '&&', `node -e "require('fs').writeFileSync('${marker}',1)"`] }, formatVersion: 2 })
+  ok('launch 数组里的 && 只当普通参数传给 server，不产生第二条命令', !existsSync(join(dir, 'pwned.txt')) && viaLaunchBad.ok === true, viaLaunchBad.message)
+  rmSync(dir, { recursive: true, force: true })
 }
 
 rmSync(tmp, { recursive: true, force: true })
