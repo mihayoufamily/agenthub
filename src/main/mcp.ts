@@ -19,29 +19,82 @@ const MAX_BODY = 512 * 1024
 /** 旧版单命令配置的拒收码：界面按这个码渲染，不靠文案匹配 */
 export const MCP_LEGACY_CODE = 'invalid_legacy_command'
 
+/** spawn 真正要带的选项。comspec 分支带 windowsVerbatimArguments，任何分支都不带 shell:true */
+export interface SpawnPlanOptions {
+  windowsHide: boolean
+  shell?: boolean
+  windowsVerbatimArguments?: boolean
+}
+
+export interface SpawnPlan {
+  file: string
+  args: string[]
+  options: SpawnPlanOptions
+  /** 这条确实经 cmd.exe（npm 家族）。披露用这个标记，不要用 shell 标志——本方案里不再有 shell:true */
+  comspec: boolean
+}
+
 /**
- * 把配置换算成一次 spawn 的入参（纯裁决，逻辑层可直接断言）。
- * 三种结果：
- * ① 有 launch → 数组直传，shell:false；
- * ② 只有旧 command → 抛 legacy 错误码，等用户重填（不猜拆，也不删记录）；
- * ③ .cmd/.bat 家族 → 用 comspec 包一层。②是用户 2026-10-23 拍定的，③是 Windows 的现实。
+ * comspec 分支的命令行构造：拒绝式，不做任何转义。
+ * cmd 的引号规则里没有"转义引号"这东西——`\"` 不是转义（cmd 只把 `\` 当普通字符），
+ * 所以 `"a\"b & type nul > f"` 会在 `\` 后面那个 `"` 处把引号区关掉，`&` 立刻变成真分隔符；
+ * 而 `%` 即使在引号内也照样展开。含这两种字符的 token 在这一分支无法安全表示，只能拒收。
+ * 规则（顺序即优先级）：
+ * ① 含 `"` 或 `%` → 抛错，消息点名这个 token；
+ * ② 含 `& | ^ < >` → 抛错，**与有没有空格无关**：本机实测（verify/fixes-check.mjs [X] 段有哨兵断言）
+ *   引号并挡不住它们——`cmd /d /c "x & type nul > f"` 照样写出 f；`/d /s /c` 同样挡不住；
+ *   而 `^` 转义要连写两层、极易出错。既然证明不了引号能中和，就按拒绝处理（不猜）。
+ * ③ 含空白（或本身就是空串）→ 包一层双引号：①②已过，剩下的只是空格/普通字符，
+ *   引号是 cmd 唯一认可的空格保序写法，`"C:\Program Files\nodejs\npm.cmd" --version` 实测可用；
+ *   空串包成 `""` 是为了不把参数位静默吃掉（cmd 会合并裸的空格）。
+ * ④ 其余原样直出。`npx -y @scope/pkg`、`npm.cmd --version` 这类常规配置不命中任何拒绝条件。
+ * 已知限制（旧实现同样如此，不是这次引入的）：整条命令行里出现第 2 对引号时 cmd 的 /c
+ * 会把首尾引号剥掉，`"a b" "c d"` 这种两个带空格参数会起不来（失败是响的，不是注入）。
  */
-export function planSpawn(server: McpServer): { file: string; args: string[]; shell: boolean } {
+function comspecToken(tok: string): string {
+  if (tok.includes('"') || tok.includes('%')) {
+    throw new Error(`MCP comspec 分支无法安全表示含 " 或 % 的参数，已拒收：${tok}（cmd 里 \\" 不是转义，% 在引号内也会展开）`)
+  }
+  if (/[&|^<>]/.test(tok)) {
+    throw new Error(`MCP comspec 分支拒收含 cmd 元字符（& | ^ < >）的参数，已拒收：${tok}（实测引号挡不住它们）`)
+  }
+  if (!tok || /\s/.test(tok)) return `"${tok}"`
+  return tok
+}
+
+/**
+ * 把配置换算成一次 spawn 的入参与选项（纯裁决，逻辑层可直接断言，不真起进程）。
+ * 三种结果：
+ * ① 有 launch 且不属 cmd 家族 → argv 数组直传，完全不经 cmd；
+ * ② 只有旧 command → 抛 legacy 错误码，等用户重填（不猜拆，也不删记录）；
+ * ③ `.cmd`/`.bat` 家族与 npm 系裸启动器（npx / npm / pnpm / yarn）→ 仍然经 cmd.exe 起
+ *   （PATH 上它们没有同名 .exe，硬走 argv 只会 ENOENT），但参数经 comspecToken 拒绝式校验，
+ *   配置值成不了 cmd 语法；再用 windowsVerbatimArguments 让 Node 把这条命令行原样交出去，
+ *   不再叠 shell:true——那会让 Node 二次包一层 cmd 并打 DEP0190。
+ * ②是用户 2026-10-23 拍定的，③是 Windows 的现实。
+ */
+export function planSpawn(server: McpServer): SpawnPlan {
   const bin = (server.launch?.bin ?? '').trim()
-  const args = Array.isArray(server.launch?.args) ? server.launch.args.filter((a) => typeof a === 'string') : []
   if (!bin) {
     // 没 launch 只有 command：旧格式。v0.4.0 明确不作废式兼容——不自动拆分
     if ((server.command ?? '').trim()) throw new Error(`${MCP_LEGACY_CODE}：该 server 是旧版单命令配置，已停用，请在设置里重填`)
     throw new Error('MCP server 没有启动命令')
   }
+  // 参数一律要真是字符串：手改成 [1, '--x'] 这种不能静默过滤掉（配置会悄悄变形）
+  const declared = server.launch?.args
+  const rawArgs: unknown[] = Array.isArray(declared) ? declared : []
+  const badIdx = rawArgs.findIndex((a) => typeof a !== 'string')
+  if (badIdx >= 0) throw new Error(`MCP launch.args 第 ${badIdx} 个是非字符串项（${String(rawArgs[badIdx])}），已拒收：参数必须全是字符串`)
+  const args = rawArgs as string[]
   if (needsComspec(bin)) {
-    // 重新拼成一条 cmd 能吃的串：路径含空格必须带引号，否则 cmd 会在空格处断开
-    const quote = (s: string) => (/(^".*"$)|^\S+$/.test(s) ? s : `"${s.replace(/"/g, '\\"')}"`)
-    const line = [bin, ...args].map(quote).join(' ')
+    // 拒绝式拼命令行：路径含空格必须带引号，否则 cmd 会在空格处断开
+    const line = [bin, ...args].map(comspecToken).join(' ')
     const comspec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe'
-    return { file: comspec, args: ['/d', '/c', line], shell: true }
+    // shell:false + windowsVerbatimArguments：cmd.exe 自己就是我们要起的进程，
+    // 再让 Node 包一层 shell 就成了 double-wrap（两层 cmd），还会招出 DEP0190 告警
+    return { file: comspec, args: ['/d', '/c', line], options: { windowsHide: true, shell: false, windowsVerbatimArguments: true }, comspec: true }
   }
-  return { file: bin, args, shell: false }
+  return { file: bin, args, options: { windowsHide: true }, comspec: false }
 }
 
 export interface McpToolInfo {
@@ -83,8 +136,7 @@ export class McpClient {
   private start() {
     const plan = planSpawn(this.server)
     const child = spawn(plan.file, plan.args, {
-      shell: plan.shell,
-      windowsHide: true,
+      ...plan.options,
       ...(this.server.env ? { env: { ...process.env, ...this.server.env } } : {})
     })
     this.proc = child

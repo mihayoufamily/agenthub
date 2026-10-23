@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import http from 'node:http'
+import { spawnSync } from 'node:child_process'
 
 const { execTool } = await import('../out/main/tools.js')
 const openai = await import('../out/main/adapters/openai.js')
@@ -973,8 +974,11 @@ console.log('\n[W2] importConfig 保字段')
     `importConfig→normalizeImported=${wired} 用 SCHEMA_HEAD=${storeJs.includes('SCHEMA_HEAD')} 旧常量残留=${storeJs.includes('CURRENT_SCHEMA_VERSION')}`)
 }
 
-// ---------- X. MCP 起进程：argv 直传、旧格式拒绝、shell 语法不生效 ----------
-console.log('\n[X] MCP planSpawn：不再把整条命令交 shell 解释')
+// ---------- X. MCP 起进程：argv 直传、旧格式拒绝、comspec 分支拒绝 cmd 语法 ----------
+// 诚实口径（评审后定稿）：npm 家族（裸 npx/npm/pnpm/yarn 与 .cmd/.bat）仍然经 cmd.exe 起，
+// 但 ① 参数走拒绝式校验，配置值不可能变成 cmd 语法；② 不再把 cmd.exe 当 file 还叠 shell:true，
+// 所以 Node 不会二次包层、也不再打 DEP0190。其余可执行文件走 argv 直传，完全不经 cmd。
+console.log('\n[X] MCP planSpawn：argv 直传；npm 家族经 cmd.exe 但参数走拒绝式校验')
 {
   const mc = await import('../out/main/mcp.js')
   const node = process.execPath
@@ -982,7 +986,7 @@ console.log('\n[X] MCP planSpawn：不再把整条命令交 shell 解释')
   const good = { id: 'g', name: 'G', command: `"${node}" "${MOCK}"`, launch: { bin: node, args: [MOCK] }, formatVersion: 2 }
 
   const plan = mc.planSpawn(good)
-  ok('有 launch 时按数组直传且不开 shell', plan.shell === false && plan.file === node && plan.args[0] === MOCK, JSON.stringify(plan))
+  ok('有 launch 时按数组直传且不开 shell', !!plan.options && plan.comspec === false && plan.options.shell !== true && plan.file === node && plan.args[0] === MOCK, JSON.stringify(plan))
   ok('只有 command 无 launch 时抛 legacy 错误码', (() => {
     try { mc.planSpawn({ id: 'l', name: 'L', command: `"${node}" "${MOCK}"` }); return false }
     catch (e) { return String(e.message).startsWith(mc.MCP_LEGACY_CODE) }
@@ -993,12 +997,17 @@ console.log('\n[X] MCP planSpawn：不再把整条命令交 shell 解释')
     catch (e) { return String(e.message).startsWith(mc.MCP_LEGACY_CODE) }
   })())
   const cm = mc.planSpawn({ id: 'n', name: 'N', command: '', launch: { bin: 'C:\\Program Files\\nodejs\\npx.CMD', args: ['-y', 'pkg'] }, formatVersion: 2 })
-  ok('.cmd 家族才包 comspec', cm.shell === true && cm.file.toLowerCase().includes('cmd.exe') && cm.args[0] === '/d' && cm.args[1] === '/c', JSON.stringify(cm))
+  // 评审后重写（原断言只看 shell===true，那正是 double-wrap + DEP0190 的来源）：
+  // comspec 用显式布尔标记，options 里绝不能有 shell:true
+  ok('.cmd 家族才包 comspec，且交出去的不是 Node 的 shell 包装',
+    cm.comspec === true && cm.file.toLowerCase().endsWith('cmd.exe') && cm.args[0] === '/d' && cm.args[1] === '/c' &&
+      !!cm.options && cm.options.shell !== true && cm.options.windowsVerbatimArguments === true,
+    JSON.stringify(cm))
   ok('comspec 那条把带空格的可执行文件加引号、普通参数不加', cm.args[2] === '"C:\\Program Files\\nodejs\\npx.CMD" -y pkg', cm.args[2])
-  ok('.bat 也走 comspec（判定只认扩展名家族，不认具体文件）', mc.planSpawn({ id: 'b', name: 'B', command: '', launch: { bin: 'run.bat', args: [] }, formatVersion: 2 }).shell === true)
+  ok('.bat 也走 comspec（判定只认扩展名家族，不认具体文件）', mc.planSpawn({ id: 'b', name: 'B', command: '', launch: { bin: 'run.bat', args: [] }, formatVersion: 2 }).comspec === true)
   ok('argv 数组里出现的空格路径在直传分支保持单个元素不被再切', (() => {
     const p = mc.planSpawn({ id: 'd', name: 'D', command: '', launch: { bin: node, args: ['C:\\a b\\s.js'] }, formatVersion: 2 })
-    return p.shell === false && p.args.length === 1 && p.args[0] === 'C:\\a b\\s.js'
+    return !!p.options && p.comspec === false && p.options.shell !== true && p.args.length === 1 && p.args[0] === 'C:\\a b\\s.js'
   })())
   let empty = ''
   try { mc.planSpawn({ id: 'e', name: 'E', command: '', launch: { bin: '  ', args: [] }, formatVersion: 2 }) } catch (e) { empty = e.message }
@@ -1018,6 +1027,105 @@ console.log('\n[X] MCP planSpawn：不再把整条命令交 shell 解释')
   const viaLaunchBad = await mc.probeServer({ id: 'm2', name: 'M2', command: '', launch: { bin: node, args: [MOCK, '&&', `node -e "require('fs').writeFileSync('${marker}',1)"`] }, formatVersion: 2 })
   ok('launch 数组里的 && 只当普通参数传给 server，不产生第二条命令', !existsSync(join(dir, 'pwned.txt')) && viaLaunchBad.ok === true, viaLaunchBad.message)
   rmSync(dir, { recursive: true, force: true })
+
+  // ---- 评审 Ruling C：args 里的非字符串项不再被静默丢掉（旧代码 filter 掉，配置悄悄变形）----
+  const throwsWith = (srv, needle) => {
+    try { mc.planSpawn(srv); return { threw: false, hit: false, msg: '（没抛错，返回了 plan）' } }
+    catch (e) { const msg = String((e && e.message) || e); return { threw: true, hit: msg.includes(needle), msg } }
+  }
+  const ns = throwsWith({ id: 'ns', name: 'NS', command: '', formatVersion: 2, launch: { bin: node, args: [1, '--x'] } }, '非字符串')
+  ok('launch.args 含非字符串项时如实拒收而不是静默过滤', ns.threw && ns.hit, ns.msg)
+
+  // ---- 评审 Ruling A：comspec 那条命令行必须拒绝式构造（下面是评审复现的两个逃逸）----
+  // 哨兵是 inert 的 `type nul > <临时目录>/pwnedN.txt`：只写出空文件，目录跑完就删；不用 calc、不做破坏性动作
+  const hdir = mkdtempSync(join(tmpdir(), 'ahub-comspec-'))
+  const sent1 = join(hdir, 'pwned1.txt')
+  const sent2 = join(hdir, 'pwned2.txt')
+  const sent3 = join(hdir, 'pwned3.txt')
+  const tokQuote = `a"b & type nul > ${sent1.replace(/\\/g, '/')}`
+  const hostileQuote = { id: 'h1', name: 'H1', command: '', formatVersion: 2, launch: { bin: 'nope.bat', args: [tokQuote] } }
+  const hq = throwsWith(hostileQuote, tokQuote)
+  ok('comspec 分支：含 " 的 token 一律拒收且消息点名该 token', hq.threw && hq.hit, hq.msg)
+  // 起进程那条路也真跑一遍：万一以后有人不抛错而是照样拼命令行，哨兵文件就会出现
+  const hqProbe = await mc.probeServer(hostileQuote)
+  ok('comspec 分支：" + & 没能变成第二条 cmd 命令（sentinel 不存在）', !existsSync(sent1) && hqProbe.ok === false, `${hqProbe.message} pwned1存在=${existsSync(sent1)}`)
+
+  const tokRedirect = `x>${sent2.replace(/\\/g, '/')}`
+  const hostileRedirect = { id: 'h2', name: 'H2', command: '', formatVersion: 2, launch: { bin: 'nope.bat', args: [tokRedirect] } }
+  const hr = throwsWith(hostileRedirect, tokRedirect)
+  ok('comspec 分支：含裸 > 的 token 拒收且消息点名该 token', hr.threw && hr.hit, hr.msg)
+  const hrProbe = await mc.probeServer(hostileRedirect)
+  ok('comspec 分支：裸 > 的重定向没落到磁盘（sentinel 不存在）', !existsSync(sent2) && hrProbe.ok === false, `${hrProbe.message} pwned2存在=${existsSync(sent2)}`)
+
+  // 本机实测推翻"引号能中和元字符"这个前提：`cmd /d /c "x & type nul > f"`（有空格、有引号）照样写出 f。
+  // 所以带 cmd 元字符的 token 一律拒收，与有没有空格无关。
+  // 这一条故意用"路径带空格、内容只是 echo 的真实 .bat"当 bin：变异检查确认过，把"含空格又含 &"的
+  // token 按 ③ 包成引号交出去时（bin 自己也被包 → 整行两对引号 → cmd 剥首尾引号），
+  // 这个哨兵文件真的会被写出来——用不带空格/不存在的路径就会假绿。
+  const spaced = join(hdir, 'has space')
+  mkdirSync(spaced, { recursive: true })
+  const inertBat = join(spaced, 'inert.bat')
+  writeFileSync(inertBat, '@echo off\r\n@echo inert\r\n')
+  const tokMixed = `a b & type nul > ${sent3.replace(/\\/g, '/')}`
+  const hostileMixed = { id: 'h6', name: 'H6', command: '', formatVersion: 2, launch: { bin: inertBat, args: [tokMixed] } }
+  const hm = throwsWith(hostileMixed, tokMixed)
+  ok('comspec 分支：带空格又含 & 的 token 也拒收（不指望引号中和它）', hm.threw && hm.hit, hm.msg)
+  const hmProbe = await mc.probeServer(hostileMixed)
+  ok('comspec 分支：加引号包住的 & 也没变成第二条命令（sentinel 不存在）', !existsSync(sent3) && hmProbe.ok === false, `${hmProbe.message} pwned3存在=${existsSync(sent3)}`)
+
+  // 参数位不能被吃掉：空串要拼成 ""，不能变成"这个参数没了"
+  ok('comspec 分支：空参数保留成 "" 而不是被静默省略', (() => {
+    const p = mc.planSpawn({ id: 'h7', name: 'H7', command: '', formatVersion: 2, launch: { bin: 'nope.cmd', args: ['', '-y'] } })
+    return p.comspec === true && p.args[2] === 'nope.cmd "" -y'
+  })(), JSON.stringify(mc.planSpawn({ id: 'h7', name: 'H7', command: '', formatVersion: 2, launch: { bin: 'nope.cmd', args: ['', '-y'] } })))
+
+  // cmd 里引号内的 % 照样展开，所以 % 也一律拒收
+  const pct = throwsWith({ id: 'h5', name: 'H5', command: '', formatVersion: 2, launch: { bin: 'nope.cmd', args: ['--tag=%USERPROFILE%'] } }, '%')
+  ok('comspec 分支：含 % 的 token 拒收（引号内 cmd 照样展开）', pct.threw && pct.hit, pct.msg)
+
+  // 被误伤的那条正确性问题：--filter="a b" 在 comspec 分支无法安全表示 → 明确拒收（文档化为不支持），
+  // 同一个值在 argv 分支原样可用（那条不经 cmd）
+  const filt = '--filter="a b"'
+  const hf = throwsWith({ id: 'h3', name: 'H3', command: '', formatVersion: 2, launch: { bin: 'nope.cmd', args: [filt] } }, filt)
+  ok('comspec 分支：--filter="a b" 明确拒收而不是悄悄变成 \\" 假转义', hf.threw && hf.hit, hf.msg)
+  const filtSrv = { id: 'h4', name: 'H4', command: '', formatVersion: 2, launch: { bin: node, args: [MOCK, filt] } }
+  const filtPlan = mc.planSpawn(filtSrv)
+  const filtProbe = await mc.probeServer(filtSrv)
+  ok('同一个 --filter="a b" 在 argv 分支原样交给 server（那条不经 cmd）', filtPlan.args[1] === filt && filtPlan.comspec === false && filtProbe.ok === true, `${JSON.stringify(filtPlan).slice(0, 160)} ${filtProbe.message}`)
+
+  // 常规配置不受影响：这些 token 里没有 cmd 元字符
+  const nx = mc.planSpawn({ id: 'n2', name: 'N2', command: '', formatVersion: 2, launch: { bin: 'npx', args: ['-y', '@some/mcp-server'] } })
+  ok('裸 npx -y @scope/pkg 仍拼出预期的 /d /c 命令行', nx.comspec === true && nx.args[0] === '/d' && nx.args[1] === '/c' && nx.args[2] === 'npx -y @some/mcp-server', JSON.stringify(nx))
+
+  // ---- 评审 Ruling B：真起一次 cmd 家族，确认既可用又没有 DEP0190 ----
+  // 放在子进程里跑：DEP0190 由"调用 spawn 的那个进程"打，只有另起进程才能把它落到可断言的 stderr 上，
+  // 同时不污染本套件的输出。npm.cmd --version 自己会退出；脚本内 30s 看门狗 kill 掉子进程，
+  // 外层 spawnSync 再给 90s 超时兜底（超时会被 spawnSync 终止），父进程不留悬挂进程。
+  const npmCmd = join(process.execPath, '..', 'npm.cmd')
+  const MCP_JS = fileURLToPath(new URL('../out/main/mcp.js', import.meta.url))
+  const liveScript = (forceShell) => `
+const { spawn } = require('node:child_process')
+const mc = require(${JSON.stringify(MCP_JS)})
+const plan = mc.planSpawn({ id: 'live', name: 'LIVE', command: '', formatVersion: 2, launch: { bin: ${JSON.stringify(npmCmd)}, args: ['--version'] } })
+const opts = ${forceShell ? '{ shell: true, windowsHide: true }' : 'plan.options'}
+const child = spawn(plan.file, plan.args, Object.assign({ stdio: ['ignore', 'pipe', 'pipe'] }, opts))
+let out = ''
+child.stdout.on('data', (b) => { out += b.toString('utf8') })
+const wd = setTimeout(() => { try { child.kill() } catch {} }, 30000)
+child.once('error', (e) => { clearTimeout(wd); console.log(JSON.stringify({ error: e.message })); process.exit(3) })
+child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ code, out: out.trim(), comspec: plan.comspec, line: plan.args[2] })) })
+`
+  const parseChild = (r) => { try { return JSON.parse(String(r.stdout).trim()) } catch { return { parseError: String(r.stdout).slice(0, 160) } } }
+  const liveRun = spawnSync(process.execPath, ['-e', liveScript(false)], { encoding: 'utf-8', timeout: 90_000, windowsHide: true })
+  const live = parseChild(liveRun)
+  ok('comspec 分支真起一次 npm.cmd --version：退出码 0、stdout 是版本号、且没有 DEP0190',
+    live.code === 0 && /^\d+\.\d+\.\d+/.test(String(live.out)) && !/DEP0190/.test(String(liveRun.stderr)),
+    JSON.stringify({ live, stderr: String(liveRun.stderr).slice(0, 180) }))
+  // 对照组：故意用回旧形状（cmd.exe 当 file 还叠 shell:true），确认上一条不是空断言
+  const ctlRun = spawnSync(process.execPath, ['-e', liveScript(true)], { encoding: 'utf-8', timeout: 90_000, windowsHide: true })
+  ok('对照组：cmd.exe 当 file 再叠 shell:true 确实打出 DEP0190（说明上一条有牙）',
+    /DEP0190/.test(String(ctlRun.stderr)), String(ctlRun.stderr).slice(0, 180))
+  rmSync(hdir, { recursive: true, force: true })
 }
 
 rmSync(tmp, { recursive: true, force: true })
