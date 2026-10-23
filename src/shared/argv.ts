@@ -3,8 +3,10 @@
  *
  * 为什么自己切而不是 shell:true：整条命令交 cmd 解析，等于把"配置里写什么就跑什么"变成
  * 任意 shell 语法。切完存成数组，起进程时不再经过 shell 的解释。
- * 为什么留 comspec 一条路：Windows 上 npx/npm 的真身是 .CMD，Node 对 .bat/.cmd
- * 在非 shell 启动下有专门限制，硬撑"纯 shell:false"只会让用户用不了最常见的 MCP server。
+ * 为什么留 comspec 一条路：argv 那条路只认真正的 exe。Windows 上 CreateProcess 会把
+ * `node` 补成 `node.exe`，但 PATH 上的 npx/npm/pnpm/yarn 真身是 .CMD（没有同名 .exe），
+ * 对它们硬走 shell:false 只会 ENOENT —— 所以 .cmd/.bat 家族和 npm 系裸启动器一律包一层
+ * comspec，其余（node、node.exe、带路径的可执行文件）继续走 argv 直传。
  */
 
 /** 一个命令的可执行文件 + 参数 + 是否需要包一层 comspec */
@@ -50,15 +52,20 @@ export function tokenizeCommand(command: string): string[] {
   return out
 }
 
-/** .cmd / .bat 家族：这些必须经 comspec 才起得来 */
+/** .cmd / .bat 家族，以及 npm 系裸启动器：这些必须经 comspec 才起得来 */
 export function needsComspec(bin: string): boolean {
-  return /\.(cmd|bat)$/i.test((bin ?? '').trim())
+  const b = (bin ?? '').trim()
+  if (/\.(cmd|bat)$/i.test(b)) return true
+  // npx/npm/pnpm/yarn 的真身是 .CMD，PATH 上没有同名 .exe；shell:false 直接 spawn 会 ENOENT。
+  // node / node.exe / 带路径的可执行文件仍走 argv 直传。
+  return !/[/\\]/.test(b) && /^(npx|npm|pnpm|yarn)$/i.test(b)
 }
 
-/** 由命令串算出启动计划；切不出可执行文件时返回 null，由调用方如实报错 */
+/** 由命令串算出启动计划；切不出可执行文件时返回 null，由调用方如实报错（不起空进程） */
 export function toLaunchPlan(command: string): LaunchPlan | null {
   const parts = tokenizeCommand(command)
   if (!parts.length) return null
   const [file, ...args] = parts
+  if (!file.trim()) return null // 空引号（"" / " "）切得出空 token，不能当可执行文件交出去
   return { file, args, comspec: needsComspec(file) }
 }

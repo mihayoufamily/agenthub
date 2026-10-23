@@ -880,6 +880,22 @@ console.log('\n[V] argv：引号感知切分与 .cmd 家族判定')
   ok('.bat 也算 .cmd 家族', av.needsComspec('x.BaT') === true)
   ok('.exe / 裸名不算（不该白绕一层 comspec）', av.needsComspec('node.exe') === false && av.needsComspec('node') === false)
   ok('无扩展名不算', av.needsComspec('server') === false)
+  // 以下 3 条为评审后补：toLaunchPlan 此前零覆盖；裸 npx 走 shell:false 在 Windows 必 ENOENT
+  const pEmpty = av.toLaunchPlan('""')
+  const pBlank = av.toLaunchPlan('" "')
+  ok('空引号切不出可执行文件时返回 null（不把空 file 交给调用方）',
+    pEmpty === null && pBlank === null,
+    `""→${JSON.stringify(pEmpty)}  " "→${JSON.stringify(pBlank)}`)
+  const pPlan = av.toLaunchPlan('"C:\\Program Files\\nodejs\\npx.CMD" -y pkg')
+  ok('toLaunchPlan 正常切出 file/args/comspec 三项',
+    !!pPlan && pPlan.file === 'C:\\Program Files\\nodejs\\npx.CMD' &&
+      pPlan.args.join('|') === '-y|pkg' && pPlan.comspec === true, JSON.stringify(pPlan))
+  const yesFamily = ['npx', 'NPM', 'pnpm', 'yarn']
+  const noFamily = ['node', 'node.exe', 'npx -y', 'C:\\Program Files\\nodejs\\npx', './npx']
+  ok('npm 系裸启动器算 comspec 家族（PATH 上没有 npx.exe）；.exe/带路径的仍走 argv',
+    yesFamily.every((b) => av.needsComspec(b) === true) && noFamily.every((b) => av.needsComspec(b) === false),
+    `应 true：${yesFamily.map((b) => `${b}=${av.needsComspec(b)}`).join(' ')}；` +
+      `应 false：${noFamily.map((b) => `${JSON.stringify(b)}=${av.needsComspec(b)}`).join(' ')}`)
 }
 
 rmSync(tmp, { recursive: true, force: true })
