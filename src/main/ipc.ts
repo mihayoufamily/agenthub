@@ -312,10 +312,22 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   /**
-   * 程序化导入：与 config:import 走同一个 store.importConfig（真导入路径，只是不弹文件框——
-   * 弹窗没法被 CDP 驱动）。导入往返的验证钩子用它；写的是整份配置，验证脚本必须自己快照并还原。
+   * 程序化导入：只为 verify/approval-shot.mjs 的导入往返断言存在（文件选择弹窗无法被 CDP 驱动，
+   * 真导入路径 store.importConfig 只能从这里进）。它是**整份配置替换**，比任何 set* 通道都宽，
+   * 所以收两道闸（评审修复4）：
+   * ① 只在 argv 带验证开关 --ahub-verify 时注册（app.isPackaged 不能当闸门——被测的部署构建本来就是
+   *   packaged；生产路径没有界面入口，但通道在就可达，索性不在）；
+   * ② 入口先拒非字符串与超限 payload：旧写法 String(json ?? '') 会把任意大的字符串（甚至数字/对象）
+   *   塞进主线程 JSON.parse，没有边界。与 config:import 同一个 importConfig，无额外能力，只有额外收敛。
    */
-  ipcMain.handle('config:importJson', (_e, json: string) => getStore().importConfig(String(json ?? '')))
+  if (process.argv.includes('--ahub-verify')) {
+    const MAX_IMPORT_JSON = 8 * 1024 * 1024
+    ipcMain.handle('config:importJson', (_e, json: unknown) => {
+      if (typeof json !== 'string') return { ok: false, message: 'config:importJson 只接受字符串参数' }
+      if (json.length > MAX_IMPORT_JSON) return { ok: false, message: `导入内容超过 ${Math.round(MAX_IMPORT_JSON / 1024 / 1024)}MB 上限，已拒收（未解析、未写盘）` }
+      return getStore().importConfig(json)
+    })
+  }
 
   // ---------- 凭据 ----------
   ipcMain.handle('credential:save', (_e, keyId: string, secret: string) => {
@@ -415,8 +427,13 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     const userHooks = stored.hooks ?? []
     // ---------- MCP：只连这个 Agent 勾选且启用的 server，首次连接要先确认 ----------
     // 探完工具清单再问人，这样"放行"时看到的是它到底能干什么，而不是一个 server 名字。
+    // 评审修复：先过 mcp:list 同一道闸门（sanitizeMcpList）再映射 id——旧写法在**原始**
+    // stored.mcpServers 上 find((s) => s.id === id)，下一行的 !!s 过滤发生在解引用之后，
+    // 手改 config.json 塞进的 null 会当场 TypeError 掀掉整次对话。闸门顺带把旧单命令记录
+    // 标成停用，这里按 enabled !== false 直接跳过：停用的 server 不该再"尝试连接并必然失败"。
+    const knownServers = sanitizeMcpList(stored.mcpServers)
     const selected = (grant?.mcpServerIds ?? [])
-      .map((id) => (stored.mcpServers ?? []).find((s) => s.id === id))
+      .map((id) => knownServers.find((s) => s.id === id))
       .filter((s): s is McpServer => !!s && s.enabled !== false)
     const clients: mcp.McpClient[] = []
     const wiringEntries: { client: mcp.McpClient; tools: mcp.McpToolInfo[] }[] = []

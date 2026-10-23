@@ -600,6 +600,8 @@ function McpSection() {
   const [draft, setDraft] = useState(EMPTY_MCP)
   const [probes, setProbes] = useState<Record<string, McpProbe>>({})
   const [busy, setBusy] = useState('')
+  // 「重填」的目标旧条目（null=没有在重填）。见 refill 的注释：移除推迟到保存那一刻。
+  const [refillTarget, setRefillTarget] = useState<McpServer | null>(null)
 
   const load = () => {
     void bridge.mcp.list().then(setList)
@@ -617,10 +619,16 @@ function McpSection() {
     void save(list.map((s) => (s.id === id ? { ...s, ...p } : s)))
   }
 
-  /** 「重填」：原文塞回草稿、把这条旧记录从列表移除（不是留着再存一条同 id 的）。重填不删信任由主进程裁决 */
-  const refill = async (s: McpServer) => {
+  /**
+   * 「重填」第一步（评审修复1）：把原文塞回草稿，旧条目**留在列表里**（仍失效+停用）。
+   * 不能在点击时就 save(list.filter(...))：McpSection 是条件挂载的，切分区/关设置都会重挂，
+   * 草稿随组件 state 蒸发，而删除已写进 config.json、mcp:set 还顺带撤销了该 id 的信任——
+   * 记录不可恢复，违反"标失效+停用、绝不删除"的既定决策。真正的移除发生在保存新记录那一刻（add）。
+   * 草稿丢了（重挂）不要紧：旧条目还在，再点一次「重填」即可。
+   */
+  const refill = (s: McpServer) => {
     setDraft({ name: s.name, command: s.command })
-    await save(list.filter((x) => x.id !== s.id))
+    setRefillTarget(s)
   }
 
   const add = async () => {
@@ -635,7 +643,10 @@ function McpSection() {
       useUi.getState().toast(`该参数经 cmd 无法安全表示，已拦下：${unsafe[0].token}`, 'warn')
       return
     }
-    const next = await save([...list, {
+    // 重填保存：旧条目此刻才被新记录顶掉（remove-and-refill 的形状不变，只是移除推迟到这一笔保存里）
+    const replacing = refillTarget && list.some((x) => x.id === refillTarget.id) ? refillTarget : null
+    const rest = replacing ? list.filter((x) => x.id !== replacing.id) : list
+    const next = await save([...rest, {
       id: uid('mcp'),
       name: draft.name.trim().slice(0, 40),
       command: draft.command.trim(),
@@ -645,6 +656,10 @@ function McpSection() {
       createdAt: Date.now()
     }])
     setDraft(EMPTY_MCP)
+    setRefillTarget(null)
+    if (replacing) {
+      useUi.getState().toast(`已用新记录顶掉旧条目「${replacing.name}」：旧记录与它的信任授权一起移除`, 'info')
+    }
     // 加完就探一次：列不到工具的话，第一次真正调用时会连不上，早知道比晚知道好
     const first = next[next.length - 1]
     if (first) void probe(first)
@@ -698,7 +713,7 @@ function McpSection() {
               </div>
             )}
             {s.legacyInvalid && (
-              <Button variant="ghost" style={{ marginTop: 4 }} data-testid="mcp-refill" onClick={() => void refill(s)}>
+              <Button variant="ghost" style={{ marginTop: 4 }} data-testid="mcp-refill" onClick={() => refill(s)}>
                 重填
               </Button>
             )}
@@ -726,6 +741,17 @@ function McpSection() {
         <input placeholder='启动命令，例如 node "C:\path\to\server.js" 或 npx -y @some/mcp-server' value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-command" />
         <Button variant="primary" onClick={() => void add()}>添加并探测</Button>
       </div>
+      {refillTarget && list.some((x) => x.id === refillTarget.id) && (
+        <div style={{ fontSize: 11.5, color: 'var(--warn)', marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' }} data-testid="mcp-refill-note">
+          <span>
+            正在重填「{refillTarget.name}」：原命令已填回上面的表单，旧条目暂时留在列表里（失效+停用）。
+            保存后新记录会顶掉它——旧记录和它的信任授权一起删除；不保存就一切照旧。
+          </span>
+          <Button variant="ghost" style={{ height: 24, flexShrink: 0 }} data-testid="mcp-refill-cancel" onClick={() => setRefillTarget(null)}>
+            取消重填
+          </Button>
+        </div>
+      )}
       {(() => {
         const p = toLaunchPlan(draft.command)
         if (!p) return <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>填一条启动命令，下面会实时显示实际会执行的 argv。</div>

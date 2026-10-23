@@ -47,7 +47,8 @@ const api = {
     setPresets: (list: AppConfig['presets']) => ipcRenderer.invoke('presets:set', list),
     exportFile: () => ipcRenderer.invoke('config:export'),
     importFile: () => ipcRenderer.invoke('config:import'),
-    /** 程序化导入（与文件导入同走 store.importConfig；验证脚本的往返断言用，界面不提供入口） */
+    /** 程序化导入（验证专用）：主进程仅在 argv 带 --ahub-verify 时注册该通道，入口并拒绝非字符串/超限 payload；
+     * 普通启动下调用会以"未注册"失败——这是设计行为，界面上也从不提供入口 */
     importJson: (json: string) => ipcRenderer.invoke('config:importJson', json) as Promise<{ ok: boolean; message: string }>
   },
   credentials: {

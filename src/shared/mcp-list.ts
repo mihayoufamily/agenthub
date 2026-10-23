@@ -16,17 +16,29 @@ function isWellFormed(s: unknown): s is McpServer {
 }
 
 /**
- * 与加载期迁移（migrateV1toV2）同一口径的现场判定：只有 command、launch.bin 为空的记录
- * 标失效并停用。迁移链只在 schemaVersion<2 时跑一遍，之后经 mcp:set 或手改进配置的
- * 旧格式记录要靠这里补同一面横幅；main 侧 planSpawn 本来就拒收，不靠这个标记把关。
- * 幂等：已标过的记录原样返回（不重排键，JSON 序列化前后一致，界面"配置已还原"对比才稳）。
+ * 与加载期迁移（migrateV1toV2）同一口径的现场判定 + 渲染层安全补形：
+ * ① launch 只要存在就必须是"能用"的形状——args 缺失/不是数组规范成 []，launch 本体是脏值
+ *   （手改出来的字符串/数组）按缺失处理。渲染层直接解引用 `s.launch.args.join(' ')`
+ *   （SettingsPage 列表行），bin 填了而 args 没了的记录原样放行会在设置页当场炸 TypeError；
+ *   主进程对同一个输入在使用点各自兜了底（mcp.ts planSpawn、ipc.ts 信任弹窗标签），
+ *   本模块自称渲染层唯一闸门，补形就得在这里做，组件里才真的"不再各自挡"。
+ * ② 只有 command、launch.bin 为空的记录标失效并停用（与加载期迁移同一口径）；
+ *   迁移链只在 schemaVersion<2 时跑一遍，之后经 mcp:set 或手改进配置的旧格式记录要靠这里
+ *   补同一面横幅；main 侧 planSpawn 本来就拒收，不靠这个标记把关。
+ * 幂等：补形/打标跑两遍与一遍逐字节相同（不重排键，界面"配置已还原"的 JSON 对比才稳）。
  */
 export function stampMcpLegacy(s: McpServer): McpServer {
   const bin = typeof s.launch?.bin === 'string' ? s.launch?.bin.trim() : ''
-  if (bin) return s.legacyInvalid ? { ...s, legacyInvalid: false } : s
-  if (!(s.command ?? '').trim()) return s
-  if (s.legacyInvalid === true && s.enabled === false) return s
-  return { ...s, legacyInvalid: true, enabled: false }
+  let out = s
+  const l = out.launch as unknown
+  if (l !== undefined && l !== null) {
+    if (typeof l !== 'object' || Array.isArray(l)) out = { ...out, launch: undefined }
+    else if (!Array.isArray((l as { args?: unknown }).args)) out = { ...out, launch: { ...(l as { bin: string }), args: [] } }
+  }
+  if (bin) return out.legacyInvalid ? { ...out, legacyInvalid: false } : out
+  if (!(out.command ?? '').trim()) return out
+  if (out.legacyInvalid === true && out.enabled === false) return out
+  return { ...out, legacyInvalid: true, enabled: false }
 }
 
 /** 过滤脏元素 + 补旧格式标记；不是数组（config.json 被手改成别的类型）就当没有 */
