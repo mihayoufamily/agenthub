@@ -27,9 +27,24 @@ const SHARED_BANNED_RE = new RegExp(
     `|import\\s*['"](?:node:)?(?:${SHARED_BANNED_MODS})['"]` +
     `|(?:require|import)\\s*\\(\\s*['"](?:node:)?(?:${SHARED_BANNED_MODS})['"]\\s*\\)`,
 )
-// [Z]/[Z2] 共用的纯度断言（Task 6 那条的四项自测原样保留，再补新增形态）：
-// 返回 true＝干净；返回字符串＝失败原因（自测破了比源码命中更难查，必须先报出来）。
-function assertSharedPure(relPath) {
+// 列目录（递归）：src/shared 下所有 .ts —— 纯度规则的对象是整棵树，不是两个点名的文件。
+function listTsFiles(dirRel) {
+  const root = join(fileURLToPath(new URL('..', import.meta.url)), ...dirRel.split('/'))
+  const out = []
+  const walk = (d, rel) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name)
+      const r = `${rel}/${e.name}`
+      if (e.isDirectory()) walk(p, r)
+      else if (e.name.endsWith('.ts')) out.push(r)
+    }
+  }
+  walk(root, dirRel)
+  return out.sort()
+}
+
+// 自测先跑（破了比源码命中更难查，必须先报出来）：返回 null＝模式可用，字符串＝破了。
+function checkSharedBannedPattern() {
   const shapeCases = [
     ["import { readFileSync } from 'fs'\n", true],
     ["import fp from 'fs/promises'\n", true],
@@ -44,14 +59,39 @@ function assertSharedPure(relPath) {
     ["import { t } from '@shared/types'\n", false],
   ]
   const broken = shapeCases.filter(([src, want]) => SHARED_BANNED_RE.test(src) !== want)
-  if (broken.length) return `检测模式自测破了：${broken.map(([s, w]) => `${JSON.stringify(s)}（应${w ? '命中' : '不命中'}）`).join(' / ')}`
+  return broken.length ? `检测模式自测破了：${broken.map(([s, w]) => `${JSON.stringify(s)}（应${w ? '命中' : '不命中'}）`).join(' / ')}` : null
+}
+
+// 单个文件的禁引检查：返回 null＝干净，字符串＝原因。
+function sharedBannedHit(relPath) {
   try {
     const src = readFileSync(new URL(`../${relPath}`, import.meta.url), 'utf-8')
     const hit = src.match(SHARED_BANNED_RE)
-    return hit ? `源码里出现被禁引用：${hit[0].slice(0, 90)}` : true
+    return hit ? `${relPath} 里出现被禁引用：${hit[0].slice(0, 90)}` : null
   } catch (e) {
     return `读不到 ${relPath}：${e && e.message}`
   }
+}
+
+// [Z]/[Z2] 点名的那个文件（返回 true＝干净；字符串＝失败原因，契约与旧版一致）
+function assertSharedPure(relPath) {
+  const broken = checkSharedBannedPattern()
+  if (broken) return broken
+  return sharedBannedHit(relPath) ?? true
+}
+
+// 整棵 src/shared（评审修复轮 2 的盲区 1：只点 compat.ts / approvals.ts 两个文件，
+// 新增的第三个 shared 模块塞进 require('node:fs') 会静默滑过这条规则）。
+// 返回 true＝干净；字符串＝原因。调用方另外钉"确实走到了 ≥12 个文件"，防止空目录=永真。
+function assertSharedPureTree(dirRel = 'src/shared') {
+  const broken = checkSharedBannedPattern()
+  if (broken) return broken
+  const hits = []
+  for (const f of listTsFiles(dirRel)) {
+    const h = sharedBannedHit(f)
+    if (h) hits.push(h)
+  }
+  return hits.length ? hits.join(' / ') : true
 }
 
 // ---------- A/B. glob 匹配器 + search_files ----------
@@ -1431,13 +1471,18 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
     !settingsSrc.includes('保存降级策略失败：主进程没有回应'))
 }
 
-// ---------- Z2. Hook 命令指纹：逐字哈希原文、显示另走脱敏、绝不参与放行（Task 7 + 评审修复）----------
+// ---------- Z2. Hook 命令指纹：哈希归一后的命令原文、显示另走脱敏、绝不参与放行（Task 7 + 评审修复轮 1/2）----------
 // Hook 的信任模型是"配了就是授权了、不逐条问"，所以界面上必须能一眼认出"这条命令还是不是我写的那条"。
 // 评审实测 f908535 产物：旧的"先脱敏再哈希"让 5000 个互不相同的 api-key 值全并成同一个指纹（1mvpy9wd07yf）——
-// 换 key 恰是用户最常见的编辑，等于指纹对最该看出来的改动失明。修复后指纹对 **原文** 逐字计算；
+// 换 key 恰是用户最常见的编辑，等于指纹对最该看出来的改动失明。修复后指纹对命令原文（过 normalizeCommand）散列；
 // redactSecrets 只留在显示回显那一半（且扩到冒号/Basic/-u user:pass@/裸 key 关键字等真实写法）。
+// 评审修复轮 2 的收口：normalizeCommand 会折叠空白 + 转小写，所以"改任意一个字符指纹就变"这话过头了——
+// 纯改大小写或纯改空白确实不动指纹（实测 NODE x.js / node  x.js 与 node x.js 同指纹）。裁决是**保留归一化**
+// （它和 ruleMatches 用同一个 normalizeCommand 门控白名单，同一个命令的两种写法不该看起来像两条规则），
+// 把折叠从文案里"除外"出去，并用下面的断言把选定语义钉死，让文案与实测没法各走各的。
 // 指纹是非加密散列（shared 层不用 crypto），只做显示，绝不进 checkCommand 的判定链——
-// "不参与放行"现在由源码级断言钉住（src/main/** 不许出现 fingerprintCommand），不再只靠一条近似判定断言兜着。
+// "不参与放行"由两条源码级绊线钉住：src/main/** 不许出现 fingerprintCommand、src/shared/** 除 approvals.ts
+// 自己之外不许导出/转发/调用它。都是**漂移绊线，不是证明**（源码 grep 挡不住数据流）。
 console.log('\n[Z2] Hook 命令指纹与脱敏')
 {
   const ap = await import('../out/shared/approvals.js')
@@ -1445,9 +1490,30 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
   ok('redactSecrets / fingerprintCommand 已导出，且 shared/approvals.ts 不引 electron/fs/node:*（渲染进程敢直接引）',
     typeof ap?.redactSecrets === 'function' && typeof ap?.fingerprintCommand === 'function' && approvalsPure === true,
     `redactSecrets=${typeof ap?.redactSecrets} fingerprintCommand=${typeof ap?.fingerprintCommand}${approvalsPure === true ? '' : '；' + approvalsPure}`)
+  // 纯度规则的对象是整棵 src/shared，不是两个点名的文件（评审盲区 1）：新增 shared 模块也不能塞 electron/fs/crypto。
+  const sharedTreePure = assertSharedPureTree('src/shared')
+  const sharedTree = listTsFiles('src/shared')
+  ok(`src/shared/** 全部 ${sharedTree.length} 个 .ts 都不引 electron/fs/node:*（点名两个文件挡不住第三个新模块）`,
+    sharedTreePure === true && sharedTree.length >= 12 &&
+      sharedTree.includes('src/shared/approvals.ts') && sharedTree.includes('src/shared/compat.ts'),
+    `${sharedTreePure === true ? '' : String(sharedTreePure) + '；'}实走 ${sharedTree.length} 个文件：${sharedTree.join(', ')}`)
   ok('归一后指纹稳定（空白/大小写不影响）', ap.fingerprintCommand('FOO  BAR') === ap.fingerprintCommand('foo bar'))
   ok('不同命令指纹不同', ap.fingerprintCommand('a.exe') !== ap.fingerprintCommand('b.exe'))
   ok('长度适合界面显示', ap.fingerprintCommand('node x.js').length === 12 && /^[a-z0-9]+$/.test(ap.fingerprintCommand('node x.js')), ap.fingerprintCommand('node x.js'))
+  // —— 选定语义（轮 2 裁决：保留 normalizeCommand，把折叠写进文案的"除外"括注）——
+  // 这三条钉的是"括注所述＝实测"，任何一边漂移（改成不折叠散列 / 改成折叠别的什么）都会红。
+  ok('大小写-only 编辑不动指纹（含凭据值内部：--api-key=ABC ≡ --api-key=abc，文案据此写"大小写除外"）',
+    ap.fingerprintCommand('NODE x.js') === ap.fingerprintCommand('node x.js') &&
+      ap.fingerprintCommand('node x.js --api-key=ABC') === ap.fingerprintCommand('node x.js --api-key=abc'),
+    `NODE→${ap.fingerprintCommand('NODE x.js')} node→${ap.fingerprintCommand('node x.js')} / ABC→${ap.fingerprintCommand('node x.js --api-key=ABC')} abc→${ap.fingerprintCommand('node x.js --api-key=abc')}`)
+  ok('空白-only 编辑不动指纹（连续空白折叠 + 首尾 trim，文案据此写"多余空白除外"）',
+    ap.fingerprintCommand('node  x.js') === ap.fingerprintCommand('node x.js') &&
+      ap.fingerprintCommand(' node x.js ') === ap.fingerprintCommand('node x.js'),
+    `双空格→${ap.fingerprintCommand('node  x.js')} 带首尾空白→${ap.fingerprintCommand(' node x.js ')} 基准→${ap.fingerprintCommand('node x.js')}`)
+  ok('除大小写/空白之外的单字符编辑必须动指纹（含显示里被遮成 *** 的凭据段）',
+    ap.fingerprintCommand('node x.js') !== ap.fingerprintCommand('node y.js') &&
+      ap.fingerprintCommand('node x.js --api-key=AAAA') !== ap.fingerprintCommand('node x.js --api-key=AAAAB'),
+    `node x.js→${ap.fingerprintCommand('node x.js')} node y.js→${ap.fingerprintCommand('node y.js')}`)
   // —— 本轮修复的核心：指纹哈希原文。f908535 产物上这三条全红（两条同指纹 / 5000→1 / 显示相同处指纹不动）——
   ok('只换 api-key 的值，指纹必须变（旧脱敏前置哈希的失明点）',
     ap.fingerprintCommand('node x.js --api-key=AAAA1111') !== ap.fingerprintCommand('node x.js --api-key=BBBB2222'),
@@ -1493,7 +1559,11 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
   ok('python token_counter.py 不被误遮', ap.redactSecrets('python token_counter.py') === 'python token_counter.py', ap.redactSecrets('python token_counter.py'))
   ok('node secret helper.js 接受误遮（与"强关键字+空格+值"真实形态同形，显示专属，Hook 仍执行原文）',
     ap.redactSecrets('node secret helper.js') === 'node secret ***', ap.redactSecrets('node secret helper.js'))
-  // —— "指纹永不参与放行"改成源码级钉死：判定链所在的 src/main/** 里不许出现 fingerprintCommand ——
+  // —— "指纹永不参与放行"用源码级绊线钉：src/main/** 里不许出现 fingerprintCommand ——
+  // 如实定性：这是**漂移绊线（drift tripwire），不是证明**。源码 grep 挡不住传递路径：
+  // main 引一个 shared 包装器、包装器内部调 fingerprintCommand，src/main 里一个字面量都不会留下。
+  // 下面那条「shared 侧也不许导出/转发/调用」堵的就是这一跳；再往里（比如 renderer→main IPC 把指纹带回
+  // 判定链）仍不在 grep 的能力范围内，真要证明得做数据流分析。别把这两条当proof 读。
   const mainFpHits = []
   {
     const root = join(fileURLToPath(new URL('..', import.meta.url)), 'src', 'main')
@@ -1506,15 +1576,66 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
     }
     walk(root)
   }
-  ok('src/main/** 没有任何文件引用 fingerprintCommand（显示件不进判定链）', mainFpHits.length === 0, `命中文件：${mainFpHits.join(', ')}`)
+  ok('src/main/** 没有任何文件引用 fingerprintCommand（显示件不进判定链；漂移绊线，不是证明）', mainFpHits.length === 0, `命中文件：${mainFpHits.join(', ')}`)
+  // 盲区 2：把"包装器这一跳"也堵上——src/shared/** 里除 approvals.ts 自己，任何 .ts 都不许
+  // export / export…from / import 再导出 / 直接调用 fingerprintCommand。
+  // 如实说明：匹配的是"代码写法"这四种形态，但注释里真写下 `export { fingerprintCommand }` 或
+  // `fingerprintCommand(` 也会红——绊线只朝"宁可误报"的方向偏，不承诺零误报。
+  const sharedFpHits = []
+  for (const rel of listTsFiles('src/shared')) {
+    if (rel === 'src/shared/approvals.ts') continue
+    const src = readFileSync(new URL(`../${rel}`, import.meta.url), 'utf-8')
+    const forms = [
+      [/^\s*export\b[^\n]*\bfingerprintCommand\b/m, 'export'],
+      [/export\s*\{[^}]*\bfingerprintCommand\b[^}]*\}/s, 'export { … } 列表'],
+      [/^\s*import\b[^\n]*\bfingerprintCommand\b/m, 'import 后再导出/用'],
+      [/\bfingerprintCommand\s*\(/, '调用'],
+    ].filter(([re]) => re.test(src))
+    if (forms.length) sharedFpHits.push(`${rel}（${forms.map(([, n]) => n).join('+')}）`)
+  }
+  ok('src/shared/** 除 approvals.ts 外没有文件导出/转发/调用 fingerprintCommand（堵 main→shared 包装器那一跳；同为绊线）',
+    sharedFpHits.length === 0, `命中：${sharedFpHits.join(', ')}`)
   ok('指纹与危险形态判定互不影响（判定仍走 checkCommand）', ap.checkCommand('rm -rf x', ['rm -rf x']).allowed === false)
-  // —— 文案诚实性：界面与 JSDoc 必须说同一句真话（逐字哈希原文 + 永不放行），溢出防护落在源头上 ——
+  // —— 文案诚实性：界面与 JSDoc 必须说同一句真话，且限定条件要紧跟承诺（否则等于没说）——
   const settingsZ2 = readFileSync(new URL('../src/renderer/src/features/SettingsPage.tsx', import.meta.url), 'utf-8')
   const approvalsZ2 = readFileSync(new URL('../src/shared/approvals.ts', import.meta.url), 'utf-8')
-  ok('界面文案与 shared 层注释同口径：改任意一个字符（含被遮凭据）指纹就变、且声明不参与放行判定',
-    settingsZ2.includes('改任意一个字符') && settingsZ2.includes('放行判定') &&
-      approvalsZ2.includes('改任意一个字符') && approvalsZ2.includes('放行判定'),
-    'SettingsPage 风险句与 approvals.ts 指纹 JSDoc 各须含「改任意一个字符」「放行判定」')
+  ok('界面文案与 shared 层注释同口径：「改任意一个字符」后必须紧跟大小写/多余空白的除外括注，并声明不参与放行判定',
+    ['改任意一个字符（大小写与多余空白', '放行判定', '归一'].every((t) => settingsZ2.includes(t)) &&
+      ['改任意一个字符（大小写与多余空白', '放行判定', '归一'].every((t) => approvalsZ2.includes(t)),
+    'SettingsPage 风险句与 approvals.ts 指纹 JSDoc 各须含「改任意一个字符（大小写与多余空白」「放行判定」「归一」——括注不紧贴就是 overclaim')
+  ok('文案不许再无条件声称逐字（轮 1 的「哪怕那一段在显示里被遮成 ***」独立成句、以及「逐字计算」不带限定）',
+    !/改任意一个字符（哪怕/.test(settingsZ2) && !/改任意一个字符（包括/.test(approvalsZ2))
+  // —— 显示路径的输入必须有界：redactSecrets 规则⑤ 在冒号密集串上是平方级最坏情况，
+  //    而界面只显示 160 个字符——先按 REDACT_INPUT_LIMIT 截断再脱敏（轮 2 的微修）。——
+  const LIMIT = ap.REDACT_INPUT_LIMIT
+  ok('shared 层导出显示用脱敏入口（redactCommandForDisplay + REDACT_INPUT_LIMIT），SettingsPage 用它而不是裸调 redactSecrets',
+    typeof ap.redactCommandForDisplay === 'function' && Number.isInteger(LIMIT) && LIMIT >= 160 && LIMIT <= 2048 &&
+      /redactCommandForDisplay\(h\.command\)/.test(settingsZ2) && !/redactSecrets\(h\.command\)/.test(settingsZ2),
+    `redactCommandForDisplay=${typeof ap.redactCommandForDisplay} REDACT_INPUT_LIMIT=${LIMIT}`)
+  ok('正常长度命令的可见输出与"不截断直接脱敏"逐字节相同（截断只吃尾巴，不改前 160 字符）', (() => {
+    const samples = [
+      'npm run build', 'node x.js --api-key=abcdef0123456789', 'node x.js --api-key=abc',
+      'curl -H "Authorization: Bearer ghp_abcdefghijklmnop"', 'curl -H "X-Api-Token: ghp_abcdefghijklmnop"',
+      'curl -H "Authorization: Basic dXNlcjpwYXNzdzEy"', 'curl -u alice:sekret123@api.example.com',
+      'node x.js --aws_access_key_id=AKIAIOSFODNN7EXAMPLE', 'python token_counter.py', 'node secret helper.js',
+      '', 'git status', 'x'.repeat(159), 'y'.repeat(160), 'z'.repeat(512),
+    ]
+    if (typeof ap.redactCommandForDisplay !== 'function') return false
+    return samples.every((s) => ap.redactCommandForDisplay(s) === ap.redactSecrets(s).slice(0, ap.REDACT_VISIBLE_LIMIT ?? 160))
+  })(), typeof ap.redactCommandForDisplay === 'function' ? ap.redactCommandForDisplay('node x.js --api-key=abcdef0123456789') : '未实现')
+  // 计时放在断言外面存进变量，extra 才报得出实测毫秒数（红了看不到数就等于没证据）。
+  let displayMs = -1
+  let displayOutLen = -1
+  if (typeof ap.redactCommandForDisplay === 'function') {
+    const huge = 'curl -u aaaa:' + 'b:'.repeat(250_000)
+    const t0 = process.hrtime.bigint()
+    const out = ap.redactCommandForDisplay(huge)
+    displayMs = Number(process.hrtime.bigint() - t0) / 1e6
+    displayOutLen = out.length
+  }
+  ok('手搓多 KB 的冒号密集规则不会把设置页渲染拖住（截断先于脱敏：500 KB 输入也在 200ms 内出结果）',
+    displayMs >= 0 && displayMs < 200 && displayOutLen <= 160,
+    `实测 ${displayMs < 0 ? '未实现' : displayMs.toFixed(1) + 'ms'} / 输出 ${displayOutLen} 字符；不设输入上限时同串实测约 200 秒（轮 2 记录）`)
   ok('指纹回显 div 带 wordBreak: break-all（160 字符凭据/base64/URL 不撑出横向滚动条）',
     /<div style=\{\{[^}]*wordBreak: 'break-all'\s*\}\}\s*data-testid="hook-fingerprint"/.test(settingsZ2))
 }

@@ -109,7 +109,8 @@ export function rulesToAdd(uncovered: string[]): string[] {
 }
 
 /**
- * 遮掉看起来像凭据的片段。**只服务显示回显这一半**：指纹对原文计算，不经过本函数（见 fingerprintCommand）。
+ * 遮掉看起来像凭据的片段。**只服务显示回显这一半**：指纹对 normalizeCommand 之后的命令原文计算，不经过本函数
+ * （见 fingerprintCommand），显示回显请走 redactCommandForDisplay()（它会先给输入设界，见该函数注释）。
  * Hook 命令常有人直接写凭据，旁边回显什么就都看得见，显示前必须脱敏——这是"那行输入框万一改成
  * type=password"式的纵深防御，不是保密承诺（命令原文本来就明文存在用户配置里）。
  * 覆盖面（评审点名、旧实现漏掉的写法都补上了）：
@@ -121,6 +122,8 @@ export function rulesToAdd(uncovered: string[]): string[] {
  * 值的长度下限是 3（--api-key=abc 也是凭据；旧实现下限 4 会把短值明文显示出去）。
  * 已知误伤：node secret helper.js 会被遮——`secret<空格>词` 与 `PASSWORD hunter2` 同形，无法廉价区分，
  * 裁决接受（只损可读性，Hook 执行的仍是原始命令）；python token_counter.py 不误遮（下划线接不出边界）。
+ * 成本：规则⑤ 的 `[^\s"',;@]+(?=@)` 在"冒号多、@ 少"的串上是平方级最坏情况（实测 500 KB 输入约 200 秒），
+ * 所以显示路径不要裸调本函数——用 redactCommandForDisplay()，它先把输入截到 REDACT_INPUT_LIMIT 再脱敏。
  */
 export function redactSecrets(s: string): string {
   return (s ?? '')
@@ -138,9 +141,33 @@ export function redactSecrets(s: string): string {
     .replace(/(\s-{1,2}u(?:ser)?[ \t]+["']?)([^\s"',;]+:)([^\s"',;@]+)(?=@)/gi, '$1$2***')
 }
 
+/** 显示回显只看得下 160 个字符——这是那一半的宽度 */
+export const REDACT_VISIBLE_LIMIT = 160
 /**
- * 12 位指纹：对 normalizeCommand(s ?? '') 逐字计算**命令原文**——改任意一个字符（包括显示时被遮成
- * *** 的凭据）指纹就会变；它只用于肉眼确认「这条命令是不是我原来那条」，永远不参与放行判定。
+ * 喂给 redactSecrets 的输入上限（先截断、后脱敏）。取 512 是给可见区 160 留 3 倍缓冲：
+ * 脱敏规则的上下文都在同一节内（关键词/引号/冒号到下一个空白为止），改动落在 160 之后的部分
+ * 不影响前 160 字符的输出；真正没界的是规则⑤ 的平方级回溯，512 就把它钉死在微秒级。
+ */
+export const REDACT_INPUT_LIMIT = 512
+
+/**
+ * Hook / 命令显示回显的入口：先按 REDACT_INPUT_LIMIT 截断输入，再脱敏，最后取可见的 160 字符。
+ * 与 `redactSecrets(s).slice(0, 160)` 在正常长度命令（≤512）上逐字节相同——截断只吃尾巴；
+ * 只在"手搓的超长规则"上有区别：那种命令本来也显示不全，而不限输入会把设置页渲染拖住。
+ */
+export function redactCommandForDisplay(s: string): string {
+  return redactSecrets((s ?? '').slice(0, REDACT_INPUT_LIMIT)).slice(0, REDACT_VISIBLE_LIMIT)
+}
+
+/**
+ * 12 位指纹：输入是 normalizeCommand(s ?? '')（折叠连续空白 + 转小写 + trim），对它逐字散列命令原文。
+ * 口径要说准，别写成"改任意字符都变"这种过头话：改任意一个字符（大小写与多余空白的写法除外——那几种会被
+ * normalizeCommand 归一化掉，实测 NODE x.js / node  x.js / ' node x.js ' 与 node x.js 同指纹，
+ * --api-key=ABC 与 --api-key=abc 也同指纹）指纹就会变——包括改动落在显示时被遮成 *** 的凭据值上
+ * （AAAA1111 → BBBB2222 实测是两个指纹）。它只用于肉眼确认「这条命令是不是我原来那条」，永远不参与放行判定。
+ * 为什么保留归一化（而不是给散列单独去掉它）：白名单判定 ruleMatches 用的就是同一个 normalizeCommand——
+ * 同一命令的两种大小写/空白写法在放行上完全等价，指纹却把它们显示成两个不同值，等于让人以为"这是两条不同
+ * 规则"，那是另一种误导。裁决＝把折叠从文案里"除外"出去，而不是改散列的输入。
  * 为什么哈希原文、而不是旧版的"先脱敏再哈希"：用户最常见的编辑就是换 key，旧构造把 key 值全遮成
  * 同一个 *** 后再散列——实测 5000 个互不相同的 api-key 值并成同一个指纹，恰好在最该看出来的改动上
  * 失明，等于虚假宣传。
@@ -148,7 +175,8 @@ export function redactSecrets(s: string): string {
  * 写进 config.json），设置页就在输入框里不脱敏地显示全文；一个 12 位仅显示用散列，对一个已持有
  * 那份配置/那个界面的人来说不含任何新信息。想靠指纹防泄露是用错了工具——那是加密的事，
  * 而 shared 层不许动 crypto（纯 node 与渲染两端同构可用），所以这里只是 Math.imul 显示件，
- * 绝不是安全原语，src/main/** 判定链引用它会被 fixes-check 的源码断言拦下。
+ * 绝不是安全原语；src/main/** 与 src/shared/**（approvals.ts 之外）引用它都会被 fixes-check 的
+ * 源码绊线拦下——那两条是漂移绊线、不是数据流证明。
  * undefined/null：`s ?? ''` 是承重线，脏入参归到与空串同一个指纹（'' = ztntfp9zloz0），不抛异常。
  */
 export function fingerprintCommand(s: string): string {

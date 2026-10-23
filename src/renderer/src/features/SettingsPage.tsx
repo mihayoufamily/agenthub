@@ -7,7 +7,7 @@ import { useWorkflow } from '../stores/workflow'
 import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe } from '@shared/types'
 import { validateHook } from '@shared/hooks'
 import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
-import { fingerprintCommand, redactSecrets } from '@shared/approvals'
+import { fingerprintCommand, redactCommandForDisplay } from '@shared/approvals'
 import { compatBadgeText, SANDBOX_FALLBACK_OPTIONS } from '@shared/compat'
 import type { CompatState, SandboxFallbackPolicy } from '@shared/compat'
 import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
@@ -508,7 +508,7 @@ function HookSection() {
         <br />
         <b style={{ color: 'var(--danger)' }}>风险：</b>配了 Hook 就是让 AgentHub 在每次工具调用时代你执行这些命令，
         与命令审批不同，Hook 不再逐条问你。只写你自己完全信任的脚本。CLI Agent 不经过这一层。
-        指纹按命令原文逐字计算：改任意一个字符（哪怕那一段在显示里被遮成 ***）指纹就会变；它只用于肉眼确认「这条命令是不是我原来那条」，不参与任何放行判定。
+        指纹按归一化（折叠多余空白、转小写）后的命令原文计算：改任意一个字符（大小写与多余空白的写法除外——那几种会被归一化，指纹不变）指纹就会变，哪怕改动落在显示里被遮成 *** 的凭据值上；它只用于肉眼确认「这条命令是不是我原来那条」，不参与任何放行判定。
       </div>
 
       {rules.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginBottom: 8 }}>（还没有 Hook）</div>}
@@ -539,7 +539,7 @@ function HookSection() {
             style={{ width: '100%', boxSizing: 'border-box', height: 28, font: 'inherit', fontSize: 12.5 }}
           />
           <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 3, wordBreak: 'break-all' }} data-testid="hook-fingerprint">
-            {redactSecrets(h.command).slice(0, 160)}
+            {redactCommandForDisplay(h.command)}
             <span style={{ marginLeft: 6, fontFamily: 'var(--font-mono, monospace)' }}>#{fingerprintCommand(h.command)}</span>
           </div>
         </div>
