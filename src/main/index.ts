@@ -237,16 +237,22 @@ function createWindow() {
   })
   // 窗口导航兜底：本应用只加载本地页面，任何跳外部的东西都该去系统浏览器，不该留在窗口里
   const navDevUrl = devServerUrl ?? null
+  // 本应用真实 renderer 产物根：out/main -> ../../dist/renderer
+  // （便携版是 <安装根>\resources\app\dist\renderer，asar 包是 <安装根>\resources\app.asar\dist\renderer）
+  // 传普通文件系统路径而不是 URL 串——winnav 会把目标 pathname 解码后按路径段比对，
+  // 带空格/中文的安装目录（C:\Program Files\…）也解得开、对得上。
+  // 下面的 loadFile 必须用同一个量推入口，两者一旦漂移就是白屏或放行过宽。
+  const navOwnRendererRoot = join(__dirname, '../../dist/renderer')
   // 外链在新窗口/标签请求时直接转浏览器打开（裸 deny 会让将来出现的 target=_blank 点了没反应）
   win.webContents.setWindowOpenHandler(({ url }) => {
-    const act = navDecision(url, navDevUrl)
+    const act = navDecision(url, navDevUrl, navOwnRendererRoot)
     if (act === 'external') void shell.openExternal(url)
     return { action: 'deny' }
   })
   // 同窗口导航：自己的页面放行，外链挡下后转系统浏览器
   win.webContents.on('will-navigate', (e) => {
     const url = e.url
-    const act = navDecision(url, navDevUrl)
+    const act = navDecision(url, navDevUrl, navOwnRendererRoot)
     if (act === 'allow') return
     e.preventDefault()
     if (act === 'external') void shell.openExternal(url)
@@ -255,7 +261,7 @@ function createWindow() {
   // 服务端 3xx 也算导航，不拦就等于绕过上面两条
   win.webContents.on('will-redirect', (e) => {
     const url = e.url
-    const act = navDecision(url, navDevUrl)
+    const act = navDecision(url, navDevUrl, navOwnRendererRoot)
     if (act === 'allow') return
     e.preventDefault()
     if (act === 'external') void shell.openExternal(url)
@@ -355,8 +361,8 @@ function createWindow() {
   if (devServerUrl) {
     win.loadURL(devServerUrl)
   } else {
-    // out/main/index.js -> ../../dist/renderer/index.html
-    win.loadFile(join(__dirname, '../../dist/renderer/index.html'))
+    // out/main/index.js -> ../../dist/renderer/index.html（与上面的 navOwnRendererRoot 同一个量推出来，避免漂移）
+    win.loadFile(join(navOwnRendererRoot, 'index.html'))
   }
   return win
 }

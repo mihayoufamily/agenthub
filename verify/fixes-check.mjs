@@ -3,7 +3,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import http from 'node:http'
 import { spawnSync } from 'node:child_process'
 
@@ -1197,6 +1197,10 @@ console.log('\n[Y] navDecision')
 {
   const wn = await import('../out/shared/winnav.js')
   const dev = 'http://localhost:5173'
+  // ownRootPath：调用点（src/main/index.ts）由 __dirname 算出的真实 renderer 根，这里是它的便携版形态
+  const PKG_ROOT = 'D:/AgentHub/resources/app/dist/renderer'
+  const PKG_ASAR_ROOT = 'D:/AgentHub/resources/app.asar/dist/renderer'
+  const PF_ROOT = 'C:\\Program Files\\Agent Hub\\resources\\app\\dist\\renderer'
   ok('开发源下的页面放行', wn.navDecision(`${dev}/index.html`, dev) === 'allow')
   ok('生产 file:// 下的页面放行', wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null) === 'allow')
   ok('file:// 指向 app 目录之外也拦（不是所有本地文件都算自己页面）', wn.navDecision('file:///C:/Windows/System32/hosts', null) === 'block')
@@ -1214,9 +1218,9 @@ console.log('\n[Y] navDecision')
     wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e/%2e%2e/%2e%2e/Windows/System32/hosts', null) === 'block')
   ok('file:// 用 Windows 反斜杠 ..\\.. 逃逸也拦掉',
     wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/..\\..\\Windows\\System32\\hosts', null) === 'block')
-  // 已知残留：便携版安装根不可预知（纯函数不读 fs/electron），marker 结尾匹配仍放行；
-  // 攻击者要落在这条得先能写进构建产物目录（等同任意代码执行），不归本函数管，此处钉住其行为
-  ok('file:// 任意根下的 renderer 产物路径仍放行（便携版残留，钉住行为）',
+  // 弱回退（调用方没传真实根时）：仍以 marker 结尾匹配，故任意根的 renderer 产物串放行。
+  // 生产调用点一定会传 ownRootPath（见下面锚定段），这条只钉住「无锚点」这一路的行为不塌。
+  ok('无锚点弱回退：任意根下的 renderer 产物串仍放行',
     wn.navDecision('file:///C:/Users/anything/resources/app/dist/renderer/x.html', null) === 'allow')
   // 合法 renderer 根之后再用 .. 逃逸 → 归一化后落在 renderer 之外，必须拦
   ok('renderer 合法根之后用 .. 逃逸也拦掉',
@@ -1224,6 +1228,59 @@ console.log('\n[Y] navDecision')
   // 归一化不能误伤合法深路径（回归护栏）
   ok('renderer 子目录下的合法页面仍放行',
     wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/sub/dir/page.html', null) === 'allow')
+
+  // ---- 修复轮 2 · 评审项 1：file:// 带主机名＝Windows UNC（\\主机\共享），不是本机文件 ----
+  // 这些串在 fix base（^file:/// 空主机锚定）下是 block，轮 1 换成「协议＋pathname marker」后被放宽了。
+  // 前两条故意不传锚定根：marker 就摆在 pathname 里，能拦住只可能是主机名这一关起效。
+  ok('file://evil.example/… 的远程共享页面拦掉（攻击者可选主机名与共享名）',
+    wn.navDecision('file://evil.example/resources/app/dist/renderer/payload.html', null) === 'block')
+  ok('file://10.0.0.5/share/… 的 IP 形态远程共享也拦掉',
+    wn.navDecision('file://10.0.0.5/share/resources/app/dist/renderer/x.html', null) === 'block')
+  // Node 的 URL 把 `file:\\主机\共享\…` 解析成空主机＋`//主机/共享/…` 路径，靠锚定根收口（Chromium 则直接给出主机名）
+  ok('file:\\\\evil.example\\share\\… 的反斜杠 UNC 形态拦掉（锚定后不落根内）',
+    wn.navDecision('file:\\\\evil.example\\share\\resources\\app\\dist\\renderer\\x.html', null, PKG_ROOT) === 'block')
+
+  // ---- 修复轮 2 · 评审项 2：分隔符一起编码掉，new URL() 看不见就折不掉 ----
+  ok('%2e%2e%2f 编码分隔符遍历（无锚点）拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e%2f%2e%2e%2fWindows%2fSystem32%2fhosts', null) === 'block')
+  ok('..%2f 编码分隔符逃逸（无锚点）拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/..%2findex.html', null) === 'block')
+  ok('%2e%2e%5c 编码点＋编码反斜杠逃逸（无锚点）拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e%5c%2e%2e%5cWindows%5cSystem32%5chosts', null) === 'block')
+  ok('%2e%2e%2f 编码分隔符遍历（锚定真实根）拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e%2f%2e%2e%2fWindows%2fSystem32%2fhosts', null, PKG_ROOT) === 'block')
+  ok('renderer/notes/..%2f..%2f 编码逃逸出锚定根拦掉',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/notes/..%2f..%2fevil.html', null, PKG_ROOT) === 'block')
+  ok('畸形 % 转义不抛异常，按非自己页面拦',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%zz.html', null, PKG_ROOT) === 'block')
+
+  // ---- 修复轮 2 · 评审项 3：拿调用点算出的真实 renderer 根做锚定，marker 主路径退役 ----
+  ok('锚定真实根：根内页面放行',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null, PKG_ROOT) === 'allow')
+  ok('锚定真实根：根内深路径放行',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/sub/dir/page.html', null, PKG_ROOT) === 'allow')
+  ok('锚定真实根：任意其它根下的同款 marker 串拦掉（轮 1 残留收口）',
+    wn.navDecision('file:///C:/Users/anything/resources/app/dist/renderer/x.html', null, PKG_ROOT) === 'block')
+  ok('锚定真实根：同级前缀目录 renderer-evil 不算自己页面（按段比较，不是字符串前缀）',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer-evil/x.html', null, PKG_ROOT) === 'block')
+  // 传了空串根＝调用点算错了，宁可全拦（fail-closed），也不能悄悄退回 marker 弱回退
+  ok('锚定根为空串时 fail-closed：不放行、也不退回弱回退',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null, '') === 'block')
+  ok('锚定真实根：安装目录带空格照样放行（根传普通路径、目标解码后比段）',
+    wn.navDecision('file:///C:/Program%20Files/Agent%20Hub/resources/app/dist/renderer/index.html', null, PF_ROOT) === 'allow')
+  ok('锚定真实根：带空格的安装目录之外仍拦掉',
+    wn.navDecision('file:///C:/Program%20Files/Other%20App/resources/app/dist/renderer/x.html', null, PF_ROOT) === 'block')
+  const repoRendererRoot = join(fileURLToPath(new URL('..', import.meta.url)), 'dist', 'renderer')
+  ok('调用点同式推导的产物根与入口 URL 互相放行（开发/未打包态不会自封白屏）',
+    wn.navDecision(pathToFileURL(join(repoRendererRoot, 'index.html')).href, null, repoRendererRoot) === 'allow')
+
+  // ---- 修复轮 2 · 附赠项：asar 打包（electron-builder.yml asar: true）----
+  ok('asar 包内自己的页面锚定后放行（marker 匹配不到 app.asar，轮 1 会把自家页判 block）',
+    wn.navDecision('file:///D:/AgentHub/resources/app.asar/dist/renderer/index.html', null, PKG_ASAR_ROOT) === 'allow')
+
+  // 加了第三形参后开发源判定不能受影响
+  ok('传了 ownRootPath 后开发源页面仍放行',
+    wn.navDecision(`${dev}/index.html`, dev, PKG_ROOT) === 'allow')
 }
 
 rmSync(tmp, { recursive: true, force: true })
