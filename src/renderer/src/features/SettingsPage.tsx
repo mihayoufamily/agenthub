@@ -5,7 +5,7 @@ import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
 import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe } from '@shared/types'
-import { validateHook } from '@shared/hooks'
+import { validateHook, HOOK_COMMAND_MAX_LENGTH } from '@shared/hooks'
 import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
 import { fingerprintCommand, redactCommandForDisplay } from '@shared/approvals'
 import { compatBadgeText, SANDBOX_FALLBACK_OPTIONS } from '@shared/compat'
@@ -504,7 +504,7 @@ function HookSection() {
         <br />
         数据只通过环境变量传入（<code>AHUB_HOOK_TOOL</code> / <code>_ARGS</code> / <code>_RESULT</code> / <code>_FILE</code> / <code>_DIR</code>，
         以及 <code>AHUB_AGENT_NAME</code> / <code>AHUB_RUN_ID</code>）——不把这些拼进命令串，免得模型给的参数变成可执行内容。
-        工作目录固定为该 Agent 的沙箱根，超时默认 15 秒、输出有上限。
+        工作目录固定为该 Agent 的沙箱根，超时默认 15 秒、输出有上限。命令最长 {HOOK_COMMAND_MAX_LENGTH} 个字符——超长不予保存（新增时这里会直接把原因显示出来），也不会在背后替你截断。
         <br />
         <b style={{ color: 'var(--danger)' }}>风险：</b>配了 Hook 就是让 AgentHub 在每次工具调用时代你执行这些命令，
         与命令审批不同，Hook 不再逐条问你。只写你自己完全信任的脚本。CLI Agent 不经过这一层。

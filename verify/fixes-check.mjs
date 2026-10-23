@@ -28,19 +28,39 @@ const SHARED_BANNED_RE = new RegExp(
     `|(?:require|import)\\s*\\(\\s*['"](?:node:)?(?:${SHARED_BANNED_MODS})['"]\\s*\\)`,
 )
 // 列目录（递归）：src/shared 下所有 .ts —— 纯度规则的对象是整棵树，不是两个点名的文件。
+// 不抛异常：目录被改名/删掉时返回 error，由调用方走 ok() 报成一条 FAIL
+// （评审修复轮 3 的 minor：原来这里裸 readdirSync，src/shared 不见了整个套件会抛在 ok() 之外，
+//  只看得到一段 stack trace，看不到"哪条规则断了"）。
 function listTsFiles(dirRel) {
   const root = join(fileURLToPath(new URL('..', import.meta.url)), ...dirRel.split('/'))
-  const out = []
-  const walk = (d, rel) => {
-    for (const e of readdirSync(d, { withFileTypes: true })) {
-      const p = join(d, e.name)
-      const r = `${rel}/${e.name}`
-      if (e.isDirectory()) walk(p, r)
-      else if (e.name.endsWith('.ts')) out.push(r)
+  const files = []
+  let error = null
+  try {
+    const walk = (d, rel) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name)
+        const r = `${rel}/${e.name}`
+        if (e.isDirectory()) walk(p, r)
+        else if (e.name.endsWith('.ts')) files.push(r)
+      }
     }
+    walk(root, dirRel)
+    files.sort()
+  } catch (e) {
+    error = `${dirRel} 目录列不出来（被改名/删掉/换分支都会走到这里）：${e && e.message}`
+    files.length = 0
   }
-  walk(root, dirRel)
-  return out.sort()
+  return { files, error }
+}
+
+// 读源文件文本（本轮新增的源码级断言用这个，不用裸 readFileSync）：读不到就返回 error，
+// 由调用方走 ok() 报成一条 FAIL —— 与上面 listTsFiles 同一口径。
+function readSrcSafe(rel) {
+  try {
+    return { text: readFileSync(new URL(`../${rel}`, import.meta.url), 'utf-8'), error: null }
+  } catch (e) {
+    return { text: '', error: `读不到 ${rel}：${e && e.message}` }
+  }
 }
 
 // 自测先跑（破了比源码命中更难查，必须先报出来）：返回 null＝模式可用，字符串＝破了。
@@ -86,8 +106,10 @@ function assertSharedPure(relPath) {
 function assertSharedPureTree(dirRel = 'src/shared') {
   const broken = checkSharedBannedPattern()
   if (broken) return broken
+  const listed = listTsFiles(dirRel)
+  if (listed.error) return listed.error
   const hits = []
-  for (const f of listTsFiles(dirRel)) {
+  for (const f of listed.files) {
     const h = sharedBannedHit(f)
     if (h) hits.push(h)
   }
@@ -635,6 +657,24 @@ console.log('\n[M] Hooks：pre 可否决 / post 只观察 / 参数只走环境�
   ok('校验拒绝空命令', !hk.validateHook({ event: 'pre', command: '  ' }).ok)
   ok('校验拒绝坏正则与非法事件', !hk.validateHook({ event: 'before', command: 'x' }).ok && !hk.validateHook({ event: 'post', command: 'x', match: '(' }).ok)
   ok('校验接受合法规则', hk.validateHook({ event: 'post', command: 'node -e "0"', match: 'write', timeoutMs: 5000 }).ok)
+  // 评审修复轮 3：命令长度的界要定在**数据进来的那一关**，不是定在渲染那一关（轮 2 定在渲染 = 该遮的没遮）。
+  // 上限取 4096 的理由：① 显示脱敏与设置页渲染的成本因此有界；② Windows 的命令行本身有 ~32K 的 CreateProcess
+  // 上限，几百 KB 的"命令"根本跑不起来，与其执行时炸一条看不懂的重启错误，不如保存时说清楚。
+  const HOOK_MAX = hk.HOOK_COMMAND_MAX_LENGTH
+  ok('Hook 命令长度上限定在 validateHook（4096 量级、超限**拒绝**并给带数字的消息，不是静默截断）', (() => {
+    if (!Number.isInteger(HOOK_MAX) || HOOK_MAX < 1024 || HOOK_MAX > 8192) return false
+    const at = hk.validateHook({ event: 'pre', command: 'x'.repeat(HOOK_MAX) })
+    const over = hk.validateHook({ event: 'pre', command: 'x'.repeat(HOOK_MAX + 1) })
+    return at.ok === true && over.ok === false && String(over.message ?? '').includes(String(HOOK_MAX)) &&
+      String(over.message ?? '').includes('命令最长')
+  })(), `HOOK_COMMAND_MAX_LENGTH=${HOOK_MAX} 上限内=${JSON.stringify(hk.validateHook({ event: 'pre', command: 'x'.repeat(HOOK_MAX || 1) }))} 超限=${JSON.stringify(hk.validateHook({ event: 'pre', command: 'x'.repeat((HOOK_MAX || 1) + 1) }))}`)
+  const ipcSrcM = readSrcSafe('src/main/ipc.ts')
+  const settingsSrcM = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
+  ok('hooks:set 仍用 validateHook 当闸门（所以上限作用在进入的数据上；界面新增那条也直接把消息显示出来）',
+    ipcSrcM.error === null && settingsSrcM.error === null &&
+      /ipcMain\.handle\(\s*'hooks:set'[\s\S]{0,240}validateHook\(/.test(ipcSrcM.text) &&
+      /validateHook\(draft\)/.test(settingsSrcM.text),
+    `${ipcSrcM.error ?? ''}${settingsSrcM.error ?? ''}没找到 hooks:set→validateHook 或 SettingsPage 的 add()→validateHook`)
 }
 {
   const root = mkdtempSync(join(tmpdir(), 'ahub-hook-'))
@@ -1491,8 +1531,11 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
     typeof ap?.redactSecrets === 'function' && typeof ap?.fingerprintCommand === 'function' && approvalsPure === true,
     `redactSecrets=${typeof ap?.redactSecrets} fingerprintCommand=${typeof ap?.fingerprintCommand}${approvalsPure === true ? '' : '；' + approvalsPure}`)
   // 纯度规则的对象是整棵 src/shared，不是两个点名的文件（评审盲区 1）：新增 shared 模块也不能塞 electron/fs/crypto。
+  const sharedList = listTsFiles('src/shared')
+  const sharedTree = sharedList.files
   const sharedTreePure = assertSharedPureTree('src/shared')
-  const sharedTree = listTsFiles('src/shared')
+  ok('src/shared 目录列得出来（列不出来要报成一条 FAIL，而不是把整个套件抛在半路）',
+    sharedList.error === null, sharedList.error ?? '')
   ok(`src/shared/** 全部 ${sharedTree.length} 个 .ts 都不引 electron/fs/node:*（点名两个文件挡不住第三个新模块）`,
     sharedTreePure === true && sharedTree.length >= 12 &&
       sharedTree.includes('src/shared/approvals.ts') && sharedTree.includes('src/shared/compat.ts'),
@@ -1582,7 +1625,7 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
   // 如实说明：匹配的是"代码写法"这四种形态，但注释里真写下 `export { fingerprintCommand }` 或
   // `fingerprintCommand(` 也会红——绊线只朝"宁可误报"的方向偏，不承诺零误报。
   const sharedFpHits = []
-  for (const rel of listTsFiles('src/shared')) {
+  for (const rel of sharedTree) {
     if (rel === 'src/shared/approvals.ts') continue
     const src = readFileSync(new URL(`../${rel}`, import.meta.url), 'utf-8')
     const forms = [
@@ -1590,52 +1633,127 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
       [/export\s*\{[^}]*\bfingerprintCommand\b[^}]*\}/s, 'export { … } 列表'],
       [/^\s*import\b[^\n]*\bfingerprintCommand\b/m, 'import 后再导出/用'],
       [/\bfingerprintCommand\s*\(/, '调用'],
+      // 轮 2 绊线的盲区（评审修复轮 3 补）：整模块转发根本不带函数名，四种"点名"形态一条都不命中，
+      // 但 fingerprintCommand 确实跟着出去了——shared/index.ts 加一行 export * from './approvals' 就击穿。
+      // 只钉 approvals 这一个模块（src/shared/types.ts 之类的通配转发与本规则无关，全量钉 export * 会误报）。
+      [/export\s+\*(?:\s+as\s+[\w$]+)?\s+from\s*['"][^'"]*approvals['"]/, "export * from './approvals'（含 export * as ns from）"],
     ].filter(([re]) => re.test(src))
     if (forms.length) sharedFpHits.push(`${rel}（${forms.map(([, n]) => n).join('+')}）`)
   }
-  ok('src/shared/** 除 approvals.ts 外没有文件导出/转发/调用 fingerprintCommand（堵 main→shared 包装器那一跳；同为绊线）',
-    sharedFpHits.length === 0, `命中：${sharedFpHits.join(', ')}`)
+  ok('src/shared/** 除 approvals.ts 外没有文件导出/转发/调用 fingerprintCommand（堵 main→shared 包装器与 export * 整模块转发那一跳；同为绊线）',
+    sharedList.error === null && sharedFpHits.length === 0, `${sharedList.error ?? ''}命中：${sharedFpHits.join(', ')}`)
   ok('指纹与危险形态判定互不影响（判定仍走 checkCommand）', ap.checkCommand('rm -rf x', ['rm -rf x']).allowed === false)
   // —— 文案诚实性：界面与 JSDoc 必须说同一句真话，且限定条件要紧跟承诺（否则等于没说）——
-  const settingsZ2 = readFileSync(new URL('../src/renderer/src/features/SettingsPage.tsx', import.meta.url), 'utf-8')
-  const approvalsZ2 = readFileSync(new URL('../src/shared/approvals.ts', import.meta.url), 'utf-8')
+  // 源码文本走 readSrcSafe()：文件被改名/删掉时报成 FAIL（与 listTsFiles 同一口径），而不是把套件抛在半路。
+  const settingsZ2R = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
+  const approvalsZ2R = readSrcSafe('src/shared/approvals.ts')
+  const settingsZ2 = settingsZ2R.text
+  const approvalsZ2 = approvalsZ2R.text
+  ok('文案断言的两处源文件读得到（读不到＝FAIL 并说明是哪一个，不让套件崩在 ok() 之外）',
+    settingsZ2R.error === null && approvalsZ2R.error === null, `${settingsZ2R.error ?? ''}${approvalsZ2R.error ?? ''}`)
   ok('界面文案与 shared 层注释同口径：「改任意一个字符」后必须紧跟大小写/多余空白的除外括注，并声明不参与放行判定',
-    ['改任意一个字符（大小写与多余空白', '放行判定', '归一'].every((t) => settingsZ2.includes(t)) &&
+    settingsZ2R.error === null && approvalsZ2R.error === null &&
+      ['改任意一个字符（大小写与多余空白', '放行判定', '归一'].every((t) => settingsZ2.includes(t)) &&
       ['改任意一个字符（大小写与多余空白', '放行判定', '归一'].every((t) => approvalsZ2.includes(t)),
     'SettingsPage 风险句与 approvals.ts 指纹 JSDoc 各须含「改任意一个字符（大小写与多余空白」「放行判定」「归一」——括注不紧贴就是 overclaim')
   ok('文案不许再无条件声称逐字（轮 1 的「哪怕那一段在显示里被遮成 ***」独立成句、以及「逐字计算」不带限定）',
     !/改任意一个字符（哪怕/.test(settingsZ2) && !/改任意一个字符（包括/.test(approvalsZ2))
-  // —— 显示路径的输入必须有界：redactSecrets 规则⑤ 在冒号密集串上是平方级最坏情况，
-  //    而界面只显示 160 个字符——先按 REDACT_INPUT_LIMIT 截断再脱敏（轮 2 的微修）。——
-  const LIMIT = ap.REDACT_INPUT_LIMIT
-  ok('shared 层导出显示用脱敏入口（redactCommandForDisplay + REDACT_INPUT_LIMIT），SettingsPage 用它而不是裸调 redactSecrets',
-    typeof ap.redactCommandForDisplay === 'function' && Number.isInteger(LIMIT) && LIMIT >= 160 && LIMIT <= 2048 &&
+  // 评审修复轮 3 步骤 5：命令长度上限是用户可见的事实，得写在 Hook 分区自己的文案里；
+  // 数字从 shared/hooks 的常量插值进来，免得代码改了 4096→8192 而界面还在说 4096。
+  ok('Hook 分区文案把命令长度上限说给用户（数字取 HOOK_COMMAND_MAX_LENGTH 常量，不在文案里手写第二份）',
+    /import\s*\{[^}]*HOOK_COMMAND_MAX_LENGTH[^}]*\}\s*from\s*'@shared\/hooks'/.test(settingsZ2) &&
+      /命令最长 \{HOOK_COMMAND_MAX_LENGTH\} 个字符/.test(settingsZ2),
+    'SettingsPage 需从 @shared/hooks 引 HOOK_COMMAND_MAX_LENGTH，并在 Hook 分区文案里写「命令最长 {HOOK_COMMAND_MAX_LENGTH} 个字符」')
+  // —— 显示路径（评审修复轮 3 重写）——
+  // 轮 2 的机制是"先截到 REDACT_INPUT_LIMIT=512 再脱敏"，为的是绕开 redactSecrets 的平方级回溯；
+  // 代价是把规则⑤ 的 (?=@) 与规则② 的负向前瞻**赖以判断的上下文一起截掉了**：口令段一长、@ 落在 512 之外，
+  // 就变成"该遮的没遮"（评审实测 541 字符的 -u user:<512+>@host 串，界面前 160 字符里剩 135 个明文凭据字符）。
+  // 轮 3 的裁决：界定的对象是**数据**而不是渲染——① 长度上限挪到 validateHook（shared/hooks.ts，4096，超限拒绝保存）；
+  // ② 两条平方级规则改成线性（落点逐字节等价，下面抄一份轮 2 的实现当参照做差分）；③ 显示路径不再截输入。
+  const displayFnSrc = (approvalsZ2.match(/export function redactCommandForDisplay[\s\S]*?\n\}/) || [''])[0]
+  const displaySlices = (displayFnSrc.match(/\.slice\([^)]*\)/g) || [])
+  ok('shared 层导出显示用脱敏入口（redactCommandForDisplay + REDACT_VISIBLE_LIMIT），SettingsPage 用它而不是裸调 redactSecrets；且脱敏前不再截断输入',
+    typeof ap.redactCommandForDisplay === 'function' && ap.REDACT_INPUT_LIMIT === undefined &&
+      ap.REDACT_VISIBLE_LIMIT === 160 &&
+      displaySlices.length === 1 && displaySlices[0].includes('REDACT_VISIBLE_LIMIT') &&
       /redactCommandForDisplay\(h\.command\)/.test(settingsZ2) && !/redactSecrets\(h\.command\)/.test(settingsZ2),
-    `redactCommandForDisplay=${typeof ap.redactCommandForDisplay} REDACT_INPUT_LIMIT=${LIMIT}`)
-  ok('正常长度命令的可见输出与"不截断直接脱敏"逐字节相同（截断只吃尾巴，不改前 160 字符）', (() => {
-    const samples = [
-      'npm run build', 'node x.js --api-key=abcdef0123456789', 'node x.js --api-key=abc',
-      'curl -H "Authorization: Bearer ghp_abcdefghijklmnop"', 'curl -H "X-Api-Token: ghp_abcdefghijklmnop"',
-      'curl -H "Authorization: Basic dXNlcjpwYXNzdzEy"', 'curl -u alice:sekret123@api.example.com',
-      'node x.js --aws_access_key_id=AKIAIOSFODNN7EXAMPLE', 'python token_counter.py', 'node secret helper.js',
-      '', 'git status', 'x'.repeat(159), 'y'.repeat(160), 'z'.repeat(512),
-    ]
-    if (typeof ap.redactCommandForDisplay !== 'function') return false
-    return samples.every((s) => ap.redactCommandForDisplay(s) === ap.redactSecrets(s).slice(0, ap.REDACT_VISIBLE_LIMIT ?? 160))
-  })(), typeof ap.redactCommandForDisplay === 'function' ? ap.redactCommandForDisplay('node x.js --api-key=abcdef0123456789') : '未实现')
-  // 计时放在断言外面存进变量，extra 才报得出实测毫秒数（红了看不到数就等于没证据）。
+    `redactCommandForDisplay=${typeof ap.redactCommandForDisplay} REDACT_INPUT_LIMIT=${ap.REDACT_INPUT_LIMIT} 显示函数体里的 slice=${displaySlices.join(' / ') || '（没找到函数体）'}`)
+  // (4a) 口令段比旧的 512 输入界还长时，凭据必须照样被遮——这正是轮 2 机制漏掉的那一件事
+  const longCred = 'curl -u alice:eyJhbGciOi.' + 'Z'.repeat(500) + '@api.example.com'
+  const legacyLong = 'curl -u alice:' + 'K'.repeat(4200) + '@api.example.com'
+  ok('口令段超过旧 512 界（541 字符的 curl -u alice:<512+>@host）显示里不含任何凭据字符，行名与主机仍在', (() => {
+    const d = ap.redactCommandForDisplay(longCred)
+    return !d.includes('Z') && !d.includes('eyJhbGciOi') && d.includes('***') && d.includes('alice:') && d.includes('@api.example.com')
+  })(), ap.redactCommandForDisplay(longCred))
+  ok('比保存上限还长的历史规则（4233 字符，手搓/旧配置）显示时同样遮全：遮什么与命令长度无关', (() => {
+    const d = ap.redactCommandForDisplay(legacyLong)
+    return !d.includes('K') && d.includes('***') && d.includes('alice:') && d.includes('@api.example.com')
+  })(), ap.redactCommandForDisplay(legacyLong).slice(0, 80))
+  // 参照实现：轮 2（commit b8980f4）的 redactSecrets 原样抄一份在这里。差分比的是"线性化改写 vs 旧正则"，
+  // 不是"新实现 vs 新实现"——显示路径去掉截断后，redactCommandForDisplay 与 redactSecrets 的比较自己对自己恒真，
+  // 那种断言非覆盖（评审点名），必须拿**改动之前**的行为当尺子。
+  const legacyRedactSecrets = (s) => (s ?? '')
+    .replace(/((?:api[_-]?key|access[_-]?key|key|token|secret|password|passwd|pwd|credential)([a-z0-9_]{0,16})([ \t]*[=:][ \t]*)(["']?))[^\s"',;]{3,}/gi, '$1***')
+    .replace(/((?:api[_-]?key|access[_-]?key|token|secret|password|passwd|pwd|credential)[ \t]+)(["']?)[^\s"',;@]{3,}(?![^ \t]*[@:])/gi, '$1$2***')
+    .replace(/((?:Proxy-)?Authorization[ \t]*:[ \t]*(?:[A-Za-z][A-Za-z0-9+.-]*[ \t]+)?(["']?))[^\s"',;]{3,}/gi, '$1$2***')
+    .replace(/(Bearer[ \t]+)(["']?)[^\s"',;]{3,}/gi, '$1$2***')
+    .replace(/(\s-{1,2}u(?:ser)?[ \t]+["']?)([^\s"',;]+:)([^\s"',;@]+)(?=@)/gi, '$1$2***')
+  // (4c) 逐字节 parity：定点样本（含全部凭据拼写、空串、159/160/512 边界，以及**比旧 512 界更长的**三条）
+  const paritySamples = [
+    'npm run build', 'node x.js --api-key=abcdef0123456789', 'node x.js --api-key=abc',
+    'curl -H "Authorization: Bearer ghp_abcdefghijklmnop"', 'curl -H "X-Api-Token: ghp_abcdefghijklmnop"',
+    'curl -H "Authorization: Basic dXNlcjpwYXNzdzEy"', 'curl -u alice:sekret123@api.example.com',
+    'node x.js --aws_access_key_id=AKIAIOSFODNN7EXAMPLE', 'python token_counter.py', 'node secret helper.js',
+    '', 'git status', 'x'.repeat(159), 'y'.repeat(160), 'z'.repeat(512),
+    longCred, legacyLong, 'w'.repeat(4096), 'v'.repeat(4097),
+    'curl -u -u a:b@c', 'curl -U A:B@C', 'curl -u a@b:c@d', 'curl -u a:@b', 'curl -u a:b@c:d@e',
+    'password ' + 'a'.repeat(600) + '@x', 'token ' + 'b'.repeat(700) + ':y', 'curl  -u   "a:' + 'c'.repeat(900) + '@h" x'
+  ]
+  // 随机差分：把 @ / : / 引号 / 空白 / -u / 关键字这些形态混着撒，专打两条前后瞻。
+  const parityAlph = ['a', ':', '@', ' ', '\t', '"', "'", ',', ';', '\n', '-', 'u', 'U', '.', 'x', 'token', 'password', 'api-key=', '-u ', '--user ', '@h', 'B']
+  let paritySeed = 20261023
+  const parityRnd = (n) => { paritySeed = (paritySeed * 1103515245 + 12345) & 0x7fffffff; return paritySeed % n }
+  const parityFuzz = []
+  for (let i = 0; i < 3000; i++) {
+    let s = i % 3 === 0 ? 'curl -u ' : i % 3 === 1 ? 'node x.js --api-key=' : 'password '
+    const len = 1 + parityRnd(12)
+    for (let k = 0; k < len; k++) s += parityAlph[parityRnd(parityAlph.length)]
+    parityFuzz.push(s)
+  }
+  const parityBad = []
+  for (const s of paritySamples.concat(parityFuzz)) {
+    if (typeof ap.redactSecrets !== 'function') { parityBad.push('redactSecrets 不存在'); break }
+    if (ap.redactSecrets(s) !== legacyRedactSecrets(s)) {
+      parityBad.push(`${JSON.stringify(s.slice(0, 70))} 新=${JSON.stringify(ap.redactSecrets(s).slice(0, 70))} 旧=${JSON.stringify(legacyRedactSecrets(s).slice(0, 70))}`)
+      if (parityBad.length >= 3) break
+    }
+  }
+  ok('redactSecrets 的线性化改写与轮 2 实现逐字节相同（参照实现抄在检查里；27 条定点含 >512/4096 样本 + 3000 条随机差分）',
+    parityBad.length === 0, parityBad.join(' ／ '))
+  ok('显示入口＝"整条脱敏后取可见 160"（对全部定点样本，含 >512 那三条；不再有脱敏前的截断，所以这条与旧实现的差异只可能来自遮多遮少）',
+    paritySamples.every((s) => ap.redactCommandForDisplay(s) === legacyRedactSecrets(s).slice(0, ap.REDACT_VISIBLE_LIMIT ?? 160)),
+    ap.redactCommandForDisplay(longCred))
+  // (4b) 病态输入必须快，而且**不靠截断**（计时放在断言外面存进变量，extra 才报得出实测毫秒数）
   let displayMs = -1
   let displayOutLen = -1
+  let rule2Ms = -1
   if (typeof ap.redactCommandForDisplay === 'function') {
     const huge = 'curl -u aaaa:' + 'b:'.repeat(250_000)
     const t0 = process.hrtime.bigint()
     const out = ap.redactCommandForDisplay(huge)
     displayMs = Number(process.hrtime.bigint() - t0) / 1e6
     displayOutLen = out.length
+    const huge2 = 'password ' + 'a'.repeat(400_000) + '@x'
+    const t1 = process.hrtime.bigint()
+    ap.redactCommandForDisplay(huge2)
+    rule2Ms = Number(process.hrtime.bigint() - t1) / 1e6
   }
-  ok('手搓多 KB 的冒号密集规则不会把设置页渲染拖住（截断先于脱敏：500 KB 输入也在 200ms 内出结果）',
-    displayMs >= 0 && displayMs < 200 && displayOutLen <= 160,
-    `实测 ${displayMs < 0 ? '未实现' : displayMs.toFixed(1) + 'ms'} / 输出 ${displayOutLen} 字符；不设输入上限时同串实测约 200 秒（轮 2 记录）`)
+  ok('手搓 500 KB 的冒号密集规则不会把设置页渲染拖住——**且不截输入**（规则⑤ 改线性；轮 2 旧实现同串实测约 200 秒）',
+    displayMs >= 0 && displayMs < 200 && displayOutLen <= 160 && ap.REDACT_INPUT_LIMIT === undefined,
+    `实测 ${displayMs < 0 ? '未实现' : displayMs.toFixed(1) + 'ms'} / 输出 ${displayOutLen} 字符 / REDACT_INPUT_LIMIT=${ap.REDACT_INPUT_LIMIT}`)
+  ok('规则② 那一形（password + 400 KB 单段 + @）同样线性，且不是靠截断糊过去的（轮 2 旧实现 200 KB 已要 7～10 秒）',
+    rule2Ms >= 0 && rule2Ms < 200 && ap.REDACT_INPUT_LIMIT === undefined,
+    `实测 ${rule2Ms < 0 ? '未实现' : rule2Ms.toFixed(1) + 'ms'} / REDACT_INPUT_LIMIT=${ap.REDACT_INPUT_LIMIT}`)
   ok('指纹回显 div 带 wordBreak: break-all（160 字符凭据/base64/URL 不撑出横向滚动条）',
     /<div style=\{\{[^}]*wordBreak: 'break-all'\s*\}\}\s*data-testid="hook-fingerprint"/.test(settingsZ2))
 }

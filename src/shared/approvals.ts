@@ -109,8 +109,46 @@ export function rulesToAdd(uncovered: string[]): string[] {
 }
 
 /**
+ * 规则⑤ 的实现：`curl -u user:pass@host` 只遮口令，user 与主机留着才认得出这是哪条命令。
+ * 旧写法是一条带前后瞻的正则 `([^\s"',;]+:)([^\s"',;@]+)(?=@)`：① 它在"冒号多、@ 少"的串上平方级回溯（实测 500 KB 约 200 秒，轮 2 就是为了让它
+ * 不拖住渲染，把**输入**先截到 512——结果 @ 落在截断之外时口令就遮不住，该遮的没遮）；
+ * ② 那种截断本身也是错的，脱敏必须看到整条命令。
+ * 这里改成线性扫描：旧式的贪婪回溯等价于"从右往左第一个『右边还有 @、且 @ 不紧跟冒号』的冒号位"，
+ * 反向一遍扫描即得，没有回溯可言。**落点与旧正则逐字节等价**——fixes-check 里抄了一份旧正则当参照实现，
+ * 用 3000 条随机串 + 定点用例做差分钉住（改这条的人若动到语义，那条断言会红）。
+ * 一个必须照抄的细节：旧正则在某个起点整体失配时只前进**一个字符**重试，所以 `-u -u a:b@c` 这种
+ * "上一个 token 里还藏着下一个 -u"的写法仍会被遮；这里失配时同样把 lastIndex 拨回起点+1（差分实测就是这个形态）。
+ */
+function redactUserinfoPassword(s: string): string {
+  const re = /(\s-{1,2}u(?:ser)?[ \t]+["']?)([^\s"',;]+)/gi
+  let out = ''
+  let copied = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(s))) {
+    const token = m[2]
+    let nextAt = -1
+    let colon = -1
+    let at = -1
+    for (let i = token.length - 1; i >= 0; i--) {
+      const c = token[i]
+      if (c === '@') { nextAt = i; continue }
+      if (colon < 0 && c === ':' && nextAt > i + 1) { colon = i; at = nextAt }
+    }
+    if (colon < 1) {
+      re.lastIndex = m.index + 1
+      continue
+    }
+    const headEnd = m.index + m[1].length
+    out += s.slice(copied, headEnd + colon + 1) + '***'
+    copied = headEnd + at
+    re.lastIndex = copied
+  }
+  return out + s.slice(copied)
+}
+
+/**
  * 遮掉看起来像凭据的片段。**只服务显示回显这一半**：指纹对 normalizeCommand 之后的命令原文计算，不经过本函数
- * （见 fingerprintCommand），显示回显请走 redactCommandForDisplay()（它会先给输入设界，见该函数注释）。
+ * （见 fingerprintCommand），显示回显请走 redactCommandForDisplay()。
  * Hook 命令常有人直接写凭据，旁边回显什么就都看得见，显示前必须脱敏——这是"那行输入框万一改成
  * type=password"式的纵深防御，不是保密承诺（命令原文本来就明文存在用户配置里）。
  * 覆盖面（评审点名、旧实现漏掉的写法都补上了）：
@@ -122,41 +160,42 @@ export function rulesToAdd(uncovered: string[]): string[] {
  * 值的长度下限是 3（--api-key=abc 也是凭据；旧实现下限 4 会把短值明文显示出去）。
  * 已知误伤：node secret helper.js 会被遮——`secret<空格>词` 与 `PASSWORD hunter2` 同形，无法廉价区分，
  * 裁决接受（只损可读性，Hook 执行的仍是原始命令）；python token_counter.py 不误遮（下划线接不出边界）。
- * 成本：规则⑤ 的 `[^\s"',;@]+(?=@)` 在"冒号多、@ 少"的串上是平方级最坏情况（实测 500 KB 输入约 200 秒），
- * 所以显示路径不要裸调本函数——用 redactCommandForDisplay()，它先把输入截到 REDACT_INPUT_LIMIT 再脱敏。
+ * 成本：**整条链是线性的**，输入多长都不改写多少字符的平方——① 规则⑤ 改成上面的线性扫描；
+ * ② 规则② 的负向前瞻用 `(?=(…))\3` 把值段锁成一次匹配（原子化）：那一条在原写法下会"值段每退一个字符、
+ * 就把后面到下一个空白之间的整段重扫一遍"（实测 200 KB 单段 + 结尾一个 @ 要 10 秒），而事实上
+ * "最长的那次尝试不成立 ⇒ 所有更短的也不成立"（值段里没有空白，缩短只会让后缀多含几个字符），
+ * 所以退避是纯浪费，锁成一次匹配后行为逐字节不变、成本变线性（同上，fixes-check 里做差分）。
+ * 本函数**不截输入**：脱敏必须看到整条命令，截断会删掉前后瞻的判断上下文（轮 2 的教训）。
+ * 数据那一侧的长度界在 shared/hooks.ts 的 HOOK_COMMAND_MAX_LENGTH（保存时拒绝），不是靠这里裁。
  */
 export function redactSecrets(s: string): string {
-  return (s ?? '')
+  return redactUserinfoPassword((s ?? '')
     // ① 关键词 + [=:] 边界 + 值。边界必须是 = 或 :——token_counter.py 里 token 后面是下划线，
     //    造不出这个边界，所以文件名整体不误伤。
     .replace(/((?:api[_-]?key|access[_-]?key|key|token|secret|password|passwd|pwd|credential)([a-z0-9_]{0,16})([ \t]*[=:][ \t]*)(["']?))[^\s"',;]{3,}/gi, '$1***')
     // ② 关键词 + 空格 + 值（PASSWORD hunter2、--api-key xxxx 这类分隔写法）。
     //    值里含 : 或 @ 的多半是 URL/路径（postgres://、a:b@c），遮了只剩噪音，放过。
-    .replace(/((?:api[_-]?key|access[_-]?key|token|secret|password|passwd|pwd|credential)[ \t]+)(["']?)[^\s"',;@]{3,}(?![^ \t]*[@:])/gi, '$1$2***')
+    //    `(?=([^\s"',;@]{3,}))\3` ＝把值段取成"最长那一次且只试一次"（旧写法的退避全是白做的，见上面 JSDoc）。
+    .replace(/((?:api[_-]?key|access[_-]?key|token|secret|password|passwd|pwd|credential)[ \t]+)(["']?)(?=([^\s"',;@]{3,}))\3(?![^ \t]*[@:])/gi, '$1$2***')
     // ③ Authorization 头：任意认证方案（Basic/Digest/自定义），遮掉值本体、方案名留着。
     .replace(/((?:Proxy-)?Authorization[ \t]*:[ \t]*(?:[A-Za-z][A-Za-z0-9+.-]*[ \t]+)?(["']?))[^\s"',;]{3,}/gi, '$1$2***')
     // ④ 脱离 Authorization 前单独出现的 Bearer <值>。
-    .replace(/(Bearer[ \t]+)(["']?)[^\s"',;]{3,}/gi, '$1$2***')
-    // ⑤ curl -u user:pass@host —— 只遮 @ 前的口令段，user 与主机留着才认得出这条命令。
-    .replace(/(\s-{1,2}u(?:ser)?[ \t]+["']?)([^\s"',;]+:)([^\s"',;@]+)(?=@)/gi, '$1$2***')
+    .replace(/(Bearer[ \t]+)(["']?)[^\s"',;]{3,}/gi, '$1$2***'))
 }
 
-/** 显示回显只看得下 160 个字符——这是那一半的宽度 */
+/** 显示回显只看得下 160 个字符——这是那一半的宽度（在**脱敏之后**取，绝不在这之前取） */
 export const REDACT_VISIBLE_LIMIT = 160
-/**
- * 喂给 redactSecrets 的输入上限（先截断、后脱敏）。取 512 是给可见区 160 留 3 倍缓冲：
- * 脱敏规则的上下文都在同一节内（关键词/引号/冒号到下一个空白为止），改动落在 160 之后的部分
- * 不影响前 160 字符的输出；真正没界的是规则⑤ 的平方级回溯，512 就把它钉死在微秒级。
- */
-export const REDACT_INPUT_LIMIT = 512
 
 /**
- * Hook / 命令显示回显的入口：先按 REDACT_INPUT_LIMIT 截断输入，再脱敏，最后取可见的 160 字符。
- * 与 `redactSecrets(s).slice(0, 160)` 在正常长度命令（≤512）上逐字节相同——截断只吃尾巴；
- * 只在"手搓的超长规则"上有区别：那种命令本来也显示不全，而不限输入会把设置页渲染拖住。
+ * Hook / 命令显示回显的入口：把**整条**命令交给 redactSecrets，再取可见的 160 个字符。
+ * 顺序只有一种：先脱敏、后截可见宽度。轮 2 反过来做过（先截到 512 再脱敏），那是错的——
+ * 规则②/⑤ 的前后瞻需要看到凭据段后面的 `@`/`:`，截断把那个上下文删掉，于是长口令段
+ * 原样显示出来（实测 541 字符的 `curl -u alice:<512+>@host` 在前 160 个字符里剩 135 个明文凭据字符）。
+ * 渲染的成本界由 redactSecrets 自身的线性 + 数据侧的 HOOK_COMMAND_MAX_LENGTH 提供，
+ * 这里不再对输入设任何界。
  */
 export function redactCommandForDisplay(s: string): string {
-  return redactSecrets((s ?? '').slice(0, REDACT_INPUT_LIMIT)).slice(0, REDACT_VISIBLE_LIMIT)
+  return redactSecrets(s ?? '').slice(0, REDACT_VISIBLE_LIMIT)
 }
 
 /**
