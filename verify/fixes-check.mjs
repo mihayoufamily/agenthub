@@ -2106,6 +2106,96 @@ console.log('\n[Z3] 脱敏与渲染口径统一（工具卡 / MCP 信任弹窗 a
     `isMain 闸门=${/if \(!isMain\) return/.test(mainZ3.text)}；retry 编码=${/const retry = encodeURIComponent\(url\)/.test(mainZ3.text)}`)
 }
 
+// ---------- Z4. ESLint：注入面那 5 条 error 规则的"机器还开着"（修复波 A · 项 4）----------
+// 那 5 条 error 规则是 Task 8 存在的全部意义，而这台机器原先能被**一行注释**关掉
+// （评审实测：`// eslint-disable-next-line no-eval` + `eval('1')` → 0 error）。
+// 所以下面不只断言 config 里写了什么，还**真跑一次 eslint**：喂一段已知 sink 进去，看它咬不咬。
+// eslint 装不上（它是 devDependency）时这些断言一律 FAIL，不许 skip——那说明环境坏了。
+console.log('\n[Z4] ESLint：noInlineConfig 关不掉注入面那 5 条 error 规则')
+{
+  const repoZ4 = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/, '')
+  const ESLINT_BIN = join(repoZ4, 'node_modules', 'eslint', 'bin', 'eslint.js')
+  const eslintThere = existsSync(ESLINT_BIN)
+  // 直接跑本地 CLI 入口而不是 npx：Windows 上 npx 是 .cmd，spawnSync 要 shell:true 才起得来
+  // （那正是本分支在 MCP 那边花力气消掉的 DEP0190 形态），语义与 `npx eslint --stdin` 一致。
+  const runEslint = (filename, code) => {
+    if (!eslintThere) return { status: null, out: '', error: `eslint CLI 不存在：${ESLINT_BIN}` }
+    const r = spawnSync(process.execPath, [ESLINT_BIN, '--stdin', '--stdin-filename', filename, '--no-color'], {
+      input: code, encoding: 'utf-8', cwd: repoZ4, timeout: 240_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024
+    })
+    return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error ? String(r.error.message) : null }
+  }
+  // 除了 error 本身，还必须看到「这条 disable 注释被 noInlineConfig 判为无效」的提示：
+  // 它证明 no-eval 报出来是因为机器开着，而不是碰巧没被注释压住。ESLint 9.39.5 实测原文
+  // （node_modules/eslint/lib/linter/linter.js:456）是
+  // `'// eslint-disable-next-line no-eval' has no effect because you have 'noInlineConfig' setting in your config.`
+  // ——brief 转述的那句 "inline configuration is disabled" 这一版根本不输出（照它写，两条断言实测为红）。
+  // 两种措辞都认，但必须命中一条，缺了就说明 inline 配置没被禁。
+  const INLINE_OFF_MSG = /has no effect because you have 'noInlineConfig'|inline config(uration)? is disabled/i
+  ok('eslint（devDependency）装得上：CLI 入口存在——不存在时下面几条一律 FAIL，不 skip',
+    eslintThere, ESLINT_BIN)
+  // 一次跑同时验两件事：① 一行 disable 注释关不掉 no-eval；② execScript 这个规则**真会查**的名字
+  // 被声明成了全局（评审实测：裸 execScript('…') 原先静默放过）。
+  const sink = runEslint('src/ahub-lint-probe.ts', [
+    '// eslint-disable-next-line no-eval',
+    "eval('1')",
+    "execScript('alert(1)')",
+    ''
+  ].join('\n'))
+  ok('一行 // eslint-disable-next-line no-eval 关不掉那台机器：no-eval 仍报 error，且明说该注释因 noInlineConfig 无效',
+    eslintThere && sink.status !== 0 && /\berror\b/.test(sink.out) && /no-eval/.test(sink.out) &&
+      INLINE_OFF_MSG.test(sink.out),
+    `exit=${sink.status} spawnErr=${sink.error} 输出=${sink.out.slice(0, 500)}`)
+  ok('no-implied-eval 咬得住裸 execScript（impliedEvalGlobals 补齐了规则**真会查**的那个名字）',
+    eslintThere && /no-implied-eval/.test(sink.out),
+    `exit=${sink.status} 输出=${sink.out.slice(0, 400)}`)
+  // 反过来钉住"规则够不着的名字别冒充声明"：no-implied-eval 的模式是 ^(?:set(?:Interval|Timeout)|execScript)$
+  // （node_modules/eslint/lib/rules/no-implied-eval.js），下面这些声明了也永远不会被查——
+  // 两头都不准的声明等于没有声明，还会让读配置的人以为这些 sink 有人看着。
+  const unreachable = runEslint('src/ahub-lint-probe2.ts', [
+    "setImmediate('alert(1)')",
+    "requestAnimationFrame('alert(2)')",
+    "requestIdleCallback('alert(3)')",
+    "msSetImmediate('alert(4)')",
+    ''
+  ].join('\n'))
+  ok('规则够不着的名字确实一条都不报（所以 config 里不该再声明它们冒充覆盖面）',
+    eslintThere && !/no-implied-eval/.test(unreachable.out),
+    `exit=${unreachable.status} 输出=${unreachable.out.slice(0, 300)}`)
+  const cfgZ4 = readSrcSafe('eslint.config.mjs')
+  ok('eslint.config.mjs 读得到', cfgZ4.error === null, cfgZ4.error ?? '')
+  ok('两处 config block 都声明 linterOptions.noInlineConfig: true（顶层默认 + src/** 块）',
+    cfgZ4.error === null && (cfgZ4.text.match(/noInlineConfig:\s*true/g) ?? []).length >= 2,
+    `命中 ${(cfgZ4.text.match(/noInlineConfig:\s*true/g) ?? []).length} 处（应 ≥2）`)
+  ok('impliedEvalGlobals 补齐 execScript，并删掉规则够不着的 7 个名字（不是"保留但注释说明"那一档）',
+    cfgZ4.error === null && cfgZ4.text.includes("'execScript'") &&
+      ['setImmediate', 'requestAnimationFrame', 'requestIdleCallback', 'msSetImmediate', 'msSetInterval', 'msRequestAnimationFrame', 'msRequestIdleCallback']
+        .every((n) => !cfgZ4.text.includes(`'${n}'`)),
+    `execScript 声明了=${cfgZ4.text.includes("'execScript'")}；仍在冒充声明的名字=${['setImmediate', 'requestAnimationFrame', 'requestIdleCallback', 'msSetImmediate', 'msSetInterval', 'msRequestAnimationFrame', 'msRequestIdleCallback'].filter((n) => cfgZ4.text.includes(`'${n}'`)).join(',')}`)
+  ok('规则真会查的那组全局仍声明着（setTimeout/setInterval + window/global/globalThis 三种成员写法）',
+    cfgZ4.error === null &&
+      ['setTimeout', 'setInterval', 'window', 'global', 'globalThis'].every((n) => cfgZ4.text.includes(`'${n}'`)),
+    ['setTimeout', 'setInterval', 'window', 'global', 'globalThis'].filter((n) => !cfgZ4.text.includes(`'${n}'`)).join(',') || '（齐）')
+  ok('那 5 条 error 规则一条没少（本任务存在的全部意义）',
+    cfgZ4.error === null &&
+      ['no-eval', 'no-new-func', 'no-implied-eval', 'react/no-danger', 'react/no-danger-with-children']
+        .every((r) => cfgZ4.text.includes(`'${r}': 'error'`)),
+    ['no-eval', 'no-new-func', 'no-implied-eval', 'react/no-danger', 'react/no-danger-with-children']
+      .filter((r) => !cfgZ4.text.includes(`'${r}': 'error'`)).join(',') || '（齐）')
+  ok('verify/** 与 scripts/** 也过同一套 5 条 error 规则（它们守的是发版路径，原先是"零规则过一遍"）',
+    cfgZ4.error === null && /verify\/\*\*\/\*\.mjs/.test(cfgZ4.text) && /scripts\/\*\*\/\*\.mjs/.test(cfgZ4.text),
+    `verify 块=${/verify\/\*\*\/\*\.mjs/.test(cfgZ4.text)} scripts 块=${/scripts\/\*\*\/\*\.mjs/.test(cfgZ4.text)}`)
+  const probeVerify = runEslint('verify/ahub-lint-probe.mjs', [
+    '// eslint-disable-next-line no-eval',
+    "eval('1')",
+    ''
+  ].join('\n'))
+  ok('那套规则在 verify/** 上真的开着：同一行 disable 注释在这儿也关不掉 no-eval',
+    eslintThere && probeVerify.status !== 0 && /no-eval/.test(probeVerify.out) &&
+      INLINE_OFF_MSG.test(probeVerify.out),
+    `exit=${probeVerify.status} 输出=${probeVerify.out.slice(0, 400)}`)
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)
