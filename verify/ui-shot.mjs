@@ -525,8 +525,18 @@ const main = async () => {
         const st1 = await js(cdp, 'window.__ahub_debug.state().run')
         ok('走到交付（改动清单要有地方挂）', !!delivered, `status=${st1?.status}`)
         const sel = `[data-checkpoint="${cps}"]`
+        // 交付完成时人可能在工作站页（前面几项切过屏），TaskView 没挂载就没有交付卡片可看
+        await js(cdp, 'window.__ahub_debug.workflow()')
+        const cardUp = await waitJs(cdp, '!!document.querySelector(".delivery-card")', 10000)
+        ok('回到工作流界面后交付卡片在（不是只在状态机里"完成"）', !!cardUp)
         const barShown = await waitJs(cdp, `!!document.querySelector(${JSON.stringify(sel)})`, 10000)
-        ok('交付卡片挂出了改动清单入口', !!barShown)
+        if (!barShown) {
+          // 找不到就把现场打出来：是 run.id 不对、还是这个组件压根没渲染
+          const any = await js(cdp, `[...document.querySelectorAll('[data-checkpoint]')].map((e) => e.getAttribute('data-checkpoint')).join(',')`)
+          const dom = await js(cdp, '(() => { const d = document.querySelector(".delivery-card"); return d ? d.className + " | " + d.innerText.slice(0, 160).replace(/\\n/g, " / ") : "no delivery card" })()')
+          console.log(`  [诊断] 期望 run.id=${cps}；页面上的 data-checkpoint=[${any}]；交付卡片=${dom}`)
+        }
+        ok('交付卡片挂出了改动清单入口', barShown === true)
         await js(cdp, `document.querySelector(${JSON.stringify(sel)})?.querySelector('.cp-toggle')?.click()`)
         await sleep(400)
         const delta = await js(cdp, `!!document.querySelector(${JSON.stringify(sel)})?.querySelector('[data-checkpoint-delta]')`)
