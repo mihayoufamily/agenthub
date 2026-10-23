@@ -521,6 +521,86 @@ try {
   const badgeCountWb = await js(cdp3, "document.querySelectorAll('[data-compat-badge]').length")
   ok('工作站内徽章恰好一枚（Shell 单挂，不再是 Workbench/ChatView 两处各挂一份）', badgeCountWb === 1, String(badgeCountWb))
 
+  // ---- 修复波 A · 项 1：徽章被「发现新版本」横幅整个盖住 + 缺 pointer-events:none 会接走顶栏点击 ----
+  // 评审实证：.update-banner 是 position:fixed; top:14; z-index:900（components.css），与徽章原来的
+  // position:absolute; top:10; left:50%; translateX(-50%); zIndex:30 **完全重叠**；横幅由启动时的
+  // 静默更新检查置位（App.tsx，3 天节流），所以"版本落后的用户 + 兼容模式"是常态而不是边角，
+  // 徽章被整个盖住 → A4 承诺的"常驻可见"静默失效。
+  // 上面那几条只查 DOM 存在性（querySelector('[data-compat-badge]')），**看不见遮挡**——这正是它漏过去的原因。
+  // 所以下面一律走 rect 几何 + elementFromPoint/elementsFromPoint，不再加一条"节点存在"。
+  const bannerOn = await js(cdp3, `window.__ahub_debug.setUpdateBanner({ version: '9.9.9', url: 'https://example.invalid/agenthub' })`)
+  await sleep(500)
+  ok('前置：更新横幅真的置位了（走 App.tsx 那次静默更新检查用的同一个 store 动作，不是另造一条状态）',
+    !!bannerOn && bannerOn.version === '9.9.9', JSON.stringify(bannerOn))
+  const occ = await js(cdp3, `(() => {
+    const badge = document.querySelector('[data-compat-badge]')
+    const banner = document.querySelector('.update-banner')
+    if (!badge || !banner) return { missing: { badge: !!badge, banner: !!banner } }
+    const b = badge.getBoundingClientRect()
+    const n = banner.getBoundingClientRect()
+    const cx = b.left + b.width / 2
+    const cy = b.top + b.height / 2
+    const hit = document.elementFromPoint(cx, cy)
+    const stack = document.elementsFromPoint(cx, cy)
+    const inBanner = (e) => !!e && (e === banner || banner.contains(e))
+    // 顶栏上"能被点"的元素：徽章缺 pointer-events:none 时会接走它压在下面的这些点击
+    const clickable = [...document.querySelectorAll('.wb-topbar button, .wb-topbar .model-chip, .wb-topbar .full-access-badge, .wf-topbar .goal, .wf-topbar button, .cfg-chip')]
+    const under = clickable.filter((el) => {
+      const r = el.getBoundingClientRect()
+      return r.width >= 4 && r.height >= 4 && !(b.right < r.left || b.left > r.right || b.bottom < r.top || b.top > r.bottom)
+    })
+    const eaten = under.filter((el) => {
+      const r = el.getBoundingClientRect()
+      const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+      return top !== el && !el.contains(top)
+    }).map((el) => (typeof el.className === 'string' ? el.className : el.tagName).slice(0, 40))
+    return {
+      badge: { t: +b.top.toFixed(1), b: +b.bottom.toFixed(1), l: +b.left.toFixed(1), r: +b.right.toFixed(1), h: +b.height.toFixed(1) },
+      banner: { t: +n.top.toFixed(1), b: +n.bottom.toFixed(1), h: +n.height.toFixed(1) },
+      intersect: !(b.right < n.left || b.left > n.right || b.bottom < n.top || b.top > n.bottom),
+      hitIsBanner: inBanner(hit),
+      stackHasBanner: stack.some(inBanner),
+      hitIsBadge: hit === badge,
+      pointerEvents: getComputedStyle(badge).pointerEvents,
+      clickableTotal: clickable.length,
+      underBadge: under.map((el) => (typeof el.className === 'string' ? el.className : el.tagName).slice(0, 40)),
+      eaten
+    }
+  })()`)
+  console.log('  [12b] 徽章/横幅几何：' + JSON.stringify(occ))
+  const badgeCountWithBanner = await js(cdp3, "document.querySelectorAll('[data-compat-badge]').length")
+  ok('置位横幅后徽章 rect 与横幅 rect 不相交，且徽章仍在（不是"横幅在就把徽章隐藏"——那正是把可见性承诺删掉）',
+    !occ.missing && occ.intersect === false && occ.badge.t >= occ.banner.b - 1 && badgeCountWithBanner === 1,
+    `${JSON.stringify(occ.missing ?? null)} 相交=${occ.intersect} 徽章 top=${occ.badge?.t} 横幅 bottom=${occ.banner?.b} 徽章节点数=${badgeCountWithBanner}`)
+  ok('elementFromPoint(徽章中心) 不在横幅里：徽章没被盖住（z-index 900 的横幅压在 z-index 30 的徽章上时这条会红）',
+    !occ.missing && occ.hitIsBanner === false && occ.stackHasBanner === false,
+    `hitIsBanner=${occ.hitIsBanner} stackHasBanner=${occ.stackHasBanner} 徽章=${JSON.stringify(occ.badge)} 横幅=${JSON.stringify(occ.banner)}`)
+  ok('徽章 pointer-events:none：命中测试穿过它落到被压住的元素上，不吃顶栏点击',
+    !occ.missing && occ.pointerEvents === 'none' && occ.hitIsBadge === false && Array.isArray(occ.eaten) && occ.eaten.length === 0,
+    `pointer-events=${occ.pointerEvents} 徽章中心命中的是徽章本身=${occ.hitIsBadge} 被徽章压住又点不到的元素=${JSON.stringify(occ.eaten)}（顶栏可点元素共 ${occ.clickableTotal} 个，其中与徽章 rect 相交 ${occ.underBadge?.length ?? 0} 个：${JSON.stringify(occ.underBadge)}）`)
+  const chipHit = await js(cdp3, `(() => {
+    const el = document.querySelector('.wb-topbar .model-chip') || document.querySelector('.wb-topbar button') || document.querySelector('.cfg-chip')
+    if (!el) return { missing: true }
+    const r = el.getBoundingClientRect()
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    return {
+      cls: (typeof el.className === 'string' ? el.className : el.tagName).slice(0, 40),
+      text: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 24),
+      isSelf: top === el || el.contains(top),
+      topCls: top ? (typeof top.className === 'string' ? top.className : top.tagName).slice(0, 40) : null
+    }
+  })()`)
+  ok('已知顶栏 chip 的中心命中它自己（徽章没有把这一片的点击接走）',
+    !chipHit.missing && chipHit.isSelf === true, JSON.stringify(chipHit))
+  await js(cdp3, 'window.__ahub_debug.setUpdateBanner(null)')
+  await sleep(300)
+  const bannerOff = await js(cdp3, `(() => {
+    const badge = document.querySelector('[data-compat-badge]')
+    return { banner: !!document.querySelector('.update-banner'), top: badge ? +badge.getBoundingClientRect().top.toFixed(1) : null }
+  })()`)
+  ok('横幅清除后徽章回到原位（下移是跟着横幅走的，不是把徽章永久挪到 68px 那里留一块空白）',
+    bannerOff.banner === false && bannerOff.top !== null && bannerOff.top < 40, JSON.stringify(bannerOff))
+
   const onWf12 = await gotoWorkflow(cdp3)
   const badgeInWf = onWf12 ? await waitJs(cdp3, "document.querySelectorAll('[data-compat-badge]').length === 1", 12000) : false
   ok('Ctrl+M 进工作流模式徽章仍在（沙箱被关掉这件事换屏也看得见——用户"可见"那一半）',

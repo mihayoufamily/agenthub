@@ -53,6 +53,15 @@ export function installDebugHooks() {
     menuSummary: async () => await bridge.app.menuSummary(),
     /** 兼容模式事实（真机断言徽章正反两向用）：读的是主进程的实际状态，不是配置 */
     compat: async () => await bridge.app.compat(),
+    /**
+     * 显式置位/清除「发现新版本」横幅（真机断言用：徽章必须不被它盖住）。
+     * 与 App.tsx 启动时那次静默更新检查走的是**同一个** store 动作，不是另造一条状态——
+     * 断言要验的就是真实那条路径下的层叠结果。传 null 清除。
+     */
+    setUpdateBanner: (b: { version: string; url: string } | null) => {
+      useUi.getState().setUpdateBanner(b)
+      return useUi.getState().updateBanner
+    },
     // 预设与槽位（本轮需求 3/4 验证用）
     savePreset: (name: string) => {
       const p = useWorkflow.getState().savePreset(name)
