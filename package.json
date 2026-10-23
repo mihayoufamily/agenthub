@@ -1,7 +1,7 @@
 {
   "name": "agenthub",
   "productName": "AgentHub",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "AgentHub — 多 Agent 工作台与工作流协作桌面应用（Windows）",
   "main": "./out/main/index.js",
   "author": "AgentHub",
