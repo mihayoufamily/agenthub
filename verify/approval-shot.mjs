@@ -106,8 +106,9 @@ try {
   const navOk = await js(cdp, `(() => { const b = [...document.querySelectorAll('.nav-item')].find((x) => x.textContent.includes('命令审批')); if (!b) return false; b.click(); return true })()`)
   ok('设置里有「命令审批」分区', navOk)
   await sleep(600)
+  // 本脚本自身产生 4 次确认：拒绝、本次允许、始终允许、危险形态拒绝
   const recCount = await js(cdp, 'document.querySelectorAll("[data-approval-record]").length')
-  ok('审批历史列出了刚才的每一次确认', recCount >= 5, String(recCount))
+  ok('审批历史列出了刚才的每一次确认', recCount >= 4, String(recCount))
   const hist = await js(cdp, 'window.agenthub.approval.history(50)')
   ok('历史里拒绝与允许都有记录', hist.some((h) => h.decision === 'deny') && hist.some((h) => h.decision === 'once'))
   // 现场还原：只有本来没有历史时才清空，别把用户真实的审批审计记录抹掉

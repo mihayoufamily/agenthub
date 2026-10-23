@@ -492,6 +492,9 @@ const main = async () => {
 
     // ---- 7b. 执行角色真实写文件（by=tool）：产物来源标注与沙箱根切换 ----
     await js(cdp, `window.__ahub_debug.startMockToolTask(${JSON.stringify(baseUrl)}, ${JSON.stringify(SANDBOX)}, '交付一个文件产物：写一份说明')`)
+    // 把审核方式打出来：走不走确认门决定后面几项断言的时机，出问题时要能一眼看出是哪种
+    const cfg7b = await js(cdp, 'window.__ahub_debug.state().config')
+    console.log(`  [7b] 审核方式=${cfg7b?.reviewMode} 每轮确认=${cfg7b?.confirmEveryRound}`)
     const toolArt = await waitJs(cdp, `(() => {
       const s = window.__ahub_debug.state()
       const c = (s.run?.cardDetails ?? []).find((x) => (x.artifacts ?? []).some((a) => /\\[tool\\]/.test(a)))
@@ -504,17 +507,35 @@ const main = async () => {
       ok('未落在 Agent 原授权目录（沙箱根未被使用）', !existsSync(join(SANDBOX, '交付说明.md')))
       const hasAppArt = await js(cdp, `(() => { const s = window.__ahub_debug.state(); return (s.run?.cardDetails ?? []).some((c) => (c.artifacts ?? []).some((a) => /\\[app\\]/.test(a))) })()`)
       ok('已有执行方写盘产物时不再生成 AgentHub 兜底文本（来源不重复）', !hasAppArt)
-      // 检查点：真实写盘必须进了可回滚清单，且交付卡片上看得见
+      // 检查点：真实写盘必须进了可回滚清单；改动清单挂在交付卡片上，所以要先走到交付
       const cps = await js(cdp, '(() => { const s = window.__ahub_debug.state(); return s.run ? s.run.id : null })()')
       await shot('11-workflow-tool-artifact')
       if (cps) {
         const man = await js(cdp, `window.__ahub_debug.checkpoint(${JSON.stringify(cps)})`)
         ok('工具层写盘进入改动检查点（交付可回滚）', (man?.summary?.total ?? 0) >= 1, JSON.stringify(man?.summary))
-        const barShown = await js(cdp, `!!document.querySelector('[data-checkpoint=\"' + ${JSON.stringify(cps)} + '\"]')`)
-        ok('交付卡片挂出了改动清单入口（可展开看 diff）', barShown === true)
+        // 交付可能停在确认门、也可能按配置自动交付；两种都要走到 completed。
+        // mock 服务每轮要几秒、最多 3 轮 ×3 次调用，所以这里给的是一整段真实时间，
+        // 而不是"审核链路应该瞬间跑完"的假设
+        const REACHED = '(() => { const r = window.__ahub_debug.state().run; return !!r && (r.status === "completed" || (!!r.gate && r.status === "waiting_user")) })()'
+        const reached = await waitJs(cdp, REACHED, 480000)
+        const st0 = await js(cdp, 'window.__ahub_debug.state().run')
+        ok('跑到交付或确认门（审核链路没卡死）', !!reached, `status=${st0?.status} stage=${st0?.stage} round=${st0?.round} cards=${st0?.cards}`)
+        if (reached && st0.status !== 'completed') await js(cdp, 'window.__ahub_debug.passGate()')
+        const delivered = await waitJs(cdp, 'window.__ahub_debug.state().run?.status === "completed"', 240000)
+        const st1 = await js(cdp, 'window.__ahub_debug.state().run')
+        ok('走到交付（改动清单要有地方挂）', !!delivered, `status=${st1?.status}`)
+        const sel = `[data-checkpoint="${cps}"]`
+        const barShown = await waitJs(cdp, `!!document.querySelector(${JSON.stringify(sel)})`, 10000)
+        ok('交付卡片挂出了改动清单入口', !!barShown)
+        await js(cdp, `document.querySelector(${JSON.stringify(sel)})?.querySelector('.cp-toggle')?.click()`)
+        await sleep(400)
+        const delta = await js(cdp, `!!document.querySelector(${JSON.stringify(sel)})?.querySelector('[data-checkpoint-delta]')`)
+        ok('展开后能看到目录对照（开工前基线 vs 现在）', delta === true, String(delta))
+        await shot('12-workflow-checkpoint-bar')
       }
     }
-    await js(cdp, 'window.__ahub_debug.stopTask()')
+    const st = await js(cdp, 'window.__ahub_debug.state()')
+    if (st.run && st.run.status !== 'completed') await js(cdp, 'window.__ahub_debug.stopTask()')
     await sleep(2000)
     await js(cdp, `window.__ahub_debug.setWorkflowOutputDir(${JSON.stringify(prevOutDir ?? '')})`)
     await sleep(800)
