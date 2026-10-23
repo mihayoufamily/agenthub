@@ -1,6 +1,9 @@
 // 配置迁移的纯规则层（store.ts 只负责读写盘；规则放这里才能被逻辑层验证覆盖）
 import type { McpServer } from './types'
 
+/** 当前配置格式头版本：`store.ts` 的迁移链与 importConfig 都以此为准，不再各写各的数字 */
+export const SCHEMA_HEAD = 2
+
 /** v1 -> v2 只关心这三项；其余字段原样透传，不做全量 AppConfig 断言 */
 export interface McpConfigShape {
   mcpServers?: McpServer[]
@@ -17,8 +20,15 @@ export function migrateV1toV2(raw: McpConfigShape): McpConfigShape {
   const out: McpConfigShape = { ...raw }
   if (Array.isArray(raw.mcpServers)) {
     out.mcpServers = raw.mcpServers.map((s) => {
+      // 脏数据（config.json 被手改过、或被更早的版本写坏）原样透传：
+      // 对 null 解引用会抛 TypeError 掀掉整个 getConfig()（它外面没有 try/catch），
+      // 对字符串/数字做 { ...s } 会伪造出一条 {0:'x',legacyInvalid:true,enabled:false} 的假记录并写回磁盘。
+      // 消费者侧（ipc.ts 挑 server、设置页列表）本来就用 !!s 挡脏数据，这里保持一致、不替它编数据。
+      if (!s || typeof s !== 'object') return s
       const bin = typeof s.launch?.bin === 'string' ? s.launch.bin.trim() : ''
-      return bin ? { ...s, legacyInvalid: false, formatVersion: 2 as const } : { ...s, legacyInvalid: true, enabled: false }
+      return bin
+        ? { ...s, legacyInvalid: false, formatVersion: SCHEMA_HEAD as 2 }
+        : { ...s, legacyInvalid: true, enabled: false }
     })
   }
   if (out.sandboxFallback !== 'auto' && out.sandboxFallback !== 'ask' && out.sandboxFallback !== 'off') {

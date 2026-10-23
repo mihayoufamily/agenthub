@@ -915,15 +915,34 @@ console.log('\n[W] migrateV1toV2：legacy MCP 标失效、sandboxFallback 补默
   const old = out1.mcpServers.find((s) => s.id === 'old')
   const neu = out1.mcpServers.find((s) => s.id === 'new')
   const blank = out1.mcpServers.find((s) => s.id === 'blank')
-  ok('只有 command 无 launch 的旧记录被标失效', old.legacyInvalid === true, JSON.stringify(old))
-  ok('标失效同时被禁用（免得界面还显示成可用）', old.enabled === false)
-  ok('标失效不删除记录（重填时名字与原命令还在）', old.name === '旧版' && old.command.includes('node.exe'))
-  ok('已有 launch 的记录原样放过且清掉失效标记', neu.legacyInvalid === false && neu.launch.bin === 'node' && neu.enabled === true, JSON.stringify(neu))
-  ok('launch.bin 为空串也算旧格式（不认字段存在就当可用）', blank.legacyInvalid === true && blank.enabled === false)
+  // 评审后补：把"绝不删记录"写成断言——记录万一被弄丢，下面那些 old.xxx 解引用会当场抛异常，
+  // 整个套件会在打印"结果："之前就崩掉，需求本身反倒没被测试表达过。
+  ok('三条记录一条都没被删（迁移只改标记不删条目）', !!old && !!neu && !!blank,
+    `old=${!!old} new=${!!neu} blank=${!!blank}`)
+  ok('只有 command 无 launch 的旧记录被标失效', old?.legacyInvalid === true, JSON.stringify(old))
+  ok('标失效同时被禁用（免得界面还显示成可用）', old?.enabled === false)
+  ok('标失效不删除记录（重填时名字与原命令还在）', old?.name === '旧版' && (old?.command ?? '').includes('node.exe'))
+  ok('已有 launch 的记录原样放过且清掉失效标记', neu?.legacyInvalid === false && neu?.launch?.bin === 'node' && neu?.enabled === true, JSON.stringify(neu))
+  ok('launch.bin 为空串也算旧格式（不认字段存在就当可用）', blank?.legacyInvalid === true && blank?.enabled === false)
   ok('sandboxFallback 缺省补 auto（老环境不至于突然开不了机）', out1.sandboxFallback === 'auto', String(out1.sandboxFallback))
   ok('已声明 ask 的策略不被改写', cm.migrateV1toV2({ sandboxFallback: 'ask' }).sandboxFallback === 'ask')
   ok('没有 mcpServers 的旧配置照样能迁移，不抛异常', cm.migrateV1toV2({}).mcpServers === undefined)
   ok('幂等：迁移两次与一次结果相同', JSON.stringify(cm.migrateV1toV2(cm.migrateV1toV2(JSON.parse(JSON.stringify(base))))) === JSON.stringify(out1))
+  // 评审后补：脏数据护栏。`s.launch?.bin` 只在 launch 上可选链，没在 s 上——
+  // null 会 TypeError 直接掀掉 getConfig()（它没有 try/catch）；字符串/数字不抛异常，但被 { ...s }
+  // 伪造成 {0:'x',legacyInvalid:true,enabled:false} 这种"看着像记录"的对象，再由 store.ts 写回 config.json。
+  // 两条路径都是这次改 mcpServers 才引入的（getConfig 此前根本不碰 mcpServers）。
+  const probe = (servers) => {
+    try { return { out: cm.migrateV1toV2({ mcpServers: servers }) } } catch (e) { return { err: e } }
+  }
+  const pNull = probe([null])
+  const pPrim = probe(['x', 7])
+  ok('null 元素不抛异常（getConfig 外层没有 try/catch，一抛整份配置就读不出来）', !pNull.err,
+    pNull.err ? `${pNull.err.name}: ${pNull.err.message}` : '')
+  ok('null / 字符串 / 数字元素原样透传，不被 { ...s } 伪造成记录写回磁盘',
+    JSON.stringify(pNull.out?.mcpServers) === JSON.stringify([null]) &&
+      JSON.stringify(pPrim.out?.mcpServers) === JSON.stringify(['x', 7]),
+    `null→${JSON.stringify(pNull.out?.mcpServers)} 字符串数字→${JSON.stringify(pPrim.out?.mcpServers)}`)
 }
 
 rmSync(tmp, { recursive: true, force: true })
