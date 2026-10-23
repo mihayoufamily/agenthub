@@ -190,6 +190,8 @@ export function installDebugHooks() {
         ? {
             id: useWorkflow.getState().run!.id,
             status: useWorkflow.getState().run!.status,
+            // 确认门要能被验证脚本看见：以前只暴露 status，脚本只能猜"waiting_user 大概是到门了"
+            gate: !!useWorkflow.getState().run!.gate,
             stage: useWorkflow.getState().run!.stage,
             round: useWorkflow.getState().run!.round,
             cards: useWorkflow.getState().run!.cards.length,

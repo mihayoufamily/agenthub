@@ -516,7 +516,7 @@ const main = async () => {
         // 交付可能停在确认门、也可能按配置自动交付；两种都要走到 completed。
         // mock 服务每轮要几秒、最多 3 轮 ×3 次调用，所以这里给的是一整段真实时间，
         // 而不是"审核链路应该瞬间跑完"的假设
-        const REACHED = '(() => { const r = window.__ahub_debug.state().run; return !!r && (r.status === "completed" || (!!r.gate && r.status === "waiting_user")) })()'
+        const REACHED = '(() => { const r = window.__ahub_debug.state().run; return !!r && (r.status === "completed" || !!r.gate) })()'
         const reached = await waitJs(cdp, REACHED, 480000)
         const st0 = await js(cdp, 'window.__ahub_debug.state().run')
         ok('跑到交付或确认门（审核链路没卡死）', !!reached, `status=${st0?.status} stage=${st0?.stage} round=${st0?.round} cards=${st0?.cards}`)
