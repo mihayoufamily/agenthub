@@ -15,3 +15,6 @@ verify/*.zip
 .workbuddy/
 
 .commit-msg.txt
+
+# SDD 隔离工作区（worktree），不入库
+.worktrees/
