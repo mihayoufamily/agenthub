@@ -1573,6 +1573,73 @@ console.log('\n[Y] navDecision')
   // 加了第三形参后开发源判定不能受影响
   ok('传了 ownRootPath 后开发源页面仍放行',
     wn.navDecision(`${dev}/index.html`, dev, PKG_ROOT) === 'allow')
+
+  // ---- 修复波 A · 项 9（Ruling S）：把"每个调用点都传锚"变成机器检查的不变量 ----
+  // 评审复现了 navDecision('file:////evil.example/share/resources/app/dist/renderer/x.html', null) → allow
+  // （带锚则 block），但三个生产调用点全部传了真实根，从 src/ 不可达。裁决：与其现在改约 10 条
+  // 无锚断言，不如把"调用点必须传锚"钉成不变量，ownRootPath 改必填留给 v0.5.0。
+  // 无锚弱回退的逻辑本身与那约 10 条无锚断言都**不动**（上面那些还在）。
+  const nonStringAnchors = [5, 0, true, false, {}, [], [PKG_ROOT], () => PKG_ROOT]
+  const anchorResults = nonStringAnchors.map((a) => {
+    try { return wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null, a) }
+    catch (e) { return `threw: ${e && e.message}` }
+  })
+  ok('ownRootPath 是非字符串（数字/布尔/对象/数组/函数）时按"无可用锚点"处理并 fail-closed 返回 block：不抛异常，也不退回 marker 弱回退',
+    anchorResults.every((r) => r === 'block'),
+    JSON.stringify(anchorResults.map((r, i) => `${typeof nonStringAnchors[i]}→${r}`)))
+  // 调用点扫描：从 `navDecision(` 起做括号配平取实参串，再按**顶层**逗号切分
+  // （第三个实参可以是任意表达式，只数逗号会被嵌套括号骗过去）；跳过函数声明本身。
+  const navCallSites = (srcText) => {
+    const out = []
+    const re = /navDecision\s*\(/g
+    let m
+    while ((m = re.exec(srcText)) !== null) {
+      if (/function\s*$/.test(srcText.slice(Math.max(0, m.index - 16), m.index))) continue
+      let i = m.index + m[0].length
+      const start = i
+      for (let depth = 1; i < srcText.length && depth > 0; i++) {
+        if (srcText[i] === '(') depth++
+        else if (srcText[i] === ')') depth--
+      }
+      const argText = srcText.slice(start, i - 1)
+      const parts = ['']
+      let d = 0
+      for (const c of argText) {
+        if (c === '(' || c === '[' || c === '{') d++
+        else if (c === ')' || c === ']' || c === '}') d--
+        if (c === ',' && d === 0) parts.push('')
+        else parts[parts.length - 1] += c
+      }
+      out.push({ argc: parts.filter((p) => p.trim().length > 0).length, text: argText.replace(/\s+/g, ' ').trim().slice(0, 70) })
+    }
+    return out
+  }
+  const srcRootY = join(fileURLToPath(new URL('..', import.meta.url)), 'src')
+  // fileURLToPath(new URL('..', …)) 在 Windows 上带尾分隔符，直接 slice 会多吃一个字符
+  // （实测把 src/main/index.ts 切成 rc/main/index.ts，于是"扫到几处"永远是 0）——先剥掉尾分隔符
+  const repoRootY = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/, '')
+  const navFiles = []
+  {
+    const walkY = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name)
+        if (e.isDirectory()) walkY(p)
+        else if (/\.tsx?$/.test(e.name)) navFiles.push(p)
+      }
+    }
+    walkY(srcRootY)
+  }
+  const navHits = []
+  for (const f of navFiles) {
+    const rel = f.slice(repoRootY.length + 1).replace(/\\/g, '/')
+    for (const c of navCallSites(readFileSync(f, 'utf-8'))) navHits.push({ file: rel, ...c })
+  }
+  ok('扫描器自己有牙：src/** 扫到了源文件，且 index.ts 的三个 handler（新窗口/导航/重定向）都在里面（否则下面那条不变量是空转永真）',
+    navFiles.length >= 30 && navHits.filter((c) => c.file === 'src/main/index.ts').length === 3,
+    `扫了 ${navFiles.length} 个 .ts/.tsx；index.ts 命中 ${navHits.filter((c) => c.file === 'src/main/index.ts').length} 处（应为 3）`)
+  ok('不变量：src/** 里每一处 navDecision( 调用都带第三个实参（生产三处恒传真实根；无锚弱回退因此从 src/ 不可达）',
+    navHits.length >= 3 && navHits.every((c) => c.argc === 3),
+    `${navHits.length} 处调用：${JSON.stringify(navHits.map((c) => `${c.file} argc=${c.argc} ${c.text}`))}`)
 }
 
 // ---------- Z. 沙箱降级三态：决策与徽章措辞都是纯函数（Task 6）----------

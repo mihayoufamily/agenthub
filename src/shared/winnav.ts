@@ -61,9 +61,15 @@ function isOwnPage(
     return false
   }
   const target = toSegments(decoded)
-  // ownRootPath 传了（哪怕空串/算不出段）就以它为准：折不出根段就一律不放行，fail-closed，
-  // 不悄悄退回下面那条宽松的 marker 回退。
-  if (ownRootPath !== undefined && ownRootPath !== null) return isInside(target, toSegments(ownRootPath))
+  // ownRootPath 传了就以它为准，且**只**以它为准：折不出根段（空串）、或根本不是字符串
+  // （脏调用方递进来一个数字/对象/数组）都一律不放行——fail-closed。非字符串这一路刻意**不抛异常**：
+  // 本函数是在 Electron 的 setWindowOpenHandler / will-navigate / will-redirect 回调里同步调用的，
+  // 抛出会从导航回调里逸出（与"崩了也要把人救活"的取向相反），而放行是更坏的那一头，所以返回 block。
+  // 两种情况都不悄悄退回下面那条宽松的 marker 回退。
+  if (ownRootPath !== undefined && ownRootPath !== null) {
+    if (typeof ownRootPath !== 'string') return false
+    return isInside(target, toSegments(ownRootPath))
+  }
   // 弱回退（ownRootPath 缺失：单元测试、老调用点）：退回 marker 结尾匹配。
   // 已知弱点：<任意根>/resources/app/dist/renderer/ 下的文件会被放行——生产调用点必须传真实根。
   return /(^|\/)resources\/app\/dist\/renderer\/[^/]/i.test('/' + target.join('/'))
