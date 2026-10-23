@@ -345,6 +345,8 @@ export interface WorkflowRoleConfig {
   /** 角色级模型覆盖（真实生效，不影响该 Agent 在工作站的默认模型）：
    *  model Agent = 覆盖 modelId；CLI Agent = 覆盖 --model 参数。切换 Agent 时清除。 */
   modelOverride?: string
+  /** 这个角色固定要遵守的 Skill（会话级引用之外的角色级绑定；缺省 = 不绑定） */
+  skillIds?: string[]
 }
 
 export interface WorkflowConfig {
@@ -420,6 +422,10 @@ export interface AppConfig {
     plannerModel?: string
     executorModel?: string
     reviewerModel?: string
+    /** 角色级 Skill 绑定（同上：必须持久化，否则重启后"绑了技能"这件事会静默丢失） */
+    plannerSkillIds?: string[]
+    executorSkillIds?: string[]
+    reviewerSkillIds?: string[]
   }
   /** 工作流预设（角色 + 模型方案，一键套用） */
   presets?: WorkflowPreset[]

@@ -6,6 +6,8 @@ import { useUi } from '../stores/ui'
 import { Modal } from '../components/Modal'
 import { Button, Switch } from '../components/primitives'
 import { bridge } from '../lib/ipc'
+import { cls } from '../lib/utils'
+import type { Skill } from '@shared/types'
 
 export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const config = useWorkflow((s) => s.config)
@@ -13,8 +15,12 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
   const agents = useAgents((s) => s.agents)
   // 生效目录（未设置时为主进程默认值）：留空也要让用户看到实际落盘位置
   const [effDir, setEffDir] = useState('')
+  const [skills, setSkills] = useState<Skill[]>([])
   useEffect(() => {
-    if (open) void bridge.artifacts.dir().then(setEffDir)
+    if (open) {
+      void bridge.artifacts.dir().then(setEffDir)
+      void bridge.skills.list().then(setSkills)
+    }
   }, [open])
 
   const roleSelect = (key: 'planner' | 'executor' | 'reviewer', label: string) => {
@@ -52,6 +58,27 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
             ? `Agent：${cur.agentName || '—'} · 模型：${cur.model || '—'}${agents.find((a) => a.id === cur.agentId)?.isDemo ? ' · 演示' : ''}`
             : '未配置'}
         </span>
+        {skills.length > 0 && (
+          <div className="role-skills" data-role-skills={key}>
+            <span className="role-skills-label">绑定技能</span>
+            {skills.map((s) => {
+              const on = (cur.skillIds ?? []).includes(s.id)
+              return (
+                <label key={s.id} className={cls('role-skill', on && 'on')} title={s.enabled === false ? '该技能已被停用，绑定也不会生效' : s.desc}>
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={s.enabled === false}
+                    onChange={(e) => patchConfig({
+                      [key]: { ...cur, skillIds: e.target.checked ? [...(cur.skillIds ?? []), s.id] : (cur.skillIds ?? []).filter((x) => x !== s.id) }
+                    } as never)}
+                  />
+                  {s.name}
+                </label>
+              )
+            })}
+          </div>
+        )}
       </div>
     )
   }

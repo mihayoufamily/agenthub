@@ -746,6 +746,24 @@ console.log('\n[P] 接线：验收对照与回滚入口真的进了界面')
   ok('基线只记清单不复制内容（开销与仓库大小无关）', ck.includes('MAX_BASELINE') && !/baseline.*copyFile/.test(ck))
 }
 
+// ---------- Q. 编排：续跑起点 / 单角色重跑 / 角色级技能 ----------
+console.log('\n[Q] 编排能力：不重放已发生的调用、重跑只加卡片、技能按角色注入')
+{
+  const wfSrc = readFileSync(new URL('../src/renderer/src/stores/workflow.ts', import.meta.url), 'utf-8')
+  ok('续跑只按卡片推断下一步，不重放已发生的调用', wfSrc.includes('只按卡片推断') && wfSrc.includes('resumeInterrupted'))
+  ok('审核已完成的中断：重新开确认门让人决定，不自作主张交付', wfSrc.includes('这一轮的审核已完成'))
+  ok('单角色重跑走 only 链条，不碰确认门', wfSrc.includes('only ? [startRole]') && wfSrc.includes('不动确认门与交付'))
+  ok('重跑是"新增一张卡片"而不是原地改写', wfSrc.includes('新增一张卡片，后续结论按最新一张算'))
+  ok('正在执行时拦住重跑（否则两套循环同时写同一 run）', wfSrc.includes('任务正在执行，请先停止再重跑单个角色'))
+  ok('角色级技能只在绑定的那个角色里展开', wfSrc.includes('skillsBlockFor(roleCfg.skillIds)'))
+  ok('停用的 Skill 即便绑定了也不注入', wfSrc.includes("ids.includes(s.id) && s.enabled !== false"))
+  ok('角色级技能绑定落盘（不然是重启后静默忘掉）', wfSrc.includes('plannerSkillIds: get().config.planner.skillIds'))
+  ok('resolveRoles 重建角色时保留技能绑定', /skillIds: r\.skillIds/.test(wfSrc))
+  // 提示词装配顺序：协议 → 项目约定 → 角色技能 → 常驻要求
+  const rpSrc = readFileSync(new URL('../src/renderer/src/lib/rolePrompts.ts', import.meta.url), 'utf-8')
+  ok('注入顺序固定且带技能一层', rpSrc.includes('角色协议 → 项目约定 → 角色绑定的 Skill') && rpSrc.includes('ctx.skills?.trim()'))
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

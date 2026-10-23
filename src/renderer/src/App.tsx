@@ -136,17 +136,18 @@ export function App() {
         // 工作流默认配置可能引用已删除的 Agent（历史配置残留）：失效时回退到现有 Agent，不静默留空
         const pick = (savedId: string | undefined, fb: string | undefined) =>
           (savedId && byId(savedId) ? savedId : fb) || ''
-        const mk = (savedId: string | undefined, fb: string | undefined, override: string | undefined) => {
+        const mk = (savedId: string | undefined, fb: string | undefined, override: string | undefined, skillIds?: string[]) => {
           const id = pick(savedId, fb)
           const a = byId(id)
           // 角色仍指向原 Agent 才沿用它的模型覆盖；回退到别的 Agent 时那是另一个连接的模型名
           const ov = override && savedId && id === savedId ? override : undefined
-          return { agentId: id, agentName: a?.name ?? '未配置', model: ov ?? a?.model ?? '—', ...(ov ? { modelOverride: ov } : {}) }
+          const sk = savedId && id === savedId ? skillIds : undefined
+          return { agentId: id, agentName: a?.name ?? '未配置', model: ov ?? a?.model ?? '—', ...(ov ? { modelOverride: ov } : {}), ...(sk?.length ? { skillIds: sk } : {}) }
         }
         useWorkflow.getState().patchConfig({
-          planner: mk(wd?.plannerAgentId, agents[0]?.id, wd?.plannerModel),
-          executor: mk(wd?.executorAgentId, agents[1 % Math.max(agents.length, 1)]?.id ?? agents[0]?.id, wd?.executorModel),
-          reviewer: mk(wd?.reviewerAgentId, agents[agents.length - 1]?.id, wd?.reviewerModel),
+          planner: mk(wd?.plannerAgentId, agents[0]?.id, wd?.plannerModel, wd?.plannerSkillIds),
+          executor: mk(wd?.executorAgentId, agents[1 % Math.max(agents.length, 1)]?.id ?? agents[0]?.id, wd?.executorModel, wd?.executorSkillIds),
+          reviewer: mk(wd?.reviewerAgentId, agents[agents.length - 1]?.id, wd?.reviewerModel, wd?.reviewerSkillIds),
           reviewMode: wd?.reviewMode ?? 'human',
           maxRounds: wd?.maxRounds ?? 3,
           timeoutMin: wd?.timeoutMin ?? 30,

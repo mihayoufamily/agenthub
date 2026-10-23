@@ -134,6 +134,25 @@ export function TaskView() {
           ))}
           {run.gate && run.status === 'waiting_user' && <GateCard run={run} />}
           {run.status === 'rework_limit' && <ReworkLimitCard run={run} />}
+          {run.status === 'interrupted' && (
+            <div className="gate-card" style={{ borderColor: 'rgba(180,83,9,.4)', background: 'var(--warn-bg)' }} data-interrupted-card>
+              <div className="gate-title" style={{ color: 'var(--warn)' }}>
+                <Icon name="warn" size={16} /> 应用重启过，这段执行状态没法核对
+              </div>
+              <div className="gate-review">
+                已产生的卡片与产物都留着。下面这个"继续"是按已有卡片推断该谁接着跑，
+                不会重放已经发生过的调用（重放会重复扣额度、重复写文件）；
+                也可以只对某个角色点"重跑"，或者以此为目标开新任务。
+              </div>
+              <div className="gate-actions">
+                <Button variant="primary" onClick={() => void useWorkflow.getState().resumeInterrupted()} data-resume>
+                  从中断处继续
+                </Button>
+                <Button variant="secondary" onClick={() => useWorkflow.getState().continueModify()}>以此为目标开新任务</Button>
+                <Button variant="ghost" onClick={() => useWorkflow.getState().newTask()}>新建任务</Button>
+              </div>
+            </div>
+          )}
           {(run.status === 'token_limit' || run.status === 'budget_limit') && (
             <div className="gate-card" style={{ borderColor: 'rgba(180,83,9,.4)', background: 'var(--warn-bg)' }} data-limit-card={run.status}>
               <div className="gate-title" style={{ color: 'var(--warn)' }}>
@@ -330,6 +349,16 @@ function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
         {card.model !== '—' && <span className="rc-round">{card.model}</span>}
         {card.demo && <span className="demo-badge">演示</span>}
         <span className="rc-time">{new Date(card.ts).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+        {(card.role === 'planner' || card.role === 'executor' || card.role === 'reviewer') && !run.demo && (
+          <button
+            className="rc-rerun"
+            data-rerun={card.role}
+            title="只重跑这一个角色：会新增一张卡片，不改写这张，也不动确认门"
+            onClick={() => useWorkflow.getState().rerunRole(card.role as 'planner' | 'executor' | 'reviewer')}
+          >
+            重跑
+          </button>
+        )}
       </div>
       <div className="rc-body">
         <div className="conclusion">

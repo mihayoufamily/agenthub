@@ -66,6 +66,17 @@ export function installDebugHooks() {
       return useWorkflow.getState().run?.id ?? null
     },
     stopTask: () => useWorkflow.getState().stop('user'),
+    /** 中断续跑 / 单角色重跑（编排能力验证用） */
+    resumeInterrupted: () => {
+      void useWorkflow.getState().resumeInterrupted()
+      return true
+    },
+    rerunRole: (role: 'planner' | 'executor' | 'reviewer') => {
+      useWorkflow.getState().rerunRole(role)
+      return true
+    },
+    /** 卡片摘要（角色级技能与卡片张数断言用） */
+    cardRoles: () => (useWorkflow.getState().run?.cards ?? []).map((c) => c.role),
     // 命令审批：待裁决队列 + 由脚本代替人点选（验证确认框真能拦住命令）
     approvals: () => useApprovals.getState().pending.map((p) => ({ id: p.id, command: p.command, reason: p.reason })),
     decideApproval: (id: string, decision: 'once' | 'always' | 'deny') => {

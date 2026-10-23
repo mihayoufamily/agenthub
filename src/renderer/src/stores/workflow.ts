@@ -68,6 +68,10 @@ interface WorkflowState {
 
   start: () => Promise<void>
   stop: (reason: 'user' | 'timeout') => void
+  /** 中断续跑：按已有卡片推断停在哪一步，从那一步之后继续（不重放已经发生过的调用） */
+  resumeInterrupted: () => Promise<void>
+  /** 单角色重跑：只重跑那一个角色，新增一张卡片，不动确认门与交付 */
+  rerunRole: (role: WorkflowRole) => void
   confirmGate: (action: 'deliver' | 'rework' | 'stop', feedback?: string) => Promise<void>
   supplement: (text: string) => void
   continueModify: () => void
@@ -303,6 +307,25 @@ function agentChatToCard(
   })
 }
 
+/** 角色级 Skill 绑定：把选中的 Skill 正文拼成该角色的提示词段落（禁用的自动跳过） */
+async function skillsBlockFor(ids?: string[]): Promise<string> {
+  if (!ids?.length) return ''
+  try {
+    const all = await bridge.skills.list()
+    const picked = all.filter((s) => ids.includes(s.id) && s.enabled !== false)
+    if (!picked.length) return ''
+    return `【以下 Skill 已绑定到本角色，请遵循其指令】\n\n${picked
+      .map(
+        (s) =>
+          `### ${s.name}\n${s.content}` +
+          (s.dir && s.files?.length ? `\n（该技能目录 ${s.dir} 下附带文件，需要时用文件工具读取，不要凭空引用其内容）：${s.files.join('、')}` : '')
+      )
+      .join('\n\n')}`
+  } catch {
+    return ''
+  }
+}
+
 /** 执行一个角色阶段（演示 Agent 走脚本；真实模型走流式调用） */
 async function runStage(
   role: WorkflowRole,
@@ -391,7 +414,9 @@ async function runStage(
       : agent.kind === 'cli'
         ? { kind: 'cli', dir: ctx.outputDir ?? '', hasTools: true }
         : { kind: 'model', dir: agent.tools ? (ctx.outputDir ?? '') : '', hasTools: !!agent.tools, allowCommands: agent.tools?.allowCommands, allowWeb: agent.tools?.allowWeb }
-  const { system, user } = buildRoleMessages(role, ctx, execCap, agent.systemPrompt)
+  // 角色级 Skill：绑到哪个角色就只进哪个角色的提示词（不是全局注入）
+  const skillBlock = await skillsBlockFor(roleCfg.skillIds)
+  const { system, user } = buildRoleMessages(role, skillBlock ? { ...ctx, skills: skillBlock } : ctx, execCap, agent.systemPrompt)
   const useOutDir = (role === 'executor' || role === 'reviewer') && !!ctx.outputDir
   // CLI 超时按角色区分：规划 3 分钟 / 审核 5 分钟 / 执行 10 分钟（把无限挂起变有界失败）
   const cliTimeoutMs = role === 'planner' ? 3 * 60_000 : role === 'reviewer' ? 5 * 60_000 : 10 * 60_000
@@ -630,6 +655,10 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       plannerModel: get().config.planner.modelOverride,
       executorModel: get().config.executor.modelOverride,
       reviewerModel: get().config.reviewer.modelOverride,
+      // 角色级技能绑定同样落盘，不落就是"重启后悄悄忘掉绑了哪些技能"
+      plannerSkillIds: get().config.planner.skillIds ?? [],
+      executorSkillIds: get().config.executor.skillIds ?? [],
+      reviewerSkillIds: get().config.reviewer.skillIds ?? [],
       reviewMode: get().config.reviewMode,
       maxRounds: get().config.maxRounds,
       timeoutMin: get().config.timeoutMin,
@@ -736,8 +765,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     const agents = useAgents.getState().agents
     const pick = (id: string) => agents.find((a) => a.id === id)
     const s = get().config
-    // 只刷新 Agent 侧信息，保留工作流侧的模型覆盖：整对象重建会抹掉 modelOverride，
-    // 表现为"在工作流里选好模型，点开始又变回 Agent 自带模型"（validate() 每次都会调这里）
+    // 只刷新 Agent 侧信息，保留工作流侧的模型覆盖与技能绑定：整对象重建会抹掉这些字段，
+    // 表现为"在工作流里选好模型/技能，点开始又变回 Agent 默认"（validate() 每次都会调这里）
     const re = (r: WorkflowRoleConfig): WorkflowRoleConfig => {
       const a = r.agentId ? pick(r.agentId) : undefined
       if (!a) return r
@@ -745,7 +774,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
         agentId: a.id,
         agentName: a.name,
         model: r.modelOverride ?? a.model,
-        ...(r.modelOverride ? { modelOverride: r.modelOverride } : {})
+        ...(r.modelOverride ? { modelOverride: r.modelOverride } : {}),
+        ...(r.skillIds?.length ? { skillIds: r.skillIds } : {})
       }
     }
     set({ config: { ...s, planner: re(s.planner), executor: re(s.executor), reviewer: re(s.reviewer) } })
@@ -998,6 +1028,67 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     )
   },
 
+  rerunRole: (role) => {
+    const run = get().run
+    if (!run) {
+      useUi.getState().toast('当前没有可重跑的任务', 'warn')
+      return
+    }
+    if (runBusy(run)) {
+      useUi.getState().toast('任务正在执行，请先停止再重跑单个角色', 'warn')
+      return
+    }
+    if (run.demo) {
+      useUi.getState().toast('演示任务是脚本内容，重跑没有意义', 'warn')
+      return
+    }
+    set({ _cancelled: false, _started: true })
+    set((s) => (s.run ? { run: { ...s.run, status: 'running', stage: role === 'planner' ? 'planning' : role === 'executor' ? 'executing' : 'reviewing' } } : {}))
+    void resumeRework(get, set, { startRole: role, only: true })
+  },
+
+  resumeInterrupted: async () => {
+    const run = get().run
+    if (!run) {
+      useUi.getState().toast('当前没有可续跑的任务', 'warn')
+      return
+    }
+    if (!runBusy(run) && run.status !== 'interrupted') {
+      useUi.getState().toast('这个任务不在中断状态', 'warn')
+      return
+    }
+    if (run.demo) {
+      useUi.getState().toast('演示任务不续跑', 'warn')
+      return
+    }
+    // 只按卡片推断"该从谁接着跑"：已经产出过结论的角色不重放，避免重复扣额度与重复写文件
+    const last = [...run.cards].reverse().find((c) => c.role === 'planner' || c.role === 'executor' || c.role === 'reviewer')
+    if (!last) {
+      set({ _cancelled: false, _started: true })
+      set((s) => (s.run ? { run: { ...s.run, status: 'running', stage: 'planning' } } : {}))
+      void resumeRework(get, set, { startRole: 'planner' })
+      return
+    }
+    if (last.role === 'reviewer') {
+      // 审核已经跑完：把当时那份结论重新摊在人面前决定，而不是自作主张交付或返工
+      const verdicts = last.checklist ?? []
+      const issues = verdicts.filter((v) => v.verdict === 'issue')
+      set((s) => (s.run ? { run: {
+        ...s.run,
+        status: 'waiting_user',
+        stage: null,
+        gate: { id: uid('gate'), round: s.run.round, passed: verdicts.filter((v) => v.verdict === 'pass'), issues: issues.length ? issues : [{ text: '审核未给出逐项结论，请人工核对', done: false, verdict: 'issue' as const }], ...(verdicts.length ? {} : { reworkFeedback: last.conclusion.slice(0, 200) }) }
+      } } : {}))
+      get().saveRun()
+      useUi.getState().toast('这一轮的审核已完成：请在确认门决定交付还是返工', 'info')
+      return
+    }
+    set({ _cancelled: false, _started: true })
+    const startRole: WorkflowRole = last.role === 'planner' ? 'executor' : 'reviewer'
+    set((s) => (s.run ? { run: { ...s.run, status: 'running', stage: startRole === 'executor' ? 'executing' : 'reviewing' } } : {}))
+    void resumeRework(get, set, { startRole })
+  },
+
   confirmGate: async (action, feedback) => {
     const run = get().run
     const cfg = get().config
@@ -1015,7 +1106,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       }))
       get().saveRun()
       // v1 由独立协程续跑（执行→审核），返工意见注入真实角色上下文
-      void resumeRework(get, set, feedback)
+      void resumeRework(get, set, { feedback })
       return
     }
     // deliver
@@ -1100,12 +1191,26 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
   }
 }))
 
-/** 人工返工后续跑引擎（从当前轮次驱动执行→审核；返工意见注入真实角色上下文） */
-async function resumeRework(
-  get: () => WorkflowState,
-  set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void,
+/** 角色链（重跑与续跑都按这个顺序往下走） */
+const ROLE_CHAIN: WorkflowRole[] = ['planner', 'executor', 'reviewer']
+const ROLE_LABEL: Record<WorkflowRole, string> = { planner: '规划', executor: '执行', reviewer: '审核' }
+
+interface RoundOpts {
+  /** 返工意见（注入执行角色上下文） */
   feedback?: string
-) {
+  /** 从哪个角色开始（默认执行） */
+  startRole?: WorkflowRole
+  /** 只跑这一个角色，不往下走审核、也不动确认门 */
+  only?: boolean
+}
+
+/**
+ * 从当前轮次的某个角色起跑完剩余链条：人工返工、中断续跑、单角色重跑共用这一条路。
+ * 重跑一律"新增一张卡片"而不是原地改写——已经发生过一次真实调用，
+ * 把那张卡抹掉等于把那次消耗藏起来。
+ */
+async function resumeRework(get: () => WorkflowState, set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void, opts: RoundOpts = {}) {
+  const { feedback, startRole = 'executor', only } = opts
   const state = get()
   const run = state.run
   const cfg = state.config
@@ -1133,14 +1238,27 @@ async function resumeRework(
     ...(lastExec?.conclusion ? { execConclusion: lastExec.conclusion } : {})
   }
 
-  // 执行（返工）
-  const exec = await runStage('executor', round, cfg, ctx, setRun, isCancelled, get)
-  if (!exec) return
-  ctx.execConclusion = exec.conclusion
+  const chain = only ? [startRole] : ROLE_CHAIN.slice(ROLE_CHAIN.indexOf(startRole))
+  let review: StageOutcome | null = null
+  for (const role of chain) {
+    const out = await runStage(role, round, cfg, ctx, setRun, isCancelled, get)
+    if (!out) return
+    if (role === 'planner') {
+      ctx.planConclusion = out.conclusion
+      ctx.planChecklist = out.checklist
+    } else if (role === 'executor') {
+      ctx.execConclusion = out.conclusion
+    } else {
+      review = out
+    }
+  }
 
-  // 审核（复核）
-  const review = await runStage('reviewer', round, cfg, ctx, setRun, isCancelled, get)
-  if (!review) return
+  // 只重跑单个角色：到这里就收，判定与确认门都留给原来的卡片（不改写历史）
+  if (only || !review) {
+    get().saveRun()
+    useUi.getState().toast(`已重跑「${ROLE_LABEL[startRole]}」角色：新增一张卡片，后续结论按最新一张算`, 'ok')
+    return
+  }
   const verdicts = review.checklist ?? []
   const passed = verdicts.length > 0 && verdicts.every((v) => v.verdict === 'pass')
   get().saveRun()

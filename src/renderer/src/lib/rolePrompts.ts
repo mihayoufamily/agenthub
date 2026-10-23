@@ -28,6 +28,8 @@ export interface RunContext {
   outputDir?: string
   /** 产物目录下自动读取到的项目约定段落（AGENTS.md / CLAUDE.md 原文，含来源标题） */
   conventions?: string
+  /** 这个角色绑定的 Skill 正文（角色级，不是全局注入） */
+  skills?: string
 }
 
 export type WorkflowRole = 'planner' | 'executor' | 'reviewer'
@@ -139,10 +141,11 @@ export function buildRoleMessages(
     lines.push(`\n产物目录：${ctx.outputDir}（执行方声称的文件成果应在此目录，可据此核实）`)
   }
   const base = role === 'executor' ? buildExecutorSystem(exec ?? { kind: 'model', dir: '', hasTools: false }) : role === 'planner' ? PLANNER_PROMPT : REVIEWER_PROMPT
-  // 追加顺序固定：角色协议 → 项目约定 → 该执行者的常驻要求。
+  // 追加顺序固定：角色协议 → 项目约定 → 角色绑定的 Skill → 该执行者的常驻要求。
   // 协议（输出格式、能力边界）在最前，不能被仓库里的文字或用户提示词覆盖掉
   const extras: string[] = []
   if (ctx.conventions?.trim()) extras.push(ctx.conventions.trim())
+  if (ctx.skills?.trim()) extras.push(ctx.skills.trim())
   if (agentSystemPrompt?.trim()) extras.push(`【该执行者的常驻要求，请始终遵守】\n${agentSystemPrompt.trim()}`)
   const system = extras.length ? `${base}\n\n${extras.join('\n\n')}` : base
   return { system, user: lines.join('\n') }

@@ -190,6 +190,20 @@
 .check-item.issue .mark { color: var(--danger); }
 .check-item.pass .mark { color: var(--ok); }
 
+/* 单角色重跑入口（卡片头上，不抢主操作的位置） */
+.rc-rerun {
+  background: none; border: 1px solid var(--border); border-radius: 999px;
+  padding: 1px 8px; font: inherit; font-size: 11px; color: var(--text-3); cursor: pointer;
+}
+.rc-rerun:hover { color: var(--text); border-color: var(--text-3); }
+
+/* 角色级技能绑定 */
+.role-skills { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.role-skills-label { font-size: 11.5px; color: var(--text-3); }
+.role-skill { display: inline-flex; gap: 4px; align-items: center; font-size: 11.5px; padding: 1px 8px 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); cursor: pointer; }
+.role-skill.on { border-color: var(--brand-yellow, #d6a419); color: var(--text); background: var(--surface-2); }
+.role-skill input { margin: 0; width: 12px; height: 12px; }
+
 /* 验收项↔文件映射：角色报的文件名要拿真实目录核对过才算数 */
 .check-files { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
 .file-ref {
