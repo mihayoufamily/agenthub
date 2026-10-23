@@ -39,7 +39,6 @@ export function Splash({ onRestore }: { onRestore: () => void }) {
       timers.forEach(clearTimeout)
       window.removeEventListener('keydown', skip)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const onStart = () => {

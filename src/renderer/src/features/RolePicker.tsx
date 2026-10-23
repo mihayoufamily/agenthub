@@ -101,7 +101,6 @@ function ModelSection({ role, agent }: { role: RoleKey; agent: AgentConfig }) {
     setErr(null)
     setManual(config[role].modelOverride ?? '')
     if (agent.kind === 'model' && agent.modelConfig) void load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.id])
 
   if (agent.kind === 'demo') {

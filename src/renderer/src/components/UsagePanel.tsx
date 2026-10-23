@@ -53,7 +53,6 @@ export function UsagePanel({ agentId, compact }: { agentId?: string; compact?: b
 
   useEffect(() => {
     void reload()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days, agentId])
 
   return (

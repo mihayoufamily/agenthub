@@ -97,7 +97,6 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   useEffect(() => {
     if (nearBottom) scrollToBottom()
     else if (lastLen > 0) setNewCount((c) => c + 1)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastLen, lastMsgLen])
 
   const onScroll = () => {
