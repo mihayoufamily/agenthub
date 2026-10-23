@@ -90,9 +90,9 @@ export function planSpawn(server: McpServer): SpawnPlan {
     // 拒绝式拼命令行：路径含空格必须带引号，否则 cmd 会在空格处断开
     const line = [bin, ...args].map(comspecToken).join(' ')
     const comspec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe'
-    // shell:false + windowsVerbatimArguments：cmd.exe 自己就是我们要起的进程，
+    // shell 不带（默认 false）+ windowsVerbatimArguments：cmd.exe 自己就是我们要起的进程，
     // 再让 Node 包一层 shell 就成了 double-wrap（两层 cmd），还会招出 DEP0190 告警
-    return { file: comspec, args: ['/d', '/c', line], options: { windowsHide: true, shell: false, windowsVerbatimArguments: true }, comspec: true }
+    return { file: comspec, args: ['/d', '/c', line], options: { windowsHide: true, windowsVerbatimArguments: true }, comspec: true }
   }
   return { file: bin, args, options: { windowsHide: true }, comspec: false }
 }
