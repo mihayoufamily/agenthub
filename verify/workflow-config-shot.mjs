@@ -38,8 +38,11 @@ const main = async () => {
 
     // 先把角色绑定设成断言需要的状态：不能假设用户当前绑了谁（他在界面上随时能改，
     // 上一轮就是因为用户把审核换成演示 Agent 而假失败）
+    // Agent 名是用户在界面上**自填**的，大小写由他决定（本机那三个是 DeepSeek / CodeBuddy / Codex）。
+    // 原来这里用大小写敏感子串匹配，`deepseek` 匹配不上 `DeepSeek` → 前置检查失败、三条角色断言连带红
+    // （本套件共 7 条 check，实测 4 红 3 绿，从没跑完过 —— Ruling R）。匹配一律大小写不敏感；前置检查的文案不动。
     const st0 = await js(cdp, 'window.__ahub_debug.state()')
-    const find = (n) => st0.agents.find((a) => a.name.includes(n))
+    const find = (n) => st0.agents.find((a) => String(a?.name ?? '').toLowerCase().includes(String(n).toLowerCase()))
     const want = { deepseek: find('deepseek'), CodeBuddy: find('CodeBuddy'), Codex: find('Codex') }
     const missing = Object.entries(want).filter(([, a]) => !a).map(([k]) => k)
     check('本机存在 deepseek / CodeBuddy / Codex 三个 Agent', missing.length === 0, '缺：' + missing.join(','))
@@ -54,9 +57,9 @@ const main = async () => {
     const chips = await js(cdp, `[...document.querySelectorAll('.cfg-chip')].map((e) => e.innerText.replace(/\\s+/g, ' ').trim())`)
     console.log('配置条：', JSON.stringify(chips, null, 2))
 
-    check('规划角色 = deepseek', /deepseek/.test(chips?.[0] ?? ''), chips?.[0])
-    check('执行角色 = CodeBuddy', /CodeBuddy/.test(chips?.[1] ?? ''), chips?.[1])
-    check('审核角色 = Codex', /Codex/.test(chips?.[2] ?? ''), chips?.[2])
+    check('规划角色 = deepseek', /deepseek/i.test(chips?.[0] ?? ''), chips?.[0])
+    check('执行角色 = CodeBuddy', /CodeBuddy/i.test(chips?.[1] ?? ''), chips?.[1])
+    check('审核角色 = Codex', /Codex/i.test(chips?.[2] ?? ''), chips?.[2])
     check('审核方式 = 人工确认', /人工确认/.test(JSON.stringify(chips)), JSON.stringify(chips))
     check('未处于运行态（无任务）', !(await js(cdp, `!!document.querySelector('.wf-topbar')`)))
 
