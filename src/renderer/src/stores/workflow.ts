@@ -10,6 +10,7 @@ import type {
 import { bridge } from '../lib/ipc'
 import { renderConventionsBlock } from '@shared/conventions'
 import { matchFileRef } from '@shared/acceptance'
+import { memoryBlockFor } from '@shared/retrieval'
 import { uid, chunkText, sleep, clamp, safeName } from '../lib/utils'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -416,7 +417,14 @@ async function runStage(
         : { kind: 'model', dir: agent.tools ? (ctx.outputDir ?? '') : '', hasTools: !!agent.tools, allowCommands: agent.tools?.allowCommands, allowWeb: agent.tools?.allowWeb }
   // 角色级 Skill：绑到哪个角色就只进哪个角色的提示词（不是全局注入）
   const skillBlock = await skillsBlockFor(roleCfg.skillIds)
-  const { system, user } = buildRoleMessages(role, skillBlock ? { ...ctx, skills: skillBlock } : ctx, execCap, agent.systemPrompt)
+  // 历史记忆按本次目标检索：全量塞既贵又把模型带偏，无关的宁可不给
+  const memoryBlock = memoryBlockFor(ctx.goal, useSettings.getState().memory)
+  const promptCtx: RunContext = {
+    ...ctx,
+    ...(skillBlock ? { skills: skillBlock } : {}),
+    ...(memoryBlock ? { memories: memoryBlock } : {})
+  }
+  const { system, user } = buildRoleMessages(role, promptCtx, execCap, agent.systemPrompt)
   const useOutDir = (role === 'executor' || role === 'reviewer') && !!ctx.outputDir
   // CLI 超时按角色区分：规划 3 分钟 / 审核 5 分钟 / 执行 10 分钟（把无限挂起变有界失败）
   const cliTimeoutMs = role === 'planner' ? 3 * 60_000 : role === 'reviewer' ? 5 * 60_000 : 10 * 60_000
@@ -619,6 +627,14 @@ async function deliver(
     })
   }))
   get().saveRun()
+  // 自动沉淀：交付时留一条能被以后检索到的成果摘要，未通过项单独留一条"踩坑"
+  const done = (lastReview?.checklist ?? []).filter((c) => c.verdict === 'pass').length
+  const open = (lastReview?.checklist ?? []).filter((c) => c.verdict === 'issue')
+  const fileCount = new Set(run.cards.flatMap((c) => (c.artifacts ?? []).filter((a) => a.kind === 'file' && !a.demo && a.path).map((a) => a.path))).size
+  useSettings.getState().addMemory('summary', `《${run.goal}》第 ${run.round} 轮交付：审核 ${done} 项通过、${open.length} 项未过；产物 ${fileCount} 个${run.outputDir ? `（目录 ${run.outputDir}）` : ''}`, false)
+  if (open.length) {
+    useSettings.getState().addMemory('decision', `《${run.goal}》交付时仍有未通过项：${open.map((o) => o.text).join('；').slice(0, 300)}`, false)
+  }
   useSettings.getState().addMemory('progress', `任务完成：${run.goal}`, false)
 }
 

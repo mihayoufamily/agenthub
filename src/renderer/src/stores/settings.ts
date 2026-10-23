@@ -5,6 +5,9 @@ import { bridge } from '../lib/ipc'
 import { uid, safeName } from '../lib/utils'
 import { useUi } from './ui'
 
+/** 长期记忆条数上限：只保留最近的若干条，旧任务的历史不该无限挤占上下文 */
+const MAX_MEMORY = 300
+
 interface SettingsState {
   prefs: Prefs | null
   appInfo: AppInfo | null
@@ -97,7 +100,8 @@ export const useSettings = create<SettingsState>()((set, get) => ({
   addMemory: (kind, text, editable = true) => {
     const list = get().memory
     const entry: MemoryEntry = { id: uid('mem'), kind, text, ts: Date.now(), editable }
-    const next = [...list, entry]
+    // 自动沉淀每次交付都会写两三条，不设上限就会变成只涨不缩的历史垃圾堆
+    const next = [...list, entry].slice(-MAX_MEMORY)
     set({ memory: next })
     void bridge.memory.set(next)
   },

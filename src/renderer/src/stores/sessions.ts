@@ -6,6 +6,7 @@ import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
 import { estimateCost } from '@shared/pricing'
 import { renderConventionsBlock } from '@shared/conventions'
+import { memoryBlockFor } from '@shared/retrieval'
 import { useAgents } from './agents'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -236,6 +237,9 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           if (block) systemBlocks.push(block)
         } catch { /* 约定文件读不到不影响本次对话（多数目录本来就没有） */ }
       }
+      // 历史记忆按本轮提问检索（全量塞既贵又把模型带偏，无关的宁可不给）
+      const mem = memoryBlockFor(text, useSettings.getState().memory)
+      if (mem) systemBlocks.push(mem)
       if (usedSkills.length) {
         systemBlocks.push(
           `【以下为本次对话引用的 Skill 提示包，请遵循其指令】\n\n${usedSkills

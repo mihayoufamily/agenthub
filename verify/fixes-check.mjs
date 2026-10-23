@@ -761,7 +761,40 @@ console.log('\n[Q] 编排能力：不重放已发生的调用、重跑只加卡�
   ok('resolveRoles 重建角色时保留技能绑定', /skillIds: r\.skillIds/.test(wfSrc))
   // 提示词装配顺序：协议 → 项目约定 → 角色技能 → 常驻要求
   const rpSrc = readFileSync(new URL('../src/renderer/src/lib/rolePrompts.ts', import.meta.url), 'utf-8')
-  ok('注入顺序固定且带技能一层', rpSrc.includes('角色协议 → 项目约定 → 角色绑定的 Skill') && rpSrc.includes('ctx.skills?.trim()'))
+  ok('注入顺序固定且带技能与记忆两层', rpSrc.includes('角色协议 → 项目约定 → 历史记忆 → 角色技能') && rpSrc.includes('ctx.skills?.trim()') && rpSrc.includes('ctx.memories?.trim()'))
+}
+
+// ---------- R. 记忆检索与自动沉淀 ----------
+console.log('\n[R] 长期记忆：按目标检索、不相关不给、沉淀有条数上限')
+{
+  const rt = await import('../out/shared/retrieval.js')
+  const mk = (kind, text, ts = 1) => ({ id: `m${ts}`, kind, text, ts, editable: false })
+  const mem = [
+    mk('summary', '《写一份登录页》第 1 轮交付：审核 3 项通过、0 项未过；产物 4 个', 5),
+    mk('summary', '《整理报销单据》第 2 轮交付：审核 1 项通过', 4),
+    mk('decision', '《写一份登录页》交付时仍有未通过项：密码强度校验缺失', 3),
+    mk('progress', '任务完成：写一份登录页', 2)
+  ]
+  ok('分词能吃中英文与数字串', rt.tokenize('用 React 18 写登录页').length >= 5, rt.tokenize('用 React 18 写登录页').join('|'))
+  ok('停用字不参与打分', !rt.tokenize('的和了一个').includes('的了'))
+  const ranked = rt.rankMemories('登录页 密码 校验', mem)
+  ok('按目标相关性排序而不是时间序', ranked[0].entry.text.includes('密码强度校验缺失'), ranked.map((r) => r.entry.id).join(','))
+  ok('无关条目不进上下文', ranked.every((r) => !r.entry.text.includes('报销')))
+  ok('完全无关时一条都不给（宁缺毋滥）', rt.rankMemories('量子色动力学', mem).length === 0)
+  const block = rt.memoryBlockFor('登录页 密码', mem)
+  ok('注入段落说明这是历史记忆且可被本次目标覆盖', block.includes('历史任务记忆') && block.includes('以本次为准'))
+  ok('命中条数有上限', rt.rankMemories('登录页', [...mem, ...Array.from({ length: 30 }, (_, i) => mk('progress', `登录页 记录 ${i}`))]).length <= 8)
+  const long = Array.from({ length: 8 }, (_, i) => mk('progress', '登录页 ' + '哈'.repeat(1200), i))
+  ok('总字数超上限就少给几条，而不是每条截一半', rt.memoryBlockFor('登录页', long).length < 8 * 1200 && rt.memoryBlockFor('登录页', long).includes('登录页'))
+  ok('没有记忆时不产生空段落', rt.memoryBlockFor('登录页', []) === '')
+
+  // 交付确实会自动沉淀；沉淀有上限
+  const wfSrc = readFileSync(new URL('../src/renderer/src/stores/workflow.ts', import.meta.url), 'utf-8')
+  const stSrc = readFileSync(new URL('../src/renderer/src/stores/settings.ts', import.meta.url), 'utf-8')
+  ok('交付时沉淀成果摘要与未通过项', wfSrc.includes("addMemory('summary'") && wfSrc.includes("addMemory('decision'"))
+  const sessSrc = readFileSync(new URL('../src/renderer/src/stores/sessions.ts', import.meta.url), 'utf-8')
+  ok('工作流与工作站两条链路都带检索结果', wfSrc.includes('memoryBlockFor(ctx.goal') && sessSrc.includes('memoryBlockFor(text,'))
+  ok('沉淀有条数上限（不会只涨不缩）', stSrc.includes('slice(-MAX_MEMORY)'))
 }
 
 rmSync(tmp, { recursive: true, force: true })
