@@ -7,7 +7,7 @@ import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
 import { configurePriceOverrides } from '../shared/overrides'
 import { navDecision } from '../shared/winnav'
-import { decideFallback, forcedCompatCrashEnabled, normalizePolicy, gpuRelaunchAllowed, compatHintPending, SANDBOX_CRASH_THRESHOLD, FORCE_SANDBOX_CRASH_ENV, COMPAT_HINT_ENV } from '../shared/compat'
+import { decideFallback, forcedCompatCrashEnabled, normalizePolicy, gpuStageAction, compatHintPending, SANDBOX_CRASH_THRESHOLD, FORCE_SANDBOX_CRASH_ENV, COMPAT_HINT_ENV, COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_GPU, COMPAT_FAIL_MESSAGE_SANDBOX } from '../shared/compat'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 import * as ledger from './ledger'
 
@@ -330,24 +330,32 @@ function createWindow() {
     preShowCrashes += 1
     console.log(`[main] 窗口显示前渲染进程异常（${details.reason}），计数 ${preShowCrashes}`)
     // 降级阶梯：第 1 次崩溃先试 --disable-gpu（GPU 驱动异常常见）；仍崩再禁 Chromium 沙箱。
-    // 策略 off 覆盖整条阶梯（评审 finding 4）：连 GPU 这级兜底也不做自动重启，直接报启动失败并说明两种成因。
-    if (preShowCrashes === 1 && process.env.AGENTHUB_NO_GPU !== '1') {
+    // 策略 off 覆盖整条阶梯（评审 finding 4 / Ruling L）：连 GPU 这级兜底也不做自动重启，直接报启动失败并说明两种成因。
+    // 判定在 shared/compat.gpuStageAction（纯函数、逻辑层逐条断言），这里只执行动作。
+    if (preShowCrashes === 1) {
       const gpuPolicy = normalizePolicy(store?.getConfig().sandboxFallback)
-      if (!gpuRelaunchAllowed(gpuPolicy)) {
+      const gpuAction = gpuStageAction(gpuPolicy, process.env.AGENTHUB_NO_GPU)
+      if (gpuAction === 'fail') {
+        // 已经软件渲染（AGENTHUB_NO_GPU=1）也走这里：旧写法把"已软件渲染"整块跳过，
+        // off + 第 1 次崩溃于是既不重启也不报错，静默等第二次崩溃（评审 Minor 10）——
+        // 而 off 的文案承诺的是"窗口出现前崩溃就直接报启动失败"。
         console.log('[main] sandboxFallback=off：不做任何自动重启（含 GPU 软件渲染兜底），按启动失败处理')
-        dialog.showErrorBox('AgentHub 启动失败', '渲染进程在窗口出现前崩溃。可能的成因有两个：GPU/显卡驱动异常，或安全软件破坏 Chromium 沙箱。\n\n你已选择「不自动降级」，应用不做任何自动重启。可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。')
+        dialog.showErrorBox(COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_GPU)
         setQuitting()
         app.quit()
         return
       }
-      console.log('[main] 自动降级为软件渲染重启（AGENTHUB_NO_GPU=1）')
-      delete process.env.ELECTRON_RUN_AS_NODE
-      process.env.AGENTHUB_NO_GPU = '1'
-      compatState = { noSandbox: process.env.AGENTHUB_NO_SANDBOX === '1', noGpu: true, reason: 'gpu' }
-      process.env.AGENTHUB_RELAUNCH = '1'
-      app.relaunch({ args: process.argv.slice(1) })
-      app.quit()
-      return
+      if (gpuAction === 'relaunch') {
+        console.log('[main] 自动降级为软件渲染重启（AGENTHUB_NO_GPU=1）')
+        delete process.env.ELECTRON_RUN_AS_NODE
+        process.env.AGENTHUB_NO_GPU = '1'
+        compatState = { noSandbox: process.env.AGENTHUB_NO_SANDBOX === '1', noGpu: true, reason: 'gpu' }
+        process.env.AGENTHUB_RELAUNCH = '1'
+        app.relaunch({ args: process.argv.slice(1) })
+        app.quit()
+        return
+      }
+      // gpuAction === 'none'：本机已在软件渲染里跑，GPU 这一级不适用，落到下面沙箱那一级按阈值判
     }
     // 沙箱这一级：判断在 shared/compat.decideFallback（纯函数、逻辑层逐条断言过），这里只执行动作。
     // 进入条件与决策层共用同一个 SANDBOX_CRASH_THRESHOLD——再抄一遍 `>= 2` 就是第二份真相（评审 finding 1）
@@ -367,7 +375,7 @@ function createWindow() {
       }
       if (action === 'fail') {
         console.log('[main] sandboxFallback=off：不自动降级，按启动失败处理')
-        dialog.showErrorBox('AgentHub 启动失败', '渲染进程连续崩溃，可能的成因有两个：GPU/显卡驱动异常，或安全软件破坏 Chromium 沙箱。且你已选择「不自动降级」，应用不做任何自动重启。\n\n可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。')
+        dialog.showErrorBox(COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_SANDBOX)
         setQuitting()
         app.quit()
         return

@@ -80,6 +80,26 @@ export function gpuRelaunchAllowed(policy: unknown): boolean {
   return normalizePolicy(policy) !== 'off'
 }
 
+/** GPU 档（第 1 次"窗口显示前崩溃"）的三种动作 */
+export type GpuStageAction = 'relaunch' | 'none' | 'fail'
+
+/**
+ * GPU 档该做什么——与 gpuRelaunchAllowed 同一口径，但把"这次该怎么办"说全：
+ * - 策略 off → `'fail'`：整条阶梯都不自动重启（Ruling L），直接报启动失败；
+ * - 其余策略且当前**不是**软件渲染 → `'relaunch'`：带 AGENTHUB_NO_GPU=1 重启一次；
+ * - 其余策略且**已经**在软件渲染里跑 → `'none'`：本级不适用，落到沙箱那一级按阈值判。
+ *
+ * 为什么 off 在"已经软件渲染"时也要 `'fail'`（评审 Minor 10）：旧写法把 GPU 档的进入条件写成
+ * `preShowCrashes === 1 && AGENTHUB_NO_GPU !== '1'`，于是 off + 已设 AGENTHUB_NO_GPU + 第 1 次崩溃
+ * 会从 GPU 档下方穿过、又没到沙箱阈值（SANDBOX_CRASH_THRESHOLD=2），既不重启也不报错，
+ * 静默等第二次崩溃——而 off 的文案承诺的是"窗口出现前崩溃就直接报启动失败"。
+ * 承诺不该被一个环境变量吞掉，所以判定按策略走，"已软件渲染"只影响 auto/ask 那两条。
+ */
+export function gpuStageAction(policy: unknown, noGpuEnv: unknown): GpuStageAction {
+  if (!gpuRelaunchAllowed(policy)) return 'fail'
+  return noGpuEnv === '1' ? 'none' : 'relaunch'
+}
+
 /**
  * 降级后的一次性提示该不该由"relaunch 起来的新实例"发（评审 finding 2 的判定半边）。
  * 两个条件都要：交接标志恰好是 '1'（脏标志不发）、且本进程确实是沙箱被关着的降级态
@@ -137,3 +157,24 @@ export const SANDBOX_FALLBACK_OPTIONS: readonly { value: SandboxFallbackPolicy; 
     desc: '不做任何自动重启（含 GPU 软件渲染兜底）：窗口出现前崩溃就直接报「启动失败」并说明两种可能成因，要自己运行 start-compat-mode.cmd 进兼容模式。代价很直白——这台机器可能就开不了机。'
   }
 ]
+
+/**
+ * 「启动失败」错误框的标题与两段正文。
+ *
+ * 为什么放在这里而不是留在 `src/main/index.ts` 里当字面量（修复波 A 项 2）：这两段文案是
+ * `off` 这条策略**唯一**能兑现给用户的说明——它承诺"直接报启动失败并说明两种可能成因 + 指出
+ * start-compat-mode.cmd 这条出路"。留在主进程里就是"一份常量被断言、两个字面量没人管"：
+ * 上面 SANDBOX_FALLBACK_OPTIONS 的 desc 被逐条断言，而用户真正看到的那两段没人管，
+ * 两边可以各说各话（desc 说会报错、错误框里其实是空白）。搬进共享层之后，
+ * 被断言的那份文案就是上线跑的那份，verify/fixes-check.mjs 的 [Z] 段两处都钉住。
+ * 措辞红线与 desc 同一条：只承诺能被断言的东西（start-compat-mode.cmd 由 scripts/pack-portable.mjs 生成）。
+ */
+export const COMPAT_FAIL_TITLE = 'AgentHub 启动失败'
+
+/** GPU 档（第 1 次崩溃，含"已在软件渲染里仍崩"）走 off 时的正文 */
+export const COMPAT_FAIL_MESSAGE_GPU =
+  '渲染进程在窗口出现前崩溃。可能的成因有两个：GPU/显卡驱动异常，或安全软件破坏 Chromium 沙箱。\n\n你已选择「不自动降级」，应用不做任何自动重启。可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。'
+
+/** 沙箱档（连续崩溃达阈值）走 off 时的正文 */
+export const COMPAT_FAIL_MESSAGE_SANDBOX =
+  '渲染进程连续崩溃，可能的成因有两个：GPU/显卡驱动异常，或安全软件破坏 Chromium 沙箱。且你已选择「不自动降级」，应用不做任何自动重启。\n\n可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。'

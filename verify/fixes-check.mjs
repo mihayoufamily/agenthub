@@ -1509,6 +1509,67 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
     /data-testid="compat-retry"/.test(settingsSrc) && /compatError/.test(settingsSrc))
   ok('策略保存失败的 toast 不再断言「主进程没有回应」（也可能是本地写盘失败）',
     !settingsSrc.includes('保存降级策略失败：主进程没有回应'))
+
+  // ---- 修复波 A · 项 2：降级阶梯的**每一条**分支都要有源码级断言（不能只有纯函数层证据）----
+  // 缺陷（评审实证）：四个分支里只有 action === 'none' 被 grep 过（上面那条）。删掉 GPU 档闸门、
+  // fail 分支、ask 弹窗任意一块，427 条照样全绿——纯函数说"该 fail"，执行器不接线就等于没承诺，
+  // 而 off / ask 正是对用户的承诺（Ruling L）。
+  // 断言形态一律把「分支条件 → 它的动作」绑成一段：单点 grep（只认 `action === 'fail'`）
+  // 在"分支还在、动作被删"时照样绿，绑成一段才删哪块都红。
+  const ladderMain = readSrcSafe('src/main/index.ts')
+  const ladderCompat = readSrcSafe('src/shared/compat.ts')
+  const ladderErr = `${ladderMain.error ?? ''}${ladderCompat.error ?? ''}`
+  const LM = ladderMain.text
+  ok('启动失败错误框的标题与两段正文只在 shared/compat 定义一份（index.ts 不再手抄字面量：被断言的那份就是上线跑的那份）',
+    ladderErr === '' &&
+      /export const COMPAT_FAIL_TITLE = 'AgentHub 启动失败'/.test(ladderCompat.text) &&
+      /export const COMPAT_FAIL_MESSAGE_GPU\b/.test(ladderCompat.text) &&
+      /export const COMPAT_FAIL_MESSAGE_SANDBOX\b/.test(ladderCompat.text) &&
+      !/dialog\.showErrorBox\(\s*'/.test(LM) &&
+      (LM.match(/dialog\.showErrorBox\(COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_/g) ?? []).length === 2,
+    `${ladderErr}showErrorBox 仍有手抄字面量=${/dialog\.showErrorBox\(\s*'/.test(LM)}；引用共享常量的处数=${(LM.match(/dialog\.showErrorBox\(COMPAT_FAIL_TITLE/g) ?? []).length}（应为 2）`)
+  ok('两段失败文案仍如实写明「不做任何自动重启」+ start-compat-mode.cmd 这条出路（文案搬进 shared 不许顺手软化）',
+    [cf?.COMPAT_FAIL_MESSAGE_GPU, cf?.COMPAT_FAIL_MESSAGE_SANDBOX].every((m) =>
+      typeof m === 'string' && m.includes('不做任何自动重启') && m.includes('start-compat-mode.cmd')),
+    JSON.stringify({ gpu: cf?.COMPAT_FAIL_MESSAGE_GPU, sandbox: cf?.COMPAT_FAIL_MESSAGE_SANDBOX }).slice(0, 240))
+  ok('阶梯 GPU 档 · off：闸门判定接了线，报启动失败后 setQuitting() + app.quit()（删掉这一块必须红）',
+    ladderErr === '' && /gpuStageAction\(/.test(LM) &&
+      /gpuAction === 'fail'[\s\S]{0,320}?dialog\.showErrorBox\(COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_GPU\)[\s\S]{0,120}?setQuitting\(\)[\s\S]{0,60}?app\.quit\(\)/.test(LM),
+    `${ladderErr}gpuStageAction 出现=${/gpuStageAction\(/.test(LM)}；off→报错退出这一段命中=${/gpuAction === 'fail'[\s\S]{0,320}?COMPAT_FAIL_MESSAGE_GPU[\s\S]{0,120}?setQuitting\(\)[\s\S]{0,60}?app\.quit\(\)/.test(LM)}`)
+  ok('阶梯 GPU 档 · relaunch：置 AGENTHUB_NO_GPU=1 后 app.relaunch + quit（删掉这一块必须红）',
+    ladderErr === '' &&
+      /gpuAction === 'relaunch'[\s\S]{0,420}?process\.env\.AGENTHUB_NO_GPU = '1'[\s\S]{0,320}?app\.relaunch\(\{ args: process\.argv\.slice\(1\) \}\)[\s\S]{0,60}?app\.quit\(\)/.test(LM),
+    `${ladderErr}命中=${/gpuAction === 'relaunch'[\s\S]{0,420}?AGENTHUB_NO_GPU = '1'[\s\S]{0,320}?app\.relaunch/.test(LM)}`)
+  ok('阶梯沙箱档 · fail：报启动失败后 setQuitting() + app.quit()（删掉这一块必须红）',
+    ladderErr === '' &&
+      /action === 'fail'\)[\s\S]{0,320}?dialog\.showErrorBox\(COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_SANDBOX\)[\s\S]{0,120}?setQuitting\(\)[\s\S]{0,60}?app\.quit\(\)/.test(LM),
+    `${ladderErr}命中=${/action === 'fail'\)[\s\S]{0,320}?COMPAT_FAIL_MESSAGE_SANDBOX[\s\S]{0,120}?setQuitting\(\)[\s\S]{0,60}?app\.quit\(\)/.test(LM)}`)
+  ok('阶梯沙箱档 · ask：真弹 showMessageBoxSync，且选「不重启」（非 0）就 setQuitting() + app.quit()（删掉这一块必须红）',
+    ladderErr === '' &&
+      /action === 'ask'\)[\s\S]{0,700}?dialog\.showMessageBoxSync\(win, \{[\s\S]{0,500}?buttons: \['以兼容模式重启', '不重启，退出'\][\s\S]{0,500}?if \(pick !== 0\) \{[\s\S]{0,120}?setQuitting\(\)[\s\S]{0,60}?app\.quit\(\)/.test(LM),
+    `${ladderErr}命中=${/action === 'ask'\)[\s\S]{0,700}?showMessageBoxSync[\s\S]{0,900}?pick !== 0[\s\S]{0,120}?app\.quit\(\)/.test(LM)}`)
+  ok('阶梯沙箱档 · downgrade-silent：置 AGENTHUB_NO_SANDBOX=1 + 交接一次性提示 + relaunch/quit（删掉这一块必须红）',
+    ladderErr === '' &&
+      /process\.env\.AGENTHUB_NO_SANDBOX = '1'[\s\S]{0,700}?process\.env\[COMPAT_HINT_ENV\] = '1'[\s\S]{0,500}?app\.relaunch\(\{ args: process\.argv\.slice\(1\) \}\)[\s\S]{0,60}?app\.quit\(\)/.test(LM),
+    `${ladderErr}命中=${/AGENTHUB_NO_SANDBOX = '1'[\s\S]{0,700}?COMPAT_HINT_ENV[\s\S]{0,500}?app\.relaunch/.test(LM)}`)
+  // 评审 Minor 10：off + AGENTHUB_NO_GPU 已设 + 第 1 次崩溃，旧写法从 GPU 档（进入条件带
+  // `AGENTHUB_NO_GPU !== '1'`）下方穿过、又没到沙箱阈值（2），于是既不重启也不报错，静默等第二次崩溃——
+  // 而 off 的文案承诺的是"窗口出现前崩溃就直接报启动失败"。承诺不该被一个环境变量吞掉。
+  ok('评审 Minor 10：off + AGENTHUB_NO_GPU=1 + 第 1 次崩溃也有失败出口（GPU 档进入条件不再把"已软件渲染"整块跳过）',
+    ladderErr === '' && /gpuStageAction\([^)]*process\.env\.AGENTHUB_NO_GPU/.test(LM) &&
+      !/preShowCrashes === 1 && process\.env\.AGENTHUB_NO_GPU !== '1'/.test(LM),
+    `${ladderErr}gpuStageAction 收到 NO_GPU=${/gpuStageAction\([^)]*process\.env\.AGENTHUB_NO_GPU/.test(LM)}；旧的整块跳过条件还在=${/preShowCrashes === 1 && process\.env\.AGENTHUB_NO_GPU !== '1'/.test(LM)}`)
+  ok('gpuStageAction：off 两种情形都 fail；auto/ask 未软件渲染→relaunch、已软件渲染→none（落到沙箱档按阈值判）',
+    cf?.gpuStageAction?.('off', undefined) === 'fail' && cf?.gpuStageAction?.('off', '1') === 'fail' &&
+      cf?.gpuStageAction?.('auto', undefined) === 'relaunch' && cf?.gpuStageAction?.('ask', undefined) === 'relaunch' &&
+      cf?.gpuStageAction?.('auto', '1') === 'none' && cf?.gpuStageAction?.('ask', '1') === 'none' &&
+      cf?.gpuStageAction?.('WHATEVER', '0') === 'relaunch' && cf?.gpuStageAction?.(undefined, '1') === 'none',
+    JSON.stringify({
+      off: [cf?.gpuStageAction?.('off', undefined), cf?.gpuStageAction?.('off', '1')],
+      auto: [cf?.gpuStageAction?.('auto', undefined), cf?.gpuStageAction?.('auto', '1')],
+      ask: [cf?.gpuStageAction?.('ask', undefined), cf?.gpuStageAction?.('ask', '1')],
+      dirty: [cf?.gpuStageAction?.('WHATEVER', '0'), cf?.gpuStageAction?.(undefined, '1')]
+    }))
 }
 
 // ---------- Z2. Hook 命令指纹：哈希归一后的命令原文、显示另走脱敏、绝不参与放行（Task 7 + 评审修复轮 1/2）----------
