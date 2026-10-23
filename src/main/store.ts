@@ -122,6 +122,17 @@ export class Store {
     this.writeJson(this.dirs.config, cfg)
   }
 
+  /**
+   * 沙箱降级策略（设置 → 关于 三选）：走的就是这条既有配置路径——读整份 config、改一个键、写回。
+   * 调用方（ipc.ts）已把值限定在 auto/ask/off，脏值进不来。
+   */
+  setSandboxFallback(policy: NonNullable<AppConfig['sandboxFallback']>) {
+    const cfg = this.getConfig()
+    cfg.sandboxFallback = policy
+    this.writeJson(this.dirs.config, cfg)
+    return cfg.sandboxFallback
+  }
+
   /** 导出配置：剥离一切敏感信息（API Key 只在凭据存储，本方法额外确保不含 keyId 明文密钥） */
   exportConfig(): string {
     const cfg = JSON.parse(JSON.stringify(this.getConfig())) as AppConfig

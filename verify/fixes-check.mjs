@@ -1290,6 +1290,70 @@ console.log('\n[Y] navDecision')
     wn.navDecision(`${dev}/index.html`, dev, PKG_ROOT) === 'allow')
 }
 
+// ---------- Z. 沙箱降级三态：决策与徽章措辞都是纯函数（Task 6）----------
+// 主进程只负责"执行动作"（弹窗/relaunch/退出），"该不该降级"抽到这里，才可在逻辑层逐条断言；
+// 徽章按"实际关了什么"出措辞、不按"配置写了什么"出措辞，这条红线同样只有纯函数才钉得住。
+console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
+{
+  let cf = null
+  try { cf = await import('../out/shared/compat.js') } catch { /* 模块还没建：下面的断言逐条红，不让整个套件崩在半路 */ }
+  ok('shared/compat.js 存在且只导出纯函数（decideFallback/compatBadgeText/forcedCompatCrashEnabled）',
+    typeof cf?.decideFallback === 'function' && typeof cf?.compatBadgeText === 'function' &&
+      typeof cf?.forcedCompatCrashEnabled === 'function' && typeof cf?.normalizePolicy === 'function')
+  ok('shared/compat.js 不 import electron/fs（共享层保持纯净，渲染进程才敢引）', (() => {
+    try {
+      const src = readFileSync(new URL('../src/shared/compat.ts', import.meta.url), 'utf-8')
+      return !/(^|\n)\s*import[^;]*from\s+['"]electron['"]/.test(src) && !/(^|\n)\s*import[^;]*from\s+['"]node:fs['"]/.test(src)
+    } catch { return false }
+  })())
+  // --- 阈值：沙箱这一级只从第 2 次崩溃开始（第 1 次是软件渲染降级）---
+  ok('崩溃 0 次不动作', cf?.decideFallback('auto', 0) === 'none', String(cf?.decideFallback('auto', 0)))
+  ok('崩溃 1 次不进沙箱级（先走 AGENTHUB_NO_GPU 那一级）', cf?.decideFallback('auto', 1) === 'none')
+  ok('非有限崩溃计数不动作（NaN/undefined 不该被当成"已经到了第 2 次"）',
+    cf?.decideFallback('auto', Number.NaN) === 'none' && cf?.decideFallback('auto', undefined) === 'none')
+  // --- 三态各走各的动作 ---
+  ok('auto：第 2 次起静默降级（事后非阻塞提示一次）', cf?.decideFallback('auto', 2) === 'downgrade-silent', String(cf?.decideFallback('auto', 2)))
+  ok('ask：降级前先问人', cf?.decideFallback('ask', 2) === 'ask', String(cf?.decideFallback('ask', 2)))
+  ok('ask：第 5 次仍然是问人，不会因为崩得多就自动变成静默', cf?.decideFallback('ask', 5) === 'ask')
+  ok('off：绝不擅自关沙箱，按启动失败处理', cf?.decideFallback('off', 2) === 'fail', String(cf?.decideFallback('off', 2)))
+  ok('off：崩溃再多次也只有一条失败判定（不无限弹错误框重试）', cf?.decideFallback('off', 99) === 'fail')
+  ok('未配置或脏值一律回退 auto（老机器不该突然变成"要我点"或"开不了机"）',
+    cf?.decideFallback(undefined, 2) === 'downgrade-silent' && cf?.decideFallback('whenever', 2) === 'downgrade-silent' &&
+      cf?.decideFallback('AUTO', 2) === 'downgrade-silent',
+    `undefined→${cf?.decideFallback(undefined, 2)} 'whenever'→${cf?.decideFallback('whenever', 2)}`)
+  ok('normalizePolicy 只认三条，其余回 auto',
+    ['auto', 'ask', 'off'].every((p) => cf?.normalizePolicy(p) === p) &&
+      [null, undefined, '', 'On', 1, {}].every((x) => cf?.normalizePolicy(x) === 'auto'))
+  // --- 徽章措辞：说的是实际状态 ---
+  ok('只关沙箱：徽章写"渲染沙箱已关闭"', cf?.compatBadgeText({ noSandbox: true, noGpu: false }) === '兼容模式 · 渲染沙箱已关闭', String(cf?.compatBadgeText({ noSandbox: true, noGpu: false })))
+  ok('只关 GPU：徽章写"硬件加速已关闭"（不冒充沙箱）', cf?.compatBadgeText({ noSandbox: false, noGpu: true }) === '兼容模式 · 硬件加速已关闭', String(cf?.compatBadgeText({ noSandbox: false, noGpu: true })))
+  ok('两个都关：措辞把两件事都说全（不藏一个）', String(cf?.compatBadgeText({ noSandbox: true, noGpu: true }) ?? '').includes('沙箱') && String(cf?.compatBadgeText({ noSandbox: true, noGpu: true }) ?? '').includes('硬件加速'))
+  ok('什么都没关时不出徽章（null＝不渲染，避免常驻噪音）',
+    cf?.compatBadgeText({ noSandbox: false, noGpu: false }) === null && cf?.compatBadgeText(null) === null && cf?.compatBadgeText(undefined) === null)
+  ok('脏状态不认（字段缺失/非 true 都算没降级，宁可少说也不虚报"沙箱已关闭"）',
+    cf?.compatBadgeText({}) === null && cf?.compatBadgeText({ noSandbox: 'true' }) === null && cf?.compatBadgeText('sandbox') === null)
+  // --- 验证门控：两个条件同时成立才生效（正常双击绝不显示假徽章）---
+  ok('门控：--ahub-verify + env=1 才强制已降级态',
+    cf?.forcedCompatCrashEnabled(['D:\\AgentHub\\AgentHub.exe', '--remote-debugging-port=9236', '--ahub-verify'], '1') === true)
+  ok('门控：不带 --ahub-verify 时 env 独自为 1 也不生效（用户双击的 argv 里没这个开关）',
+    cf?.forcedCompatCrashEnabled(['D:\\AgentHub\\AgentHub.exe', '--remote-debugging-port=9236'], '1') === false)
+  ok('门控：env 非 1（0/未设/脏值）时一律不生效',
+    ['0', '', 'yes', undefined, 1, true].every((v) => cf?.forcedCompatCrashEnabled(['x', '--ahub-verify'], v) === false))
+  ok('门控：argv 非数组（脏入参）不抛异常，按不生效处理',
+    cf?.forcedCompatCrashEnabled(undefined, '1') === false && cf?.forcedCompatCrashEnabled(null, '1') === false)
+  // --- 设置页选择器的文案：三条都要说清"做什么"和"代价"（off 的代价是开不了机）---
+  ok('策略选项恰好三条且都带说明（设置 → 关于 的选择器与通知文案共用一份）',
+    Array.isArray(cf?.SANDBOX_FALLBACK_OPTIONS) && cf.SANDBOX_FALLBACK_OPTIONS.length === 3 &&
+      ['auto', 'ask', 'off'].every((p) => {
+        const o = cf.SANDBOX_FALLBACK_OPTIONS.find((x) => x.value === p)
+        return !!o && typeof o.label === 'string' && o.label.length > 0 && typeof o.desc === 'string' && o.desc.length >= 12
+      }), JSON.stringify(cf?.SANDBOX_FALLBACK_OPTIONS ?? null).slice(0, 300))
+  ok('off 的说明如实写出代价：沙箱坏掉的机器会直接启动失败（不是"更安全"这种空话）',
+    (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc ?? '').includes('启动失败') &&
+      (cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc ?? '').includes('兼容模式'),
+    cf?.SANDBOX_FALLBACK_OPTIONS?.find((o) => o.value === 'off')?.desc)
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

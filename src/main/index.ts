@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeTheme, ipcMain, Menu, Tray, dialog, nativeImage, shell } from 'electron'
+import { app, BrowserWindow, nativeTheme, ipcMain, Menu, Tray, dialog, nativeImage, shell, Notification } from 'electron'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerIpc } from './ipc'
@@ -7,6 +7,7 @@ import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
 import { configurePriceOverrides } from '../shared/overrides'
 import { navDecision } from '../shared/winnav'
+import { decideFallback, forcedCompatCrashEnabled, normalizePolicy } from '../shared/compat'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 import * as ledger from './ledger'
 
@@ -16,6 +17,14 @@ interface WindowState { x?: number; y?: number; width: number; height: number; m
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
 let mainWindow: BrowserWindow | null = null
 let store: Store | null = null
+
+// 降级事实记录：徽章按"实际关了什么"显示，不按"配置里写了什么"——
+// 用户要能分辨"我这台机器现在正跑在兼容模式"和"配置允许它降级"
+let compatState = {
+  noSandbox: process.env.AGENTHUB_NO_SANDBOX === '1',
+  noGpu: process.env.AGENTHUB_NO_GPU === '1',
+  reason: (process.env.AGENTHUB_NO_SANDBOX === '1' ? 'sandbox' : process.env.AGENTHUB_NO_GPU === '1' ? 'gpu' : '') as string
+}
 
 // 渲染策略：默认启用硬件加速（GPU 合成）——设置界面/工作流卡片/模式切换动画的帧率
 // 依赖 GPU 合成，软件渲染下会明显掉帧。GPU 异常由下方"显示前崩溃自动降级"兜底：
@@ -33,6 +42,15 @@ if (process.env.AGENTHUB_NO_GPU === '1') {
 if (process.env.AGENTHUB_NO_SANDBOX === '1') {
   app.commandLine.appendSwitch('no-sandbox')
   console.log('[main] AGENTHUB_NO_SANDBOX=1：已禁用 Chromium 沙箱（兼容模式）')
+}
+
+// 验证专用：强制进入"已降级"状态，让徽章与三态可被 CDP 断言（Task 6 Step 7b 的正向半段）。
+// 两道闸缺一不可（decideFallback 之外的另一个纯函数 forcedCompatCrashEnabled）：
+// argv 必须带 --ahub-verify，且 env 显式为 '1'。用户正常双击不带该开关——
+// 就算环境里残留了这个变量，也绝不会被显示成一个凭空的假徽章。
+if (forcedCompatCrashEnabled(process.argv, process.env.AGENTHUB_FORCE_SANDBOX_CRASH)) {
+  compatState = { noSandbox: true, noGpu: false, reason: 'sandbox(forced)' }
+  console.log('[main] 验证门控：按已降级状态呈现徽章')
 }
 
 function loadWindowState(): WindowState {
@@ -285,17 +303,61 @@ function createWindow() {
       console.log('[main] 自动降级为软件渲染重启（AGENTHUB_NO_GPU=1）')
       delete process.env.ELECTRON_RUN_AS_NODE
       process.env.AGENTHUB_NO_GPU = '1'
+      compatState = { noSandbox: process.env.AGENTHUB_NO_SANDBOX === '1', noGpu: true, reason: 'gpu' }
       process.env.AGENTHUB_RELAUNCH = '1'
       app.relaunch({ args: process.argv.slice(1) })
       app.quit()
       return
     }
-    if (preShowCrashes >= 2 && process.env.AGENTHUB_NO_SANDBOX !== '1') {
-      console.log('[main] 自动切换兼容模式重启（AGENTHUB_NO_SANDBOX=1）')
+    // 沙箱这一级：判断在 shared/compat.decideFallback（纯函数、逻辑层逐条断言过），这里只执行动作
+    if (preShowCrashes >= 2) {
+      // 已经在兼容模式下还连续崩：参数一样、重启只会原地打转，交给下面的"没救活"路径（窗口不出来）
+      if (process.env.AGENTHUB_NO_SANDBOX === '1') {
+        console.log('[main] 已在兼容模式（沙箱已关）仍连续崩溃，不再重复降级重启')
+        return
+      }
+      const policy = normalizePolicy(store?.getConfig().sandboxFallback)
+      const action = decideFallback(policy, preShowCrashes)
+      if (action === 'fail') {
+        console.log('[main] sandboxFallback=off：不自动降级，按启动失败处理')
+        dialog.showErrorBox('AgentHub 启动失败', '渲染进程连续异常，且你已选择「不自动降级」。\n\n可在兼容模式下重试：运行同目录 start-compat-mode.cmd（会关闭 Chromium 沙箱）。')
+        setQuitting()
+        app.quit()
+        return
+      }
+      if (action === 'ask') {
+        const pick = dialog.showMessageBoxSync(win, {
+          type: 'warning',
+          title: 'AgentHub 启动异常',
+          message: '渲染进程连续崩溃，通常与本机的安全软件拦截 Chromium 沙箱有关。',
+          detail: '禁用沙箱可降低渲染进程隔离（本应用只加载本地页面）。是否以此方式重启？',
+          buttons: ['以兼容模式重启', '不重启，退出'],
+          defaultId: 0,
+          cancelId: 1
+        })
+        if (pick !== 0) {
+          setQuitting()
+          app.quit()
+          return
+        }
+      }
+      console.log(`[main] 自动切换兼容模式重启（AGENTHUB_NO_SANDBOX=1，策略 ${policy}）`)
+      compatState = { noSandbox: true, noGpu: process.env.AGENTHUB_NO_GPU === '1', reason: 'sandbox' }
       delete process.env.ELECTRON_RUN_AS_NODE
       process.env.AGENTHUB_NO_SANDBOX = '1'
       // 标记重启来源：新实例在拿不到单实例锁时短暂等待（旧实例退出与锁释放存在竞态）
       process.env.AGENTHUB_RELAUNCH = '1'
+      // 首次真的降级了才提示一次；auto 用非阻塞气泡，不打断启动
+      if (!existsSync(join(app.getPath('userData'), 'compat-acknowledged.json'))) {
+        try {
+          writeFileSync(join(app.getPath('userData'), 'compat-acknowledged.json'), JSON.stringify({ firstAt: Date.now() }))
+          new Notification({
+            title: '已启用兼容模式（Chromium 沙箱已关闭）',
+            body: '在「设置 → 关于」可改成每次问我、或不再自动降级。',
+            silent: false
+          }).show()
+        } catch { /* 提示失败不影响已经救活的窗口 */ }
+      }
       // 保留全部启动参数（含 --shots 验证模式），重启后行为一致
       app.relaunch({ args: process.argv.slice(1) })
       app.quit()
@@ -387,6 +449,14 @@ function startApp() {
     checkpoints.init(join(ud, 'checkpoints'))
     ledger.init(join(ud, 'ledger.jsonl'))
     registerIpc(() => store as Store, () => mainWindow)
+    // 兼容模式事实（只读）：徽章与设置页都问主进程"实际关掉了什么"，自己不留状态。
+    // 为什么写在 index.ts 而不是 ipc.ts：compatState 是本模块的模块级状态，
+    // 挪进 ipc.ts 就得让 ipc.ts 反向 import index.ts 拿 getter —— index.ts 已经 import 了
+    // registerIpc，那是一条循环依赖。这里在 registerIpc 之后就地注册，一个通道一句话。
+    ipcMain.handle('app:compat', () => ({
+      ...compatState,
+      policy: normalizePolicy(store?.getConfig().sandboxFallback)
+    }))
     buildAppMenu()
     // 跟随主题（渲染进程可通过 theme:set 覆盖 themeSource）
     nativeTheme.themeSource = 'system'

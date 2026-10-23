@@ -51,6 +51,8 @@ export function installDebugHooks() {
     passGate: () => void useWorkflow.getState().confirmGate('deliver'),
     /** 应用菜单加速键清单（验证 Ctrl+R 刷新 / Ctrl+Shift+I 这类默认键已不再注册） */
     menuSummary: async () => await bridge.app.menuSummary(),
+    /** 兼容模式事实（真机断言徽章正反两向用）：读的是主进程的实际状态，不是配置 */
+    compat: async () => await bridge.app.compat(),
     // 预设与槽位（本轮需求 3/4 验证用）
     savePreset: (name: string) => {
       const p = useWorkflow.getState().savePreset(name)

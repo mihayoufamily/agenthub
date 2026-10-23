@@ -7,6 +7,8 @@ import { useWorkflow } from '../stores/workflow'
 import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe } from '@shared/types'
 import { validateHook } from '@shared/hooks'
 import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
+import { compatBadgeText, SANDBOX_FALLBACK_OPTIONS } from '@shared/compat'
+import type { CompatState, SandboxFallbackPolicy } from '@shared/compat'
 import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
@@ -993,9 +995,14 @@ function AboutSection() {
   const info = useSettings((s) => s.appInfo)
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [checking, setChecking] = useState(false)
+  // 兼容模式（A4）：状态从主进程读（app:compat 只报事实），策略写回走 config 那条既有路径
+  const [compat, setCompat] = useState<CompatState | null>(null)
+  const [savingPolicy, setSavingPolicy] = useState<SandboxFallbackPolicy | null>(null)
+  const reloadCompat = () => { void bridge.app.compat().then(setCompat).catch(() => setCompat(null)) }
 
   useEffect(() => {
     bridge.autostart.get().then((on) => setAutostart(on)).catch(() => setAutostart(null))
+    reloadCompat()
   }, [])
 
   return (
@@ -1044,6 +1051,63 @@ function AboutSection() {
           />
         )}
       </Row>
+      <Row
+        label="兼容模式状态"
+        desc={compat === null
+          ? '读取中……读不到主进程状态时这里不猜（宁可空着，也不写"沙箱正常"）'
+          : compatBadgeText(compat) === null
+            ? '本机没有降级：Chromium 沙箱与硬件加速都按默认方式运行。'
+            : `${compatBadgeText(compat)}（原因：${compat.reason || '未知'}）。这是本机现在的真实状态，不是配置里写了什么。`}
+      />
+      <Row
+        label="沙箱降级策略"
+        desc="渲染进程在窗口出现前连续崩溃时，要不要替你关掉 Chromium 沙箱重启。改完自下一次降级起生效（本次运行不变）。"
+      >
+        {compat === null ? (
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>读取中…</span>
+        ) : (
+          <div className="seg" role="radiogroup" aria-label="沙箱降级策略">
+            {SANDBOX_FALLBACK_OPTIONS.map((o) => (
+              <button
+                key={o.value}
+                role="radio"
+                aria-checked={o.value === compat.policy}
+                data-testid="sandbox-fallback-option"
+                data-policy={o.value}
+                className={o.value === compat.policy ? 'active' : ''}
+                disabled={savingPolicy !== null}
+                title={o.desc}
+                onClick={async () => {
+                  if (o.value === compat.policy) return
+                  setSavingPolicy(o.value)
+                  const r = await bridge.config.setSandboxFallback(o.value).catch(() => null)
+                  setSavingPolicy(null)
+                  if (!r) { useUi.getState().toast('保存降级策略失败：主进程没有回应', 'error'); return }
+                  if (!r.ok) { useUi.getState().toast(r.message ?? '保存降级策略失败（未写入）', 'error'); return }
+                  reloadCompat()
+                  useUi.getState().toast(`降级策略已设为「${o.label}」，自下一次降级起生效`, 'ok')
+                }}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </Row>
+      {compat && (
+        <div className="desc" style={{ display: 'flex', flexDirection: 'column', gap: 4, lineHeight: 1.65 }}>
+          {SANDBOX_FALLBACK_OPTIONS.map((o) => (
+            <div
+              key={o.value}
+              data-testid="sandbox-fallback-desc"
+              data-active={o.value === compat.policy ? '1' : '0'}
+              style={o.value === compat.policy ? { color: 'var(--text)' } : undefined}
+            >
+              <strong>{o.label}</strong>：{o.desc}
+            </div>
+          ))}
+        </div>
+      )}
       <Row label="开源仓库与许可证" desc="MIT · https://github.com/mihayoufamily/agenthub" />
       <Row label="诊断信息导出" desc="版本、平台、配置摘要（不含 API Key 与个人数据）">
         <Button

@@ -6,6 +6,7 @@ import { useSettings } from '../stores/settings'
 import { ChatView } from './ChatView'
 import { Shell } from './Shell'
 import { LogoMark } from '../components/Logo'
+import { CompatBadge } from '../components/CompatBadge'
 import { EmptyState, Button } from '../components/primitives'
 import { Icon } from '../components/Icons'
 
@@ -70,6 +71,8 @@ export function Workbench() {
               <div className="title">工作站模式</div>
               <div className="sub">在同一个应用中自由切换 Agent</div>
             </div>
+            {/* 兼容模式徽章：沙箱被关掉这件事不能只留在启动日志里 */}
+            <CompatBadge />
           </div>
           <EmptyState
             title="还没有可用 Agent"

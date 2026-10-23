@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { CompatState, SandboxFallbackPolicy } from '../shared/compat'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
@@ -27,6 +28,9 @@ const api = {
     setBusy: (busy: boolean) => ipcRenderer.invoke('app:setBusy', busy) as Promise<{ ok: boolean }>,
     /** 当前应用菜单的加速键清单（验证用） */
     menuSummary: () => ipcRenderer.invoke('app:menuSummary') as Promise<{ accelerators: string[]; custom: boolean }>,
+    /** 兼容模式事实（只读）：实际关掉了沙箱还是硬件加速 + 当前生效的降级策略。
+     *  主进程报的是"这台机器现在跑成什么样"，不是配置里写了什么 */
+    compat: () => ipcRenderer.invoke('app:compat') as Promise<CompatState>,
     relaunch: () => ipcRenderer.invoke('app:relaunch')
   },
   update: {
@@ -45,6 +49,9 @@ const api = {
     setAgents: (agents: AgentConfig[]) => ipcRenderer.invoke('agents:set', agents),
     setWorkflowDefaults: (wd: AppConfig['workflowDefaults']) => ipcRenderer.invoke('workflowDefaults:set', wd),
     setPresets: (list: AppConfig['presets']) => ipcRenderer.invoke('presets:set', list),
+    /** 沙箱降级策略（设置 → 关于 三选）：值域由主进程限定，写回的当前值随结果返回 */
+    setSandboxFallback: (policy: SandboxFallbackPolicy) =>
+      ipcRenderer.invoke('sandboxFallback:set', policy) as Promise<{ ok: boolean; policy: SandboxFallbackPolicy; message?: string }>,
     exportFile: () => ipcRenderer.invoke('config:export'),
     importFile: () => ipcRenderer.invoke('config:import'),
     /** 程序化导入（验证专用）：主进程仅在 argv 带 --ahub-verify 时注册该通道，入口并拒绝非字符串/超限 payload；

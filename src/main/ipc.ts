@@ -10,6 +10,7 @@ import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, 
 import { configurePriceOverrides } from '../shared/overrides'
 import { validateHook } from './hooks'
 import { sanitizeMcpList, stampMcpLegacy } from '../shared/mcp-list'
+import { normalizePolicy } from '../shared/compat'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
 import * as mcp from './mcp'
@@ -162,6 +163,17 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   ipcMain.handle('agents:set', (_e, agents: AgentConfig[]) => getStore().setAgents(agents))
   ipcMain.handle('workflowDefaults:set', (_e, wd: AppConfig['workflowDefaults']) => getStore().setWorkflowDefaults(wd))
   ipcMain.handle('presets:set', (_e, list: AppConfig['presets']) => getStore().setPresets(list))
+  /**
+   * 沙箱降级策略（设置 → 关于）。值域在主进程限定死，不接受界面以外的形状：
+   * 这条改的是"崩溃时要不要替你关掉 Chromium 沙箱"，写进一个没定义的值等于把降级行为变成未知状态。
+   */
+  ipcMain.handle('sandboxFallback:set', (_e, policy: unknown) => {
+    const cur = normalizePolicy(getStore().getConfig().sandboxFallback)
+    if (policy !== 'auto' && policy !== 'ask' && policy !== 'off') {
+      return { ok: false as const, policy: cur, message: '降级策略只能是 自动降级 / 每次问我 / 不自动降级 三者之一（未写入）' }
+    }
+    return { ok: true as const, policy: getStore().setSandboxFallback(policy) }
+  })
 
   // ---------- 调用账本（脱敏元数据；用量统计与排障共用一份数据源） ----------
   ipcMain.handle('ledger:list', (_e, limit?: number) => ledger.list(limit ?? 200))

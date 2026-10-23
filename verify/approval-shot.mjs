@@ -2,7 +2,10 @@
 // 用法：node verify/approval-shot.mjs [--port=9236]
 // 走 tools:exec 这条入口（同一套审批闸门），不碰用户的 Agent 配置与白名单。
 // 启动带 --ahub-verify：config:importJson（整份导入通道）只在主进程 argv 有这个验证开关时才注册
-// （评审修复4），第 9/10 节的导入往返依赖它；第 11 节会不带开关重启一次，反证通道确实没注册。
+// （评审修复4），第 9/10 节的导入往返依赖它，第 12 节的降级门控也依赖它（env 单独不成）；
+// 第 11 节会不带开关重启一次，反证通道确实没注册、门控确实不生效。
+// 本套件起三个实例（单实例锁，逐个等上一个退净）：主实例 + 无验证开关 + 带降级门控，
+// 分别覆盖审批/导入、闸门反证、以及兼容模式徽章的正反两向（[0] 反向在主实例里）。
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -76,6 +79,15 @@ const modalReason = () => js(cdpRef, `document.querySelector('[data-approval-mod
 const pendingCount = () => js(cdpRef, 'window.__ahub_debug.approvals().length')
 
 let cdpRef = null
+/** 徽章挂在 .wb-topbar：启动早期还停在 splash/加载态，重试到顶栏真的渲染出来为止 */
+async function gotoWorkbench(c) {
+  for (let i = 0; i < 24; i++) {
+    await js(c, 'window.__ahub_debug.workbench()')
+    if (await js(c, "!!document.querySelector('.wb-topbar')")) return true
+    await sleep(500)
+  }
+  return false
+}
 // 导入往返断言（第 9 节）会写真实的 config.json：快照按文件字节取，进程退出后按字节还原——
 // 开发者的配置不留测试态（照本套件对审批历史"先快照、后还原"的约定办，只是这份更大）
 let cfgFile = null
@@ -91,6 +103,18 @@ try {
   const historyBefore = await js(cdp, 'window.agenthub.approval.history(500)')
   cfgFile = join((await js(cdp, 'window.agenthub.app.info()')).userDataPath, 'config.json')
   configSnapshot = existsSync(cfgFile) ? readFileSync(cfgFile) : null
+
+  // ---- 0. 兼容模式徽章 · 反向（Task 6 Step 7a）：这一台是没降级的正常进程，徽章不该出现 ----
+  // 徽章有两个失败方向：该显示时不显示（用户不知道沙箱关了）、不该显示时常驻（变成噪音）。
+  // 这条进程就是"不该显示"的那一半，正向放在末尾 [12] 用门控 env 起的第三个实例里验。
+  console.log('\n[0] 兼容模式徽章：正常启动不该有它')
+  const onWb = await gotoWorkbench(cdp)
+  ok('顶栏渲染出来了（反向断言有挂载点，不是空转）', onWb === true)
+  const compatNormal = await js(cdp, 'window.__ahub_debug.compat()')
+  ok('正常启动时 noSandbox 为假', compatNormal?.noSandbox === false, JSON.stringify(compatNormal))
+  const badgeAbsent = await js(cdp, 'document.body.innerText.includes("兼容模式")')
+  ok('正常启动不显示兼容模式徽章（不是常驻噪音）', badgeAbsent === false)
+  ok('DOM 里也没有徽章节点，reason 为空', (await js(cdp, "!!document.querySelector('[data-compat-badge]')")) === false && (compatNormal?.reason ?? '') === '', JSON.stringify(compatNormal))
 
   // ---- 1. 不在白名单 → 弹确认，且此刻命令还没执行 ----
   console.log('\n[1] 未批准的命令不会执行')
@@ -383,10 +407,12 @@ try {
   ok('两次被拒的导入都没动盘：mcpServers 与尝试前逐字节一致（超限那次如果真进了 importConfig，这里就没了）',
     JSON.stringify(listAfterGate) === JSON.stringify(listBeforeGate), JSON.stringify(listAfterGate)?.slice(0, 200))
   await js(cdp, `window.__ahub_debug.setMcpServers(${JSON.stringify(before)})`)
-  // 不带 --ahub-verify 重启一次：通道应当没注册，invoke 以"未注册"失败（生产路径拿不到整份导入）
+  // 不带 --ahub-verify 重启一次：通道应当没注册，invoke 以"未注册"失败（生产路径拿不到整份导入）。
+  // 顺便把降级门控 env 也带上——它应当**不**生效（缺 --ahub-verify 这一半），
+  // 这条就是"用户正常双击永远不会看到假徽章"的真机证据（[12] 是两个条件都齐的正向）。
   try { proc.kill() } catch { /* noop */ }
   if (!waitAppGone()) console.log('  WARN  旧实例 30s 内没退干净，第二个实例可能拿不到单实例锁')
-  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 1}`], { stdio: 'ignore', env: launchEnv() })
+  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 1}`], { stdio: 'ignore', env: { ...launchEnv(), AGENTHUB_FORCE_SANDBOX_CRASH: '1' } })
   const page2 = await waitHttp(PORT + 1, 40000)
   const cdp2 = new CdpClient(page2.webSocketDebuggerUrl)
   await cdp2.connect()
@@ -397,6 +423,59 @@ try {
     : 'second-instance-not-ready'
   ok('不带 --ahub-verify 的进程里 config:importJson 没有注册（通道按验证开关注册，不是无条件可达）',
     String(gateNoSwitch).startsWith('rejected:'), String(gateNoSwitch).slice(0, 200))
+  ok('门控只带 env、缺 --ahub-verify 时不生效：这个进程的 noSandbox 仍是假（假徽章进不了正常启动）',
+    ready2 && (await js(cdp2, 'window.__ahub_debug.compat()'))?.noSandbox === false,
+    JSON.stringify(ready2 ? await js(cdp2, 'window.__ahub_debug.compat()') : null))
+  ok('同一进程顶栏也没有徽章节点（门控没开就等于什么都没发生）',
+    ready2 && (await gotoWorkbench(cdp2)) && (await js(cdp2, "!!document.querySelector('[data-compat-badge]')")) === false)
+
+  // ---- 12. 兼容模式徽章 · 正向（Task 6 Step 7b）：门控起的第三个实例必须看得到徽章 ----
+  // 门控 = AGENTHUB_FORCE_SANDBOX_CRASH=1 **且** --ahub-verify（两个条件同时成立，缺一不可，
+  // 上一条 [11] 已反证 env 单独不成）。它只把状态呈现为"已降级"，真降级路径走的是同一条渲染分支。
+  console.log('\n[12] 兼容模式徽章：门控降级后顶栏出现，且设置里可改策略')
+  try { proc.kill() } catch { /* noop */ }
+  if (!waitAppGone()) console.log('  WARN  第二个实例 30s 内没退干净，第三个实例可能拿不到单实例锁')
+  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 2}`, '--ahub-verify'], {
+    stdio: 'ignore',
+    env: { ...launchEnv(), AGENTHUB_FORCE_SANDBOX_CRASH: '1' }
+  })
+  const page3 = await waitHttp(PORT + 2, 40000)
+  const cdp3 = new CdpClient(page3.webSocketDebuggerUrl)
+  await cdp3.connect()
+  await cdp3.send('Runtime.enable')
+  const ready3 = await waitJs(cdp3, '!!window.agenthub && !!window.__ahub_debug', 30000)
+  const badgeShown = ready3 && (await gotoWorkbench(cdp3))
+    ? await waitJs(cdp3, "!!document.querySelector('[data-compat-badge]')", 12000)
+    : false
+  ok('门控降级后顶栏出现兼容模式徽章', badgeShown === true)
+  const compat3 = await js(cdp3, 'window.__ahub_debug.compat()')
+  ok('状态里 policy 合法且 noSandbox 为真', compat3?.noSandbox === true && ['auto', 'ask', 'off'].includes(compat3?.policy), JSON.stringify(compat3))
+  ok('reason 标明降级来源（供人核对不是凭空显示）', String(compat3?.reason ?? '').includes('sandbox'), JSON.stringify(compat3))
+  const badgeText3 = String(await js(cdp3, `document.querySelector('[data-compat-badge]')?.textContent ?? ''`))
+  ok('徽章措辞说的是实际关掉的东西（渲染沙箱），不是配置里写了什么', badgeText3.includes('渲染沙箱已关闭'), badgeText3)
+  // 「可改」那一半：一次性提示之后，设置 → 关于 还得有常驻入口（三态都能选、能落盘、能改回）
+  await js(cdp3, 'window.__ahub_debug.openSettings("about")')
+  await sleep(600)
+  ok('设置 → 关于 有可改的三态选择器（一次性提示不是唯一入口）',
+    (await js(cdp3, `document.querySelectorAll('[data-testid="sandbox-fallback-option"]').length`)) === 3)
+  const fbDescs = String(await js(cdp3, `[...document.querySelectorAll('[data-testid="sandbox-fallback-desc"]')].map((x) => x.textContent).join('|')`))
+  ok('三条策略都写明"做什么 + 代价"，off 那条如实写会启动失败（不是"更安全"这种空话）',
+    fbDescs.split('|').length === 3 && fbDescs.includes('启动失败'), fbDescs.slice(0, 200))
+  const policyBefore = compat3?.policy
+  // 目标选一个与当前值不同的，否则"改了"这条断言会因两边本来就相同而空过
+  const target = policyBefore === 'ask' ? 'off' : 'ask'
+  await js(cdp3, `(() => { const b = [...document.querySelectorAll('[data-testid="sandbox-fallback-option"]')].find((x) => x.dataset.policy === ${JSON.stringify(target)}); b?.click(); return !!b })()`)
+  await sleep(900)
+  ok(`选「${target}」后真的落进 config.sandboxFallback（不是只动界面状态）`,
+    (await js(cdp3, 'window.agenthub.config.get()'))?.sandboxFallback === target,
+    String((await js(cdp3, 'window.agenthub.config.get()'))?.sandboxFallback))
+  ok('选择器高亮跟着主进程回读的值走（界面不自己记一份状态）',
+    (await js(cdp3, `document.querySelector('[data-testid="sandbox-fallback-option"].active')?.dataset?.policy ?? ''`)) === target)
+  await js(cdp3, `(() => { const b = [...document.querySelectorAll('[data-testid="sandbox-fallback-option"]')].find((x) => x.dataset.policy === ${JSON.stringify(policyBefore)}); b?.click(); return !!b })()`)
+  await sleep(900)
+  ok(`可以再改回原策略「${policyBefore}」：策略不是单向门，config 也跟着回去了`,
+    (await js(cdp3, 'window.agenthub.config.get()'))?.sandboxFallback === policyBefore,
+    String((await js(cdp3, 'window.agenthub.config.get()'))?.sandboxFallback))
 
   console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 } finally {
