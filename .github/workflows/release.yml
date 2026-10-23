@@ -32,9 +32,19 @@ jobs:
       - run: npm run build
       - run: npm run pack:portable
 
-      - name: 打 zip
+      - name: 打 zip（平铺，解压即见 AgentHub.exe）
         shell: pwsh
-        run: Compress-Archive -Path release/AgentHub-win-x64 -DestinationPath "AgentHub-${{ github.ref_name }}-win-x64-portable.zip"
+        run: |
+          $zip = "AgentHub-${{ github.ref_name }}-win-x64-portable.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          # 实测（319MB 真产物）：Compress-Archive -Path release/AgentHub-win-x64 把 118 个条目全套进
+          # AgentHub-win-x64/ 一层，解压后根目录没有 AgentHub.exe，与历史包/使用说明不一致；用系统自带 bsdtar
+          & $env:SystemRoot\System32\tar.exe -a -c -f $zip -C release/AgentHub-win-x64 .
+          if (-not (Test-Path $zip)) { Write-Error "zip 未生成"; exit 1 }
+          # 自检：包内必须有根级 AgentHub.exe。注意 -notmatch 作用在数组上是「筛选」不是布尔，
+          # 写成 if ($entries -notmatch …) 会让平铺的好包也判失败，所以这里用 -match 取反。
+          $entries = & $env:SystemRoot\System32\tar.exe -tf $zip
+          if (-not ($entries -match '^\./AgentHub\.exe$' -or $entries -match '^AgentHub\.exe$')) { Write-Error "包内没有根级 AgentHub.exe：$($entries[0..5] -join ', ')"; exit 1 }
 
       - uses: softprops/action-gh-release@v2
         with:
