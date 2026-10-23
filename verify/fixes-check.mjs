@@ -1236,9 +1236,16 @@ console.log('\n[Y] navDecision')
     wn.navDecision('file://evil.example/resources/app/dist/renderer/payload.html', null) === 'block')
   ok('file://10.0.0.5/share/… 的 IP 形态远程共享也拦掉',
     wn.navDecision('file://10.0.0.5/share/resources/app/dist/renderer/x.html', null) === 'block')
-  // Node 的 URL 把 `file:\\主机\共享\…` 解析成空主机＋`//主机/共享/…` 路径，靠锚定根收口（Chromium 则直接给出主机名）
-  ok('file:\\\\evil.example\\share\\… 的反斜杠 UNC 形态拦掉（锚定后不落根内）',
-    wn.navDecision('file:\\\\evil.example\\share\\resources\\app\\dist\\renderer\\x.html', null, PKG_ROOT) === 'block')
+  // Windows 里粘贴 UNC 通常是反斜杠形态；URL 解析把它折成 host=evil.example + pathname=/share/…
+  ok('file:\\\\evil.example\\share\\… 反斜杠 UNC 也过空主机这一关（无锚点也拦）',
+    wn.navDecision('file:\\\\evil.example\\share\\resources\\app\\dist\\renderer\\x.html', null) === 'block')
+  // 四反斜杠形态 Node 解析成空主机＋pathname=//主机/共享/…，marker 弱回退认不出来（放行），
+  // 只有锚定真实根能拦——这条正是「生产必须传 ownRootPath」的理由，钉住锚定这一侧
+  ok('file:// 主机/共享（pathname 以 // 开头）靠锚定根拦掉（弱回退认不出，故必须传根）',
+    wn.navDecision('file:' + String.fromCharCode(92).repeat(4) + 'evil.example' + String.fromCharCode(92)
+      + 'share' + String.fromCharCode(92) + 'resources' + String.fromCharCode(92) + 'app'
+      + String.fromCharCode(92) + 'dist' + String.fromCharCode(92) + 'renderer' + String.fromCharCode(92) + 'x.html',
+      null, PKG_ROOT) === 'block')
 
   // ---- 修复轮 2 · 评审项 2：分隔符一起编码掉，new URL() 看不见就折不掉 ----
   ok('%2e%2e%2f 编码分隔符遍历（无锚点）拦掉',
