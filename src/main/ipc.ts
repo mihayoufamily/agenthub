@@ -459,9 +459,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
               reqId,
               tool: 'mcp',
               // 信任弹窗是用户看清"我到底允许了哪条命令"的唯一地方：新格式显示实际执行的
-              // bin+args 整行（command 可能为空，旧写法会弹出空白）；旧格式显示原命令并标注已停用
+              // bin+args（command 可能为空，旧写法会弹出空白）；旧格式显示原命令并标注已停用。
+              // argv 用 JSON 数组形态显示（与设置页「实际执行」预览同一种口径，修复波 A · 项 6）：
+              // 人工授权闸口正是必须显示 argv 边界的地方，裸空格 join 会让含空格的参数看起来像两个 token。
               command: s.launch?.bin
-                ? `${s.launch.bin} ${(Array.isArray(s.launch.args) ? s.launch.args : []).join(' ')}`.trim()
+                ? JSON.stringify([s.launch.bin, ...(Array.isArray(s.launch.args) ? s.launch.args : [])])
                 : `${(s.command ?? '').trim()}${s.legacyInvalid ? '（已停用，v0.4.0 不再用旧单命令启动）' : ''}`,
               dir: grant?.dir ?? '',
               reason: `首次连接 MCP server「${s.name}」：它的工具会以这条命令的权限在本机执行`,

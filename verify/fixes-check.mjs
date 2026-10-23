@@ -1987,6 +1987,58 @@ console.log('\n[Z2] Hook 命令指纹与脱敏')
     /<div style=\{\{[^}]*wordBreak: 'break-all'\s*\}\}\s*data-testid="hook-fingerprint"/.test(settingsZ2))
 }
 
+// ---------- Z3. 脱敏与渲染口径统一（修复波 A · 项 6：同一簇文件，三处口径不一致）----------
+// ① 工具卡里印**原始** h.command，而隔壁设置页印的是脱敏后的形态——spec A5 关心的正是
+//   "命令里可能带 token"，那张卡同样会被截图/分享；
+// ② MCP 信任弹窗用**裸空格** join argv，而设置页预览用 JSON.stringify([file, ...args])——
+//   含空格的参数在人工授权闸口看起来像两个 token，而授权闸口正是必须显示 argv 边界的地方；
+// ③ 第二个 did-fail-load 监听器与第一个重复（一个只打日志、一个才出错页，改一个漏一个），
+//   且 ${desc} 被**未转义**插进加载到特权窗口的 data: 错误页（url 那半边有编码，desc 没有）——
+//   本分支唯一一处往特权页面做的未转义插值。
+// 够不到的半边如实标注：这三处都在渲染层 JSX / 主进程 electron 回调里，逻辑层起不了 electron，
+// 所以下面是源码级绊线（与 [Z] 段对执行器接线的断言同一口径），不是行为证明。
+console.log('\n[Z3] 脱敏与渲染口径统一（工具卡 / MCP 信任弹窗 argv / 加载失败错误页）')
+{
+  const chatZ3 = readSrcSafe('src/renderer/src/features/ChatView.tsx')
+  const ipcZ3 = readSrcSafe('src/main/ipc.ts')
+  const mainZ3 = readSrcSafe('src/main/index.ts')
+  const setZ3 = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
+  const z3Err = [chatZ3, ipcZ3, mainZ3, setZ3].map((x) => x.error).filter(Boolean).join('')
+  ok('Z3 断言的四处源文件都读得到（读不到＝FAIL 并说明是哪一个，不让套件崩在 ok() 之外）', z3Err === '', z3Err)
+  ok('工具卡里的 Hook 命令走显示脱敏（与设置页同一个 redactCommandForDisplay），不再印原文',
+    z3Err === '' &&
+      /data-tool-hooks[\s\S]{0,900}?\{redactCommandForDisplay\(h\.command\)\}/.test(chatZ3.text) &&
+      !/<div>\{h\.command\}<\/div>/.test(chatZ3.text) &&
+      /import\s*\{[^}]*\bredactCommandForDisplay\b[^}]*\}\s*from\s*'@shared\/approvals'/.test(chatZ3.text),
+    `卡片里调了脱敏=${/redactCommandForDisplay\(h\.command\)/.test(chatZ3.text)}；原文插值 <div>{h.command}</div> 还在=${/<div>\{h\.command\}<\/div>/.test(chatZ3.text)}；从 @shared/approvals 引进来了=${/import\s*\{[^}]*\bredactCommandForDisplay\b[^}]*\}\s*from\s*'@shared\/approvals'/.test(chatZ3.text)}`)
+  ok('同一条命令在设置页与工具卡走同一个显示口径（两处都调 redactCommandForDisplay，不是各写一份正则）',
+    z3Err === '' &&
+      (setZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length >= 1 &&
+      (chatZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length >= 1,
+    `SettingsPage 调用数=${(setZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length} ChatView 调用数=${(chatZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length}`)
+  ok('MCP 信任弹窗的 argv 改成 JSON 风格（与设置页预览同一种），ipc.ts 里不再有裸空格 join argv',
+    z3Err === '' &&
+      /command: s\.launch\?\.bin[\s\S]{0,200}?JSON\.stringify\(\[/.test(ipcZ3.text) &&
+      !/\.join\(' '\)/.test(ipcZ3.text) &&
+      /JSON\.stringify\(\[p\.file, \.\.\.p\.args\]\)/.test(setZ3.text),
+    `弹窗用 JSON.stringify=${/command: s\.launch\?\.bin[\s\S]{0,200}?JSON\.stringify\(\[/.test(ipcZ3.text)}；ipc.ts 里裸空格 join 还在=${/\.join\(' '\)/.test(ipcZ3.text)}；设置页预览那一份=${/JSON\.stringify\(\[p\.file, \.\.\.p\.args\]\)/.test(setZ3.text)}`)
+  ok('did-fail-load 只挂一个监听器（原来两个：一个只打日志、一个才出错页）',
+    z3Err === '' && (mainZ3.text.match(/on\('did-fail-load'/g) ?? []).length === 1,
+    `监听器数=${(mainZ3.text.match(/on\('did-fail-load'/g) ?? []).length}`)
+  const errPageZ3 = (mainZ3.text.match(/const html = `[\s\S]*?`\n/) || [''])[0]
+  ok('插进特权 data: 错误页的 desc 经过 HTML 转义（五个实体全覆盖，与 tools.ts htmlToText 的解码集对称）',
+    z3Err === '' && errPageZ3.length > 0 &&
+      /\$\{safeDesc\}/.test(errPageZ3) && !/\$\{desc\}/.test(errPageZ3) &&
+      /function escapeHtmlText/.test(mainZ3.text) && /escapeHtmlText\(desc\)/.test(mainZ3.text) &&
+      ['&amp;', '&lt;', '&gt;', '&quot;', '&#39;'].every((e) => mainZ3.text.includes(e)),
+    `错误页模板取到了=${errPageZ3.length > 0}；模板里还有裸 \${desc}=${/\$\{desc\}/.test(errPageZ3)}；escapeHtmlText 定义了=${/function escapeHtmlText/.test(mainZ3.text)}；应用到 desc=${/escapeHtmlText\(desc\)/.test(mainZ3.text)}`)
+  ok('错误页的重试按钮仍只对主框架生效、url 那半边继续走 encodeURIComponent（转义 desc 不许顺手改掉这半边）',
+    z3Err === '' && /if \(!isMain\) return/.test(mainZ3.text) &&
+      /const retry = encodeURIComponent\(url\)/.test(mainZ3.text) &&
+      /decodeURIComponent\('\$\{retry\}'\)/.test(mainZ3.text),
+    `isMain 闸门=${/if \(!isMain\) return/.test(mainZ3.text)}；retry 编码=${/const retry = encodeURIComponent\(url\)/.test(mainZ3.text)}`)
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

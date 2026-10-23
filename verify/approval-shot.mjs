@@ -441,9 +441,16 @@ try {
   ok('勾选且启用的未信任 MCP server 触发首次连接弹窗（脏 null 记录没把整次对话炸掉——model:chat 走 mcp:list 同一道闸门）',
     mcpModal === true, `modal=${JSON.stringify(mcpModal)} chat=${JSON.stringify(await js(cdpRef, 'window.__chat'))}`)
   const trustLabel = String(await modalCmd())
+  // 修复波 A · 项 6：授权闸口要显示 argv 边界，口径与设置页「实际执行」预览统一成 JSON 数组
+  // （旧写法用裸空格 join，含空格的参数在人工授权闸口看起来像两个 token）。
+  // 断言跟着**对齐**（不是放宽）：原来只查子串包含，现在要求整串能 JSON.parse 成 argv 数组，
+  // 且第 0 项逐字符等于实际的可执行文件路径——含空格的路径也只算一个 token。
+  let trustArgv = null
+  try { trustArgv = JSON.parse(trustLabel) } catch { /* 不是 JSON 数组＝口径没统一 */ }
   ok('信任弹窗标签显示实际执行的 bin+args（launch-only 记录 command 为空也绝不弹空白标签）',
-    trustLabel.includes(String(process.execPath)) && trustLabel.includes('mock-mcp-server.mjs') && trustLabel.trim().length > 0,
-    trustLabel.slice(0, 240))
+    Array.isArray(trustArgv) && trustArgv[0] === String(process.execPath) &&
+      trustArgv.some((x) => String(x).includes('mock-mcp-server.mjs')),
+    `标签原文=${trustLabel.slice(0, 200)} 解析成 argv=${JSON.stringify(trustArgv)?.slice(0, 200)}`)
   await click('[data-approval-deny]')
   await waitJs(cdpRef, 'window.__chat !== null', 25000)
   const chatRes = await js(cdpRef, 'window.__chat')

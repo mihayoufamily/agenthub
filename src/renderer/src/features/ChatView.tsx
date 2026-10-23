@@ -17,6 +17,9 @@ import { CheckpointBar } from '../components/CheckpointBar'
 import { digestThinking } from '../lib/thinking'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
 import { contextWindowOf, estimateTokens, estimateCost, fmtCost, visionOf } from '@shared/pricing'
+// 工具卡里回显 Hook 命令走与设置页**同一个**显示口径（修复波 A · 项 6）：
+// 命令里可能带 token，而这张卡同样会被截图/分享——spec A5 关心的正是这一点。
+import { redactCommandForDisplay } from '@shared/approvals'
 
 /** 稳定空数组：避免 selector 每次返回新引用导致多余渲染 */
 const EMPTY_MSGS: ChatMessage[] = []
@@ -672,7 +675,8 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
               <b style={{ color: h.blocked ? 'var(--danger)' : 'var(--text-3)' }}>
                 Hook {h.id} · 退出码 {h.exit ?? 'null'}{h.timedOut ? ' · 超时' : ''}{h.blocked ? ' · 已否决本次调用' : ''}
               </b>
-              <div>{h.command}</div>
+              {/* 脱敏后回显（与设置页 Hook 分区同一口径）：命令原文可能带 token，这张卡会被截图/分享 */}
+              <div>{redactCommandForDisplay(h.command)}</div>
               {h.output && <div style={{ whiteSpace: 'pre-wrap' }}>{h.output}</div>}
             </div>
           ))}

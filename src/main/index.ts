@@ -261,6 +261,16 @@ function ensureTray() {
   tray.on('click', () => { mainWindow?.show(); mainWindow?.focus() })
 }
 
+/**
+ * 往错误页 HTML 里插文本前的转义。实体集与 tools.ts 的 htmlToText 解码集对称
+ * （&amp; &lt; &gt; &quot; &#39;）——那边解什么，这边就转什么，不留半边。
+ */
+function escapeHtmlText(s: unknown): string {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string
+  ))
+}
+
 function createWindow() {
   const ws = loadWindowState()
   // 应用图标（out/main -> ../../build/icon.ico；便携版/asar 内同结构）
@@ -444,7 +454,23 @@ function createWindow() {
     console.log(`[renderer] ${message}`)
   })
   win.webContents.on('did-finish-load', () => console.log('[main] renderer did-finish-load'))
-  win.webContents.on('did-fail-load', (_e, code, desc) => console.log(`[main] did-fail-load ${code} ${desc}`))
+  // 加载失败：既转发诊断，也提供可重试的错误页（而不是一直卡住）。
+  // 原来这里挂了**两个** did-fail-load 监听器——一个只打日志、一个才出错页，改一个漏一个（修复波 A · 项 6），合并掉。
+  win.webContents.on('did-fail-load', (_e, code, desc, url, isMain) => {
+    console.log(`[main] did-fail-load ${code} ${desc}`)
+    if (!isMain) return
+    console.error(`[main] 加载失败 code=${code} desc=${desc}`)
+    const retry = encodeURIComponent(url)
+    // desc 来自 Chromium 的失败描述，内容不由我们控制，而这个 data: 页面是加载进**特权窗口**的：
+    // 未转义插值等于把一段外部文本当 HTML 解析。url 那半边本来就编码了（encodeURIComponent +
+    // 按钮里 decodeURIComponent），desc 没有——这是本分支唯一一处往特权页面做的未转义插值。
+    const safeDesc = escapeHtmlText(desc)
+    const html = `<!doctype html><html><body style="margin:0;background:#0b0b0c;color:#f7f2e8;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
+      <div style="font-size:18px">界面加载失败</div><div style="opacity:.6;font-size:13px">${safeDesc}</div>
+      <button onclick="location.href=decodeURIComponent('${retry}')" style="padding:10px 24px;border:0;border-radius:8px;background:#b45309;color:#fff;font-size:14px;cursor:pointer">重试</button>
+    </body></html>`
+    win.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+  })
   win.webContents.on('render-process-gone', (_e, details) => console.log(`[main] render-process-gone: ${details.reason}`))
 
   // 截图验证模式
@@ -475,17 +501,7 @@ function createWindow() {
     })
   }
 
-  // 加载失败时提供可重试的错误页，而不是一直卡住
-  win.webContents.on('did-fail-load', (_e, code, desc, url, isMain) => {
-    if (!isMain) return
-    console.error(`[main] 加载失败 code=${code} desc=${desc}`)
-    const retry = encodeURIComponent(url)
-    const html = `<!doctype html><html><body style="margin:0;background:#0b0b0c;color:#f7f2e8;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
-      <div style="font-size:18px">界面加载失败</div><div style="opacity:.6;font-size:13px">${desc}</div>
-      <button onclick="location.href=decodeURIComponent('${retry}')" style="padding:10px 24px;border:0;border-radius:8px;background:#b45309;color:#fff;font-size:14px;cursor:pointer">重试</button>
-    </body></html>`
-    win.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
-  })
+  // 加载失败的可重试错误页已并入上面那一个 did-fail-load 监听器（原来这里是第二个，重复且只改得到一半）
 
   if (devServerUrl) {
     win.loadURL(devServerUrl)
