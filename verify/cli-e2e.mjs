@@ -193,7 +193,10 @@ const main = async () => {
     try { proc.kill() } catch { /* noop */ }
     await sleep(800)
   }
-  console.log(`\n==== 结果：${passed} 通过 / ${failed} 失败 ====`)
+  // 修复波 B · 项 1c 同类：本套件原来打的是「N 通过 / M 失败」，run-all 的 PASS_RE
+  // （`结果：N PASS / M FAIL`）匹配不上 → 计数显示 `-/-`，只按退出码判。措辞对齐成同一口径，
+  // 计数与判定逻辑一字未改（红还是红，只是现在看得见几条过几条败）。
+  console.log(`\n==== 结果：${passed} PASS / ${failed} FAIL ====`)
   process.exit(failed === 0 ? 0 : 1)
 }
 

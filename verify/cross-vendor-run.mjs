@@ -29,6 +29,13 @@ const main = async () => {
   const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
   let cdp
   let failed = 0
+  let passed = 0
+  // 修复波 B · 项 1c 同类：只 ++failed 的套件在 run-all 里是 `-/-`。补一个同口径的计数行，
+  // 语义一字未改（原来 failed++ 的两处现在还是失败，throw 那道前置闸门也原样保留）。
+  const check = (name, cond, detail) => {
+    if (cond) { passed++; console.log('  ✓ ' + name) }
+    else { failed++; console.log('  ✗ ' + name + (detail ? ' — ' + detail : '')) }
+  }
   try {
     const page = await waitHttp(PORT, 25000)
     cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -45,8 +52,10 @@ const main = async () => {
     const chips = await js(cdp, `[...document.querySelectorAll('.cfg-chip')].map((e) => e.innerText.replace(/\\s+/g, ' ').trim())`)
     console.log('配置条：', JSON.stringify(chips))
     if (!/deepseek/.test(chips?.[0] ?? '') || !/CodeBuddy/.test(chips?.[1] ?? '') || !/Codex/.test(chips?.[2] ?? '')) {
+      check('三角色配置与预期相符（跑真任务前的闸门）', false, JSON.stringify(chips)?.slice(0, 200))
       throw new Error('三角色配置与预期不符，先不要跑')
     }
+    check('三角色配置与预期相符（跑真任务前的闸门）', true)
 
     console.log('\n启动任务：', GOAL)
     await js(cdp, `void window.__ahub_debug.startDemoTask(${JSON.stringify(GOAL)})`)
@@ -88,8 +97,8 @@ const main = async () => {
         console.log('\n卡片内容：')
         for (const t of texts ?? []) console.log('  ·', t.slice(0, 240))
         console.log('\n卡片明细：', JSON.stringify(final.run.cardDetails, null, 1))
-        if (final.run.status !== 'completed') failed++
-        if (!sawGate) { console.log('（未出现人工确认门）'); failed++ }
+        check('跑到 completed（终态不是 failed/cancelled/timeout/…）', final.run.status === 'completed', final.run.status)
+        check('出现过人工确认门（reviewMode=human 的那一半）', sawGate, '（未出现人工确认门）')
         break
       }
       if (Date.now() - t0 > 15 * 60 * 1000) throw new Error('超时（15 分钟）')
@@ -103,6 +112,7 @@ const main = async () => {
     try { proc.kill() } catch { /* noop */ }
     await sleep(800)
   }
+  console.log(`\n结果：${passed} PASS / ${failed} FAIL`)
   console.log(failed === 0 ? '\n==== 跑通 ====' : '\n==== 未跑通 ====')
   process.exit(failed === 0 ? 0 : 1)
 }

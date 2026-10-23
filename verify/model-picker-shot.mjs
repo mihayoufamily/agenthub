@@ -20,7 +20,10 @@ const main = async () => {
   const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
   let cdp
   let failed = 0
-  const check = (n, ok, d) => { if (ok) console.log('  ✓ ' + n); else { failed++; console.log('  ✗ ' + n + (d ? ' — ' + d : '')) } }
+  let passed = 0
+  // 修复波 B · 项 1c 同类：✓/✗ 之外要有 `结果：N PASS / M FAIL`，run-all 才拿得到计数
+  // （实测基线 3 条 check；本文件 check() 调用点共 3 处）。
+  const check = (n, ok, d) => { if (ok) { passed++; console.log('  ✓ ' + n) } else { failed++; console.log('  ✗ ' + n + (d ? ' — ' + d : '')) } }
   try {
     const page = await waitHttp(PORT, 25000)
     cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -72,6 +75,7 @@ const main = async () => {
     try { proc.kill() } catch { /* noop */ }
     await sleep(800)
   }
+  console.log(`\n结果：${passed} PASS / ${failed} FAIL`)
   process.exit(failed === 0 ? 0 : 1)
 }
 

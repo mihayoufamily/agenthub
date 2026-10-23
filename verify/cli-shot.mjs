@@ -19,6 +19,13 @@ const main = async () => {
   mkdirSync(OUT, { recursive: true })
   const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
   let cdp
+  // 修复波 B · 项 1c：纯截图套件此前一条计数都不打印，run-all 只能报 `-/-`——
+  // "跑没跑过、跑到第几步"在汇总里完全隐形（项 2 要开"没打印计数即 FAIL"，所以先把口径补齐）。
+  // 下面把它本来就用 throw 表达的四道里程碑改成**记账**：throw 一条都没去掉，条件不成立照样中断，
+  // 只是现在每过一道会在汇总行里数进去。
+  let passed = 0
+  let failed = 0
+  const step = (name) => { passed++; console.log('  ✓ ' + name) }
   try {
     const page = await waitHttp(PORT, 25000)
     cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -26,6 +33,7 @@ const main = async () => {
     await cdp.send('Runtime.enable')
 
     if (!(await waitJs(cdp, '!!window.__ahub_debug', 25000))) throw new Error('页面未就绪')
+    step('页面就绪（__ahub_debug 可用）')
     await js(cdp, 'window.__ahub_debug.brand()')
     await sleep(800)
     await js(cdp, 'window.__ahub_debug.workbench()')
@@ -39,6 +47,7 @@ const main = async () => {
       return true
     })()`)
     if (!opened) throw new Error('未找到「添加 Agent」按钮')
+    step('「添加 Agent」按钮存在并可点')
     await sleep(800)
     const switched = await js(cdp, `(() => {
       const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '本机 CLI')
@@ -47,12 +56,15 @@ const main = async () => {
       return true
     })()`)
     if (!switched) throw new Error('未找到「本机 CLI」页签')
+    step('「本机 CLI」页签存在并可切到')
     await sleep(2000) // 等连接测试结果回填
 
     const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
     writeFileSync(resolve(OUT, 'cli-tab.png'), Buffer.from(shot.data, 'base64'))
     console.log('已保存：' + resolve(OUT, 'cli-tab.png'))
+    step('cli-tab.png 已落盘')
   } catch (e) {
+    failed++
     console.error('失败：' + e.message)
     process.exitCode = 1
   } finally {
@@ -60,6 +72,7 @@ const main = async () => {
     try { proc.kill() } catch { /* noop */ }
     await sleep(800)
   }
+  console.log(`\n结果：${passed} PASS / ${failed} FAIL`)
 }
 
 void main()

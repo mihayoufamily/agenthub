@@ -20,8 +20,13 @@ const main = async () => {
   const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
   let cdp
   let failed = 0
+  let passed = 0
+  // 修复波 B · 项 1c：本套件原来只打 ✓/✗、没有 `结果：N PASS / M FAIL` 汇总行，
+  // run-all 的解析（PASS_RE）拿不到数 → 显示 `-/-`、只按退出码判"过没过"。
+  // 项 2 要开"没打印计数即 FAIL"这条规则，所以**先**把汇总行补齐（顺序不能反，否则这条好使的
+  // 套件会被新规则自己打死）。实测基线：7 条 check（本文件里 check() 调用点共 7 处）。
   const check = (name, cond, detail) => {
-    if (cond) console.log('  ✓ ' + name)
+    if (cond) { passed++; console.log('  ✓ ' + name) }
     else { failed++; console.log('  ✗ ' + name + (detail ? ' — ' + detail : '')) }
   }
   try {
@@ -79,6 +84,9 @@ const main = async () => {
     try { proc.kill() } catch { /* noop */ }
     await sleep(800)
   }
+  // 汇总行放在 finally 之后：中途抛错也要把"跑到第几条、过了几条"打出来，
+  // 否则 run-all 只看得见"崩了"，看不见断言数掉了（项 2 的下限就无从判起）。
+  console.log(`\n结果：${passed} PASS / ${failed} FAIL`)
   process.exit(failed === 0 ? 0 : 1)
 }
 
