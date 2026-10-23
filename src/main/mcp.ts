@@ -79,7 +79,15 @@ export function planSpawn(server: McpServer): SpawnPlan {
     throw new Error('MCP server 没有启动命令')
   }
   // 参数一律要真是字符串：手改成 [1, '--x'] 这种不能静默过滤掉（配置会悄悄变形）
+  // 容器本身也一样（修复波 A · 项 5）：`Array.isArray(declared) ? declared : []` 会把
+  // launch.args = '--x' 静默当**空数组**，而下面两行对数组里的非字符串元素是抛错的——
+  // 判定不对称的后果是 mcp:probe（渲染层原样传来的对象，不过 sanitizeMcpList）悄悄丢光参数，
+  // 去探测一条与用户配置**不同**的命令，"连接并查看工具"看到的结果因此不可信。
+  // 键不存在（undefined）才算"没声明参数"；写了值却不是数组，与元素不是字符串同一口径：拒收。
   const declared = server.launch?.args
+  if (declared !== undefined && !Array.isArray(declared)) {
+    throw new Error(`MCP launch.args 不是数组（${typeof declared}：${String(declared).slice(0, 60)}），已拒收：参数必须是字符串数组，不替你猜着拆`)
+  }
   const rawArgs: unknown[] = Array.isArray(declared) ? declared : []
   const badIdx = rawArgs.findIndex((a) => typeof a !== 'string')
   if (badIdx >= 0) throw new Error(`MCP launch.args 第 ${badIdx} 个是非字符串项（${String(rawArgs[badIdx])}），已拒收：参数必须全是字符串`)

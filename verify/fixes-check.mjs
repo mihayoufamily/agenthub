@@ -1245,6 +1245,32 @@ console.log('\n[X] MCP planSpawn：argv 直传；npm 家族经 cmd.exe 但参数
   const ns = throwsWith({ id: 'ns', name: 'NS', command: '', formatVersion: 2, launch: { bin: node, args: [1, '--x'] } }, '非字符串')
   ok('launch.args 含非字符串项时如实拒收而不是静默过滤', ns.threw && ns.hit, ns.msg)
 
+  // ---- 修复波 A · 项 5：容器与元素的判定不对称（Ruling C 只做了一半）----
+  // 旧写法 `Array.isArray(declared) ? declared : []` 把**非数组的 launch.args 静默当空数组**，
+  // 而紧接着那两行对数组里的非字符串**元素**抛错。后果：mcp:probe（ipc.ts）拿到的是渲染层
+  // 原样传来的对象、不过 sanitizeMcpList，于是 launch.args = '--x' 会被悄悄丢参数，
+  // 探测的是一条与用户配置**不同**的命令（"连接并查看工具"看到的结果因此不可信）。
+  const strArgs = throwsWith({ id: 'sa', name: 'SA', command: '', formatVersion: 2, launch: { bin: node, args: '--x' } }, '不是数组')
+  ok('launch.args 是字符串时如实拒收（容器检查与元素检查同一口径），不再静默当 [] 丢掉全部参数',
+    strArgs.threw && strArgs.hit, strArgs.msg)
+  ok('launch.args 是对象/数字/布尔/null 这类非数组值时同样拒收',
+    ['--x', 5, true, { 0: '--x' }, null].every((bad) => {
+      const r = throwsWith({ id: 'oa', name: 'OA', command: '', formatVersion: 2, launch: { bin: node, args: bad } }, '不是数组')
+      return r.threw && r.hit
+    }),
+    JSON.stringify(['--x', 5, true, { 0: '--x' }, null].map((bad) => throwsWith({ id: 'oa', name: 'OA', command: '', formatVersion: 2, launch: { bin: node, args: bad } }, '不是数组').msg.slice(0, 60))))
+  ok('launch.args 缺失（键不存在）仍按"没有参数"处理，不误伤常规配置',
+    (() => {
+      const p = mc.planSpawn({ id: 'na', name: 'NA', command: '', formatVersion: 2, launch: { bin: node } })
+      return p.comspec === false && Array.isArray(p.args) && p.args.length === 0
+    })(), JSON.stringify(mc.planSpawn({ id: 'na', name: 'NA', command: '', formatVersion: 2, launch: { bin: node } })))
+  ok('容器检查排在 comspec 判定之前：.cmd 家族也不会拿一个被丢空的参数表去拼命令行',
+    throwsWith({ id: 'cb', name: 'CB', command: '', formatVersion: 2, launch: { bin: 'nope.cmd', args: '-y pkg' } }, '不是数组').threw)
+  // probe 那条路（渲染层原样传来的对象，不过 sanitizeMcpList）也必须拒收，而不是去起一条别的命令
+  const strArgsProbe = await mc.probeServer({ id: 'sa2', name: 'SA2', command: '', formatVersion: 2, launch: { bin: 'nope-does-not-exist.exe', args: '--x' } })
+  ok('mcp:probe 走同一条判定：args 不是数组时报错，而不是当空参数去起一条与配置不同的命令',
+    strArgsProbe.ok === false && String(strArgsProbe.message).includes('不是数组'), strArgsProbe.message)
+
   // ---- 评审 Ruling A：comspec 那条命令行必须拒绝式构造（下面是评审复现的两个逃逸）----
   // 哨兵是 inert 的 `type nul > <临时目录>/pwnedN.txt`：只写出空文件，目录跑完就删；不用 calc、不做破坏性动作
   const hdir = mkdtempSync(join(tmpdir(), 'ahub-comspec-'))
