@@ -61,7 +61,10 @@ function comspecToken(tok: string): string {
 }
 
 /**
- * 把配置换算成一次 spawn 的入参与选项（纯裁决，逻辑层可直接断言，不真起进程）。
+ * 把配置换算成一次 spawn 的入参与选项（裁决是纯的：不起进程、不碰文件系统，逻辑层可直接断言。
+ * 唯一的环境读取是下面那行的 `process.env.ComSpec`——cmd.exe 的路径本来就由 Windows 决定，
+ * 写死 C:\Windows\System32 反而在改过 ComSpec 的机器上起错进程；所以"纯"指的是**决策**纯，
+ * 不是"一个 env 都不读"（评审 Task 3 ⑮：措辞原先说满了，行为是有意的，这里只把话讲准）。
  * 三种结果：
  * ① 有 launch 且不属 cmd 家族 → argv 数组直传，完全不经 cmd；
  * ② 只有旧 command → 抛 legacy 错误码，等用户重填（不猜拆，也不删记录）；

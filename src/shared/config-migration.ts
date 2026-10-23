@@ -18,6 +18,11 @@ export interface McpConfigShape {
  */
 export function migrateV1toV2(raw: McpConfigShape): McpConfigShape {
   const out: McpConfigShape = { ...raw }
+  // 只在**真是数组**时才逐条盖章；不是数组（undefined / 对象 / 字符串）就原样透传，不替它编一个 []。
+  // 这是有意的：`mcpServers === undefined` 意味着这份配置压根没有 MCP 这一段，迁移层把它变成 []
+  // 会凭空写出一段"用户删过所有 server"的语义；消费方（mcp:list / 设置页 / ipc.ts 挑 server）
+  // 各自负责挡脏数据。已被 fixes-check [W] 断言钉住（`没有 mcpServers 的旧配置照样能迁移，不抛异常`
+  // + `null / 字符串 / 数字元素原样透传…`），评审 Task 2 ⑩ 要的是把这条意图写在这儿。
   if (Array.isArray(raw.mcpServers)) {
     out.mcpServers = raw.mcpServers.map((s) => {
       // 脏数据（config.json 被手改过、或被更早的版本写坏）原样透传：

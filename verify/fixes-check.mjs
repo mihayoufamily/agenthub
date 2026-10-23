@@ -1071,7 +1071,11 @@ console.log('\n[V] argv：引号感知切分与 .cmd 家族判定')
   ok('引号不成对时把已读内容当一段交出不吞字符', av.tokenizeCommand('node "a b').join('|') === 'node|a b', JSON.stringify(av.tokenizeCommand('node "a b')))
   ok('.cmd 判定大小写不敏感', av.needsComspec('NPM.CMD') === true && av.needsComspec('npx.cmd') === true)
   ok('.bat 也算 .cmd 家族', av.needsComspec('x.BaT') === true)
-  ok('.exe / 裸名不算（不该白绕一层 comspec）', av.needsComspec('node.exe') === false && av.needsComspec('node') === false)
+  // 评审 Task 1 ⑤：原标签写的是「.exe / **裸名**不算」，半假——裸名 npx/npm/pnpm/yarn 恰恰**算**
+  // （下面那条 yesFamily 就是钉这个的），needsComspec 判的是"扩展名 + npm 家族"，不是"是不是裸名"。
+  // 按"只改标签、不改行为"处理：用例两个输入（node.exe / node）与期望值一字未动。
+  ok('.exe 与不在 npm 家族的名字不算（判据是扩展名 + npm 家族，不是"是不是裸名"；不该白绕一层 comspec）',
+    av.needsComspec('node.exe') === false && av.needsComspec('node') === false)
   ok('无扩展名不算', av.needsComspec('server') === false)
   // 以下 3 条为评审后补：toLaunchPlan 此前零覆盖；裸 npx 走 shell:false 在 Windows 必 ENOENT
   const pEmpty = av.toLaunchPlan('""')
@@ -1103,7 +1107,11 @@ console.log('\n[V] argv：引号感知切分与 .cmd 家族判定')
     typeof av.cmdUnsafeReason === 'function'
       ? `""→${av.cmdUnsafeReason('')}  npm.cmd→${av.cmdUnsafeReason('C:\\Program Files\\nodejs\\npm.cmd')}`
       : 'cmdUnsafeReason 不存在')
-  ok('comspec 拒绝规则只有一处定义：mcp.ts 与设置页都调 argv 的 cmdUnsafeReason',
+  // 评审 Task 4 ㉗：原名字承诺"**只有一处**定义"，实际做的是在两个文件里 grep 标识符在场——
+  // 第三份私有副本（比如某处又抄了一个 comspecToken/cmdUnsafe 的局部函数）它看不见。
+  // 行为面已由 [X] 段（planSpawn 真跑拒绝）与真机层覆盖，所以这是 mislabel 而不是漏洞，
+  // 按便宜的那条选：把名字改成它真做的事，不扩成真正的单一定义检查。
+  ok('comspec 拒绝规则的调用点绊线：mcp.ts 与设置页两个文件里都真的引用了 argv 的 cmdUnsafeReason（只查在场，不查全仓唯一定义）',
     /cmdUnsafeReason/.test(readFileSync(new URL('../src/main/mcp.ts', import.meta.url), 'utf-8')) &&
       /cmdUnsafeReason/.test(readFileSync(new URL('../src/renderer/src/features/SettingsPage.tsx', import.meta.url), 'utf-8')))
 }
@@ -1118,21 +1126,33 @@ console.log('\n[W] migrateV1toV2：legacy MCP 标失效、sandboxFallback 补默
       { id: 'old', name: '旧版', command: '"C:\\Program Files\\nodejs\\node.exe" s.js', enabled: true },
       // enabled 显式写 true：与 old 同一起跑线，才看得出"旧的一律禁用、launch 完好的原样放过"
       { id: 'new', name: '新版', command: 'node s.js', launch: { bin: 'node', args: ['s.js'] }, enabled: true, formatVersion: 2 },
-      { id: 'blank', name: '空壳', command: '  ', launch: { bin: '', args: [] }, formatVersion: 2 }
+      { id: 'blank', name: '空壳', command: '  ', launch: { bin: '', args: [] }, formatVersion: 2 },
+      // 评审 Task 2 ⑪：上面那条「已有 launch 的记录原样放过且清掉失效标记」原先**没有牙**——
+      // `new` 这条输入根本没带 legacyInvalid，清不清除逻辑都是 false，删掉 `legacyInvalid: false`
+      // 那句照样全绿。这里补一条**带着过期标记**的记录：launch 完好但 config 里写着
+      // legacyInvalid:true / enabled:false（v0.3.x 误盖过章的现实形态），清除路径这才真的有输入走通。
+      { id: 'stale', name: '带过期标记', command: 'node s.js', launch: { bin: 'node', args: ['s.js'] }, legacyInvalid: true, enabled: false, formatVersion: 2 }
     ]
   }
   const out1 = cm.migrateV1toV2(JSON.parse(JSON.stringify(base)))
   const old = out1.mcpServers.find((s) => s.id === 'old')
   const neu = out1.mcpServers.find((s) => s.id === 'new')
   const blank = out1.mcpServers.find((s) => s.id === 'blank')
+  const stale = out1.mcpServers.find((s) => s.id === 'stale')
   // 评审后补：把"绝不删记录"写成断言——记录万一被弄丢，下面那些 old.xxx 解引用会当场抛异常，
   // 整个套件会在打印"结果："之前就崩掉，需求本身反倒没被测试表达过。
-  ok('三条记录一条都没被删（迁移只改标记不删条目）', !!old && !!neu && !!blank,
-    `old=${!!old} new=${!!neu} blank=${!!blank}`)
+  ok('四条记录一条都没被删（迁移只改标记不删条目）', !!old && !!neu && !!blank && !!stale,
+    `old=${!!old} new=${!!neu} blank=${!!blank} stale=${!!stale}`)
   ok('只有 command 无 launch 的旧记录被标失效', old?.legacyInvalid === true, JSON.stringify(old))
   ok('标失效同时被禁用（免得界面还显示成可用）', old?.enabled === false)
   ok('标失效不删除记录（重填时名字与原命令还在）', old?.name === '旧版' && (old?.command ?? '').includes('node.exe'))
   ok('已有 launch 的记录原样放过且清掉失效标记', neu?.legacyInvalid === false && neu?.launch?.bin === 'node' && neu?.enabled === true, JSON.stringify(neu))
+  // 评审 Task 2 ⑪ 的有牙版：这条的输入**带** legacyInvalid:true，清除逻辑被删掉就红
+  // （上面那条对同一个删除动作是恒真的）。enabled 仍留 false——开关本来就由用户控制，
+  // 迁移层不替他打开任何东西（最终评审判"不是缺陷/defer"，这里把它如实钉成契约）。
+  ok('带过期标记但 launch 完好的记录：清除路径真的跑通（legacyInvalid 从 true 变 false），不替用户恢复 enabled',
+    stale?.legacyInvalid === false && stale?.launch?.bin === 'node' && stale?.enabled === false,
+    JSON.stringify(stale))
   ok('launch.bin 为空串也算旧格式（不认字段存在就当可用）', blank?.legacyInvalid === true && blank?.enabled === false)
   ok('sandboxFallback 缺省补 auto（老环境不至于突然开不了机）', out1.sandboxFallback === 'auto', String(out1.sandboxFallback))
   ok('已声明 ask 的策略不被改写', cm.migrateV1toV2({ sandboxFallback: 'ask' }).sandboxFallback === 'ask')
@@ -1181,6 +1201,19 @@ console.log('\n[W2] importConfig 保字段')
   ok('store.ts 的 importConfig 改走 normalizeImported，且不再各写各的版本号',
     wired && storeJs.includes('SCHEMA_HEAD') && !storeJs.includes('CURRENT_SCHEMA_VERSION'),
     `importConfig→normalizeImported=${wired} 用 SCHEMA_HEAD=${storeJs.includes('SCHEMA_HEAD')} 旧常量残留=${storeJs.includes('CURRENT_SCHEMA_VERSION')}`)
+  // 评审 Task 2 ⑭：migrateV0toV1 里 `workflowDefaults` 的**逐字段合并**此前一条断言都没有——
+  // 把 `{ ...defaultWorkflowDefaults, ...oldWd }` 改回整份替换（`workflowDefaults: oldWd`）或重新拼
+  // 字面量，v0 配置里已有的 reviewMode/maxRounds/timeoutMin 会整片丢掉而全绿。
+  // migrateV0toV1 是 store.ts 的模块私有函数，而 store.ts 顶层 `import { app } from 'electron'`
+  // （逻辑层起不了 electron，也不能 import 它——见 [Z] 段那条 tripwire），所以这里打的是**源码绊线**，
+  // 与 [Z3]/[T] 段同一口径：防"改回去没人管"，不等于行为证明。三条合取都真的是文本检查。
+  const storeTs = readFileSync(new URL('../src/main/store.ts', import.meta.url), 'utf-8')
+  const wdMerge = /workflowDefaults:\s*\{\s*\.\.\.defaultWorkflowDefaults\s*,\s*\.\.\.oldWd\s*\}/.test(storeTs)
+  const defaultsTable = /const defaultWorkflowDefaults[\s\S]{0,400}?plannerAgentId:[\s\S]{0,400}?reviewMode:[\s\S]{0,400}?maxRounds:[\s\S]{0,400}?budgetYuan:/.test(storeTs)
+  const noWholeReplace = !/workflowDefaults:\s*oldWd\s*[,}]/.test(storeTs)
+  ok('migrateV0toV1 的 workflowDefaults 是逐字段合并（默认表铺开在前、用户值覆盖在后），不是整份替换；默认表含 planner/review/maxRounds/budget 四组键',
+    wdMerge && defaultsTable && noWholeReplace,
+    `合并式=${wdMerge} 默认表全键=${defaultsTable} 无整份替换写法=${noWholeReplace}`)
 }
 
 // ---------- X. MCP 起进程：argv 直传、旧格式拒绝、comspec 分支拒绝 cmd 语法 ----------

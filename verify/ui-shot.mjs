@@ -401,8 +401,24 @@ const main = async () => {
       `${JSON.stringify(wfMinAudit.issues?.slice(0, 4))} 视口/内容列/composer=${JSON.stringify(wfMinBox)}`)
     await cdp.send('Emulation.clearDeviceMetricsOverride')
     await sleep(400)
+    // ---- 修复波 B · 项 3 第一条：既有的 `工作流首页无横向溢出` 原先拿"用户上次把窗口拖多大"
+    // 当被测宽度（波 A §11.4 实测：在坏掉的 92vw 构建上它是**过的**，抓到缺陷的是上面那条 960×720）。
+    // 二选一里选 ①：把它也钉到显式视口——但用**默认窗宽 1280×800**（src/main/index.ts:86 的 fallback
+    // 就是这个数），不与 960 那条合成同一件事：960 守"应用自身最小宽度"，这条守"默认/常用宽度不回归"，
+    // 两档各自可复现。断言本体（layoutAudit 的 total===0）一字未改，也没缩成"只量 scrollWidth"，
+    // 只是被测宽度从"随用户窗口漂移"变成"钉死"，并同样要求 composer 在场（不满足前提的绿不算测到）。
+    await setViewport(1280, 800)
     const wfAudit = await layoutAudit()
-    ok('工作流首页无横向溢出', wfAudit.total === 0, JSON.stringify(wfAudit.issues?.slice(0, 4)))
+    const wfWideBox = await js(cdp, `(() => {
+      const s = document.querySelector('.screen.workflow')
+      const c = document.querySelector('.wf-composer-wrap')
+      return { vw: document.documentElement.clientWidth, screen: s ? { clientWidth: s.clientWidth, scrollWidth: s.scrollWidth } : null, composer: c ? Math.round(c.getBoundingClientRect().width) : null }
+    })()`)
+    ok('工作流首页无横向溢出（显式定视口 1280×800 · 默认窗宽档，不是"用户上次拖多宽"）',
+      wfWideBox.composer != null && wfAudit.total === 0,
+      `${JSON.stringify(wfAudit.issues?.slice(0, 4))} 视口/内容列/composer=${JSON.stringify(wfWideBox)}`)
+    await cdp.send('Emulation.clearDeviceMetricsOverride')
+    await sleep(400)
     const saved = await js(cdp, `(() => {
       const el = document.querySelector('.wf-saved')
       if (!el) return { present: false }
