@@ -1401,6 +1401,28 @@ console.log('\n[Z] decideFallback / compatBadgeText / 验证门控闸门')
     !settingsSrc.includes('保存降级策略失败：主进程没有回应'))
 }
 
+// ---------- Z2. Hook 命令指纹：能肉眼比对，但不泄露 token，也不参与放行（Task 7）----------
+// Hook 的信任模型是"配了就是授权了、不逐条问"，所以界面上必须能一眼认出"这条命令还是不是我写的那条"。
+// 指纹是非加密散列（shared 层要在纯 node 与渲染两端同构可用），只做显示，绝不进 checkCommand 的判定链；
+// 显示前先脱敏，因为 Hook 命令常有人直接写 --api-key=...，而 Hook 行是普通文本框，旁边回显什么就都看得见。
+console.log('\n[Z2] Hook 命令指纹与脱敏')
+{
+  const ap = await import('../out/shared/approvals.js')
+  const bannedImport = /(^|\n)\s*import[^;]*from\s+['"](?:node:)?(?:electron|fs(?:\/promises)?)['"]/
+  ok('redactSecrets / fingerprintCommand 已导出，且 shared/approvals.ts 不 import electron/fs（渲染进程敢直接引）', (() => {
+    if (typeof ap?.redactSecrets !== 'function' || typeof ap?.fingerprintCommand !== 'function') return false
+    try { return !bannedImport.test(readFileSync(new URL('../src/shared/approvals.ts', import.meta.url), 'utf-8')) } catch { return false }
+  })())
+  ok('归一后指纹稳定（空白/大小写不影响）', ap.fingerprintCommand('FOO  BAR') === ap.fingerprintCommand('foo bar'))
+  ok('不同命令指纹不同', ap.fingerprintCommand('a.exe') !== ap.fingerprintCommand('b.exe'))
+  ok('长度适合界面显示', ap.fingerprintCommand('node x.js').length === 12 && /^[a-z0-9]+$/.test(ap.fingerprintCommand('node x.js')), ap.fingerprintCommand('node x.js'))
+  ok('API_KEY=xxx 被遮成前缀+省略号', !ap.redactSecrets('node x.js --api-key=abcdef0123456789').includes('abcdef0123456789'), ap.redactSecrets('node x.js --api-key=abcdef0123456789'))
+  ok('Bearer token 也遮', !ap.redactSecrets('curl -H "Authorization: Bearer ghp_abcdefghijklmnop"').includes('ghp_abcdefghijklmnop'))
+  ok('普通命令脱敏后原样可读', ap.redactSecrets('npm run build') === 'npm run build')
+  ok('空串不抛异常', ap.fingerprintCommand('') === ap.fingerprintCommand('') && ap.redactSecrets('') === '')
+  ok('指纹与危险形态判定互不影响（判定仍走 checkCommand）', ap.checkCommand('rm -rf x', ['rm -rf x']).allowed === false)
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

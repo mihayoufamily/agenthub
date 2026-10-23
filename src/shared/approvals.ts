@@ -107,3 +107,27 @@ export function checkCommand(command: string, rules: string[]): CommandVerdict {
 export function rulesToAdd(uncovered: string[]): string[] {
   return Array.from(new Set(uncovered.map((s) => normalizeCommand(s)).filter(Boolean)))
 }
+
+/**
+ * 遮掉看起来像凭据的片段。Hook 命令常有人直接写 `--api-key=...`，
+ * 界面回显与账本都会带上它，指纹显示前必须先脱敏。
+ */
+export function redactSecrets(s: string): string {
+  return (s ?? '')
+    .replace(/((?:api[_-]?key|token|secret|password|passwd|pwd)[=\s]+)([^\s"']{4,})/gi, '$1***')
+    .replace(/(Bearer\s+)([A-Za-z0-9._\-]{6,})/gi, '$1***')
+}
+
+/** 12 位指纹：只给人肉眼比对"这条命令变没变过"，不参与任何放行判定 */
+export function fingerprintCommand(s: string): string {
+  const base = normalizeCommand(redactSecrets(s))
+  // 与项目里其它 id 生成同思路：不用 crypto（shared 层要在纯 node 与浏览器两端同构可用）
+  let h1 = 0x811c9dc5
+  let h2 = 0x1000193
+  for (let i = 0; i < base.length; i++) {
+    h1 = (h1 ^ base.charCodeAt(i)) >>> 0
+    h1 = Math.imul(h1, 0x01000193) >>> 0
+    h2 = (Math.imul(h2 ^ base.charCodeAt(i), 0x85ebca6b)) >>> 0
+  }
+  return (h1.toString(36) + h2.toString(36)).slice(0, 12).padEnd(12, '0')
+}
