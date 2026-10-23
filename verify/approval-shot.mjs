@@ -1,11 +1,14 @@
 // 命令审批真机验证：没批准就绝不该跑起来，批准之后才跑，危险形态点了"始终允许"也不写白名单。
 // 用法：node verify/approval-shot.mjs [--port=9236]
 // 走 tools:exec 这条入口（同一套审批闸门），不碰用户的 Agent 配置与白名单。
-import { spawn } from 'node:child_process'
+// 启动带 --ahub-verify：config:importJson（整份导入通道）只在主进程 argv 有这个验证开关时才注册
+// （评审修复4），第 9/10 节的导入往返依赖它；第 11 节会不带开关重启一次，反证通道确实没注册。
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import http from 'node:http'
 import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
 
 // 被测 server 用绝对路径：应用进程的 cwd 不是脚本的 cwd
@@ -16,6 +19,40 @@ const argv = Object.fromEntries(process.argv.slice(2).map((a) => {
   return m ? [m[1], m[2]] : [a.replace(/^--/, ''), true]
 }))
 const PORT = Number(argv.port ?? 9236)
+
+/** 等 AgentHub.exe 退干净：单实例锁下残留进程会让第二个实例秒退（run-all 里同样的坑） */
+function waitAppGone(timeoutMs = 30000) {
+  const t0 = Date.now()
+  const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  for (;;) {
+    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq AgentHub.exe', '/NH'], { encoding: 'utf-8' })
+    if (!/AgentHub\.exe/i.test(r.stdout ?? '')) return true
+    if (Date.now() - t0 > timeoutMs) return false
+    sleepMs(400)
+  }
+}
+
+// [10] 要驱动一次真 model:chat（MCP 首次连接信任弹窗在 chat 装配线上才会问人）：
+// 本地 mock OpenAI 兼容服务，与 ui-shot 同款最小形状——GET /models 供连接测试，
+// POST /chat/completions 流一段正文后收尾。
+const mockLlm = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url.endsWith('/models')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ data: [{ id: 'mock-model' }] }))
+    return
+  }
+  if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '好' } }] })}\n\n`)
+    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n`)
+    res.write('data: [DONE]\n\n')
+    res.end()
+    return
+  }
+  res.writeHead(404).end('{}')
+})
+await new Promise((r) => mockLlm.listen(0, '127.0.0.1', r))
+const llmBase = `http://127.0.0.1:${mockLlm.address().port}/v1`
 
 let pass = 0
 let fail = 0
@@ -43,7 +80,7 @@ let cdpRef = null
 // 开发者的配置不留测试态（照本套件对审批历史"先快照、后还原"的约定办，只是这份更大）
 let cfgFile = null
 let configSnapshot = null
-const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
+let proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
 try {
   const page = await waitHttp(PORT, 30000)
   const cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -195,13 +232,74 @@ try {
   const viaShell = await js(cdp, '!!document.querySelector(\'[data-testid="mcp-via-shell"]\')')
   ok('表单实时预演 argv，并如实标注 .cmd 家族要经 cmd 包一层（不冒充纯 argv 直传）',
     previewText.includes('npx.cmd') && previewText.includes('@scope/pkg') && viaShell === true, previewText.slice(0, 160))
-  // 注意取值：tokenizeCommand 会把引号剥掉，表单里构造不出含 " 的 token；
-  // % 能活着切进 argv（cmd 引号内也展开），是表单这一侧真实可达的拒收样本
+  // 表单侧真实可达的两类被拒 token：% 能活着切进 argv（cmd 引号内也展开）；" 同样能——
+  // tokenizeCommand 在单引号区内原样保留另一种引号（argv.ts:32-37），npx.cmd -y 'a"b' 会切出
+  // 含 " 的 token 命中 cmdUnsafeReason 分支①。（上一轮"表单里构造不出含 \" 的 token"的注释是错的，
+  // 评审实测推翻：该形态可达，这里把它补成端到端样本，不再只靠逻辑层钉。）
   await typeInto(`'npx.cmd --tag=%USERPROFILE%'`)
   await sleep(250)
   const unsafeText = String(await js(cdp, `document.querySelector('[data-testid="mcp-cmd-unsafe"]')?.textContent ?? ''`))
   ok('保存前就把拒收规则写在界面上：点名是哪个 token、为什么（不必等保存后静默连不上）',
     unsafeText.includes('--tag=%USERPROFILE%'), unsafeText.slice(0, 160))
+  await typeInto(JSON.stringify(`npx.cmd -y 'a"b'`))
+  await sleep(250)
+  const unsafeQuote = String(await js(cdp, `document.querySelector('[data-testid="mcp-cmd-unsafe"]')?.textContent ?? ''`))
+  ok('含 " 的 token 从表单真实可达且保存前被点名拒收（单引号区保留 "，"仅逻辑层覆盖"的补链）',
+    unsafeQuote.includes('a"b'), unsafeQuote.slice(0, 200))
+
+  // ---- 评审修复3(a)：command 为空但 launch 已填的记录必须活着存进 config ----
+  // 原先这条只被 fixes-check 的 ipc.ts 源码 grep "钉"着——排版一变或行为回归，grep 照样绿。
+  // 这里改为真机写入 + 回读，mcp:set 的 launch 放行从此有行为断言。
+  await js(cdp, `window.__ahub_debug.setMcpServers([{ id:'launchonly', name:'只有launch', command:'', launch:{ bin:'node', args:['x.js'] }, formatVersion:2, enabled:true }])`)
+  await sleep(300)
+  const launchOnly = (await js(cdp, 'window.agenthub.mcp.list()')) ?? []
+  ok('command 为空、launch 已填的记录保存后仍在列表里（重填保存不再被 mcp:set 静默丢弃）',
+    launchOnly.length === 1 && launchOnly[0]?.id === 'launchonly' && launchOnly[0]?.launch?.bin === 'node',
+    JSON.stringify(launchOnly).slice(0, 220))
+
+  // ---- 评审修复1：「重填」不再在点击时就删记录+撤信任；移除推迟到新记录保存那一刻 ----
+  // 旧缺陷：点重填 → save(list.filter(...)) 把删除写进 config.json，草稿只在组件 state；
+  // McpSection 条件挂载，切分区/关设置一重挂草稿就没了，mcp:set 还顺带撤了该 id 的信任——
+  // 记录不可恢复，违反"标失效+停用、绝不删除"。新形状：重填=原文回填草稿，旧条目留在列表；
+  // 保存那一刻才被顶掉（remove-and-refill 的形状保留）。
+  await js(cdp, `window.__ahub_debug.setMcpServers([{ id:'legacy1', name:'旧版样例', command:'\\"node\\" \\"x.js\\"', enabled:true }])`)
+  await js(cdp, `window.agenthub.mcp.setTrust('legacy1', true)`)
+  await js(cdp, 'window.__ahub_debug.openSettings("mcp")')
+  await sleep(400)
+  await click('[data-testid="mcp-refill"]')
+  await sleep(300)
+  const afterRefillClick = (await js(cdp, 'window.agenthub.mcp.list()')) ?? []
+  ok('点「重填」只把原文填回草稿：旧条目仍留在 config（失效+停用），没有被立刻删除',
+    afterRefillClick.length === 1 && afterRefillClick[0]?.id === 'legacy1' && afterRefillClick[0]?.legacyInvalid === true,
+    JSON.stringify(afterRefillClick).slice(0, 220))
+  const refillDraftCmd = String(await js(cdp, `document.querySelector('[data-testid="mcp-command"]')?.value ?? ''`))
+  ok('重填把原命令塞回草稿（不保存也还能看到原文）', refillDraftCmd === '"node" "x.js"', refillDraftCmd)
+  const refillNote = String(await js(cdp, `document.querySelector('[data-testid="mcp-refill-note"]')?.textContent ?? ''`))
+  ok('界面写明后果：保存后旧条目连同它的信任授权一起删除',
+    refillNote.includes('信任授权') && refillNote.includes('删除'), refillNote.slice(0, 180))
+  // 重挂载路径（切分区/关设置的等价形态）：草稿没了可以重来，记录和信任不能没
+  await js(cdp, 'window.__ahub_debug.closeSettings()')
+  await sleep(150)
+  await js(cdp, 'window.__ahub_debug.openSettings("mcp")')
+  await sleep(400)
+  const afterRemount = (await js(cdp, 'window.agenthub.mcp.list()')) ?? []
+  const trustedAfterRemount = (await js(cdp, 'window.agenthub.mcp.trusted()')) ?? []
+  ok('重挂载后记录与信任都还在：再点一次「重填」即可继续（不再有"一毁俱毁"）',
+    afterRemount.length === 1 && afterRemount[0]?.id === 'legacy1' && trustedAfterRemount.includes('legacy1'),
+    `${JSON.stringify(afterRemount).slice(0, 160)} trusted=${JSON.stringify(trustedAfterRemount)}`)
+  // 走完整重填：再点重填 → 改命令 → 点「添加并探测」，此刻才顶掉旧条目并连带移除其信任
+  await click('[data-testid="mcp-refill"]')
+  await typeInto(`'node x.js'`)
+  await js(cdp, `(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === '添加并探测'); b?.click(); return !!b })()`)
+  await sleep(1500)
+  const afterRefillSave = (await js(cdp, 'window.agenthub.mcp.list()')) ?? []
+  const trustedAfterSave = (await js(cdp, 'window.agenthub.mcp.trusted()')) ?? []
+  ok('保存那一刻旧条目才被新记录顶掉（remove-and-refill：同 id 不双记录，草稿把名字带了过来）',
+    afterRefillSave.length === 1 && afterRefillSave[0]?.id !== 'legacy1' && afterRefillSave[0]?.name === '旧版样例' &&
+      afterRefillSave[0]?.launch?.bin === 'node' && afterRefillSave[0]?.legacyInvalid !== true,
+    JSON.stringify(afterRefillSave).slice(0, 240))
+  ok('旧条目的信任只在保存这一刻随之移除（此前一直保留）', !trustedAfterSave.includes('legacy1'),
+    JSON.stringify(trustedAfterSave))
   // 现场还原：列表回 before、信任回测前（mcp:set 会连带清掉不再存在的 id 的信任，这是它的正确行为，测试自己负责复原）
   await js(cdp, `window.__ahub_debug.setMcpServers(${JSON.stringify(before)})`)
   for (const id of trustedBefore8) await js(cdp, `window.agenthub.mcp.setTrust(${JSON.stringify(id)}, true)`)
@@ -229,6 +327,77 @@ try {
   ok('脏配置下设置页照常渲染：两条记录都看得见、旧版挂着停用横幅',
     rtBody.includes('导入旧版') && rtBody.includes('导入新版') && rtBanner === 1, rtBody.slice(0, 120))
 
+  // ---- 10. MCP 首次连接信任弹窗（评审修复3(b)：[data-approval-cmd] 不再只被 run_command 摸到）----
+  // 驱动一次真 model:chat：装配线上主进程连 MCP → 列工具 → 未信任 → 弹信任窗，标签必须是
+  // 实际执行的 bin+args（该记录 command 为空，旧写法弹的是空白标签——信任弹窗是用户看清
+  // "我到底允许了哪条命令"的唯一地方）。同时把 null 塞进 stored.mcpServers（只有真导入路径留得住，
+  // mcp:set 会滤掉）：旧代码在映射勾选 id 时于原始数组上 find((s) => s.id === id)，null 会当场
+  // TypeError 掀掉整次对话（评审修复6——!!s 过滤排在解引用之后，晚了）。
+  console.log('\n[10] MCP 首次信任弹窗：标签显示 bin+args；脏 null 不再炸掉整次对话')
+  await js(cdp, 'window.__ahub_debug.closeSettings()')
+  const chatWork = join(dir, 'chat')
+  mkdirSync(chatWork)
+  const chatAgentId = await js(cdp, `window.__ahub_debug.addMockToolAgent(${JSON.stringify(llmBase)}, ${JSON.stringify(chatWork)}, false)`)
+  ok('信任弹窗场景就位：mock 模型 Agent 建成（连接测试走本地 mock）', typeof chatAgentId === 'string' && chatAgentId.length > 0, String(chatAgentId))
+  const srv2 = { id: 'gui-trust-srv', name: '信任弹窗验证', command: '', launch: { bin: process.execPath, args: [MOCK_MCP] }, formatVersion: 2, enabled: true }
+  await js(cdp, `window.__ahub_debug.setMcpServers([${JSON.stringify(srv2)}])`)
+  await js(cdp, `window.agenthub.config.get().then((c) => { const a = c.agents.find((x) => x.id === ${JSON.stringify(chatAgentId)}); a.tools = { ...a.tools, mcpServerIds: [${JSON.stringify(srv2.id)}] }; return window.agenthub.config.setAgents(c.agents) })`)
+  const rtTrust = await js(cdp, `window.__ahub_debug.configRoundTrip({ mcpServers: [null, ${JSON.stringify(srv2)}] })`)
+  ok('前置就位：导入后原始 config 里同时躺着脏 null 与 launch-only server',
+    rtTrust?.import?.ok === true && Array.isArray(rtTrust?.config?.mcpServers) &&
+      rtTrust.config.mcpServers.length === 2 && rtTrust.config.mcpServers[0] === null,
+    JSON.stringify(rtTrust?.config?.mcpServers)?.slice(0, 200))
+  const mcfg = await js(cdp, `window.agenthub.config.get().then((c) => (c.agents.find((x) => x.id === ${JSON.stringify(chatAgentId)})?.modelConfig) ?? null)`)
+  js(cdpRef, `window.__chat = null; window.agenthub.models.chat(${JSON.stringify(mcfg)}, 'gui-trust-chat', [{ role: 'user', content: '你好' }], { agentId: ${JSON.stringify(chatAgentId)} }).then((r) => { window.__chat = { ok: !!r && r.ok === true } }, (e) => { window.__chat = { err: String((e && e.message) || e) } }); 'fired'`)
+  const mcpModal = await waitJs(cdpRef, `!!document.querySelector('[data-approval-modal][data-approval-kind="mcp"]')`, 25000)
+  ok('勾选且启用的未信任 MCP server 触发首次连接弹窗（脏 null 记录没把整次对话炸掉——model:chat 走 mcp:list 同一道闸门）',
+    mcpModal === true, `modal=${JSON.stringify(mcpModal)} chat=${JSON.stringify(await js(cdpRef, 'window.__chat'))}`)
+  const trustLabel = String(await modalCmd())
+  ok('信任弹窗标签显示实际执行的 bin+args（launch-only 记录 command 为空也绝不弹空白标签）',
+    trustLabel.includes(String(process.execPath)) && trustLabel.includes('mock-mcp-server.mjs') && trustLabel.trim().length > 0,
+    trustLabel.slice(0, 240))
+  await click('[data-approval-deny]')
+  await waitJs(cdpRef, 'window.__chat !== null', 25000)
+  const chatRes = await js(cdpRef, 'window.__chat')
+  ok('点「拒绝」= 本次不连它、对话照常完成（弹窗不是死路）', chatRes?.ok === true, JSON.stringify(chatRes))
+  ok('拒绝不写入信任（信任只能由用户在弹窗或设置页显式给）', ((await js(cdpRef, 'window.agenthub.mcp.trusted()')) ?? []).includes(srv2.id) === false)
+  // 现场清理：删本次新增的 mock Agent 与凭据（config.json 另有字节快照在 finally 兜底）
+  await js(cdpRef, `window.__ahub_debug.removeAgentByName('Mock 工具验证')`)
+  if (mcfg?.keyId) await js(cdpRef, `window.agenthub.credentials.delete(${JSON.stringify(mcfg.keyId)})`)
+  await js(cdpRef, `window.__ahub_debug.setMcpServers(${JSON.stringify(before)})`)
+
+  // ---- 11. config:importJson 的入口边界与注册闸门（评审修复4）----
+  // 整份配置替换的通道不能没有边界：入口先拒非字符串与超限 payload（未解析、未写盘）；
+  // 且只在 argv 带 --ahub-verify 时注册——app.isPackaged 不算闸门（被测部署构建本来就是 packaged）。
+  console.log('\n[11] config:importJson：非字符串/超限在入口被拒；不带验证开关的进程里通道根本不存在')
+  await js(cdp, `window.__ahub_debug.setMcpServers([{ id:'gatekeep', name:'闸门样本', command:'', launch:{ bin:'node', args:[] }, formatVersion:2, enabled:true }])`)
+  const listBeforeGate = await js(cdp, 'window.agenthub.mcp.list()')
+  const notStr = await js(cdp, `window.agenthub.config.importJson(123)`)
+  ok('非字符串 payload 在入口被拒（不再 String(...) 硬转着喂 JSON.parse）',
+    notStr?.ok === false && String(notStr?.message).includes('字符串'), JSON.stringify(notStr))
+  const oversizeBytes = 9 * 1024 * 1024
+  const tooBig = await js(cdp, `window.agenthub.config.importJson(JSON.stringify({ filler: 'x'.repeat(${oversizeBytes}) }))`)
+  ok('超过上限的 payload 先拒后谈（主线程不吞任意大的字符串；上限字样如实报出来）',
+    tooBig?.ok === false && String(tooBig?.message).includes('上限'), JSON.stringify(tooBig)?.slice(0, 160))
+  const listAfterGate = await js(cdp, 'window.agenthub.mcp.list()')
+  ok('两次被拒的导入都没动盘：mcpServers 与尝试前逐字节一致（超限那次如果真进了 importConfig，这里就没了）',
+    JSON.stringify(listAfterGate) === JSON.stringify(listBeforeGate), JSON.stringify(listAfterGate)?.slice(0, 200))
+  await js(cdp, `window.__ahub_debug.setMcpServers(${JSON.stringify(before)})`)
+  // 不带 --ahub-verify 重启一次：通道应当没注册，invoke 以"未注册"失败（生产路径拿不到整份导入）
+  try { proc.kill() } catch { /* noop */ }
+  if (!waitAppGone()) console.log('  WARN  旧实例 30s 内没退干净，第二个实例可能拿不到单实例锁')
+  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 1}`], { stdio: 'ignore', env: launchEnv() })
+  const page2 = await waitHttp(PORT + 1, 40000)
+  const cdp2 = new CdpClient(page2.webSocketDebuggerUrl)
+  await cdp2.connect()
+  await cdp2.send('Runtime.enable')
+  const ready2 = await waitJs(cdp2, '!!window.agenthub && !!window.__ahub_debug', 30000)
+  const gateNoSwitch = ready2
+    ? await js(cdp2, `window.agenthub.config.importJson('{"x":1}').then((r) => 'resolved:' + JSON.stringify(r), (e) => 'rejected:' + String((e && e.message) || e))`)
+    : 'second-instance-not-ready'
+  ok('不带 --ahub-verify 的进程里 config:importJson 没有注册（通道按验证开关注册，不是无条件可达）',
+    String(gateNoSwitch).startsWith('rejected:'), String(gateNoSwitch).slice(0, 200))
+
   console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 } finally {
   await sleep(300)
@@ -239,5 +408,6 @@ try {
     else if (cfgFile && existsSync(cfgFile)) rmSync(cfgFile, { force: true })
   } catch (e) { console.log(`  WARN  config.json 还原失败：${e.message}（需要手工还原 ${cfgFile}）`) }
   await sleep(300)
+  try { mockLlm.close() } catch { /* noop */ }
   rmSync(dir, { recursive: true, force: true })
 }

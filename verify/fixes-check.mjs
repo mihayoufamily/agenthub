@@ -1162,15 +1162,34 @@ child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ c
   ok('sanitizeMcpList 幂等（跑两遍与一遍逐字节相同，界面还原对比不会被它扰动）',
     typeof ml.sanitizeMcpList === 'function' &&
       JSON.stringify(ml.sanitizeMcpList(ml.sanitizeMcpList(dirty))) === JSON.stringify(ml.sanitizeMcpList(dirty)))
-  const ipcSrc = readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf-8')
-  ok('mcp:list 走 sanitizeMcpList；mcp:set 放行 command 为空但 launch 已填的记录（重填不再被静默丢弃）',
-    ipcSrc.includes('sanitizeMcpList(getStore().getConfig().mcpServers)') &&
-      /s\.launch && typeof s\.launch\.bin === 'string' && s\.launch\.bin\.trim\(\)/.test(ipcSrc))
-  ok('MCP 首次信任弹窗显示 launch 的 bin+args，旧格式仍显示原命令并标注"已停用"',
+  // ---- 评审修复2：闸门自称"渲染层唯一形状闸门（组件里不再各自挡）"，就必须把 launch.args 规范到位。
+  // 旧 stampMcpLegacy 只认 launch.bin：bin 填了、args 缺失/不是数组的记录原样放行，
+  // SettingsPage 的 `${s.launch.bin} ${s.launch.args.join(' ')}` 当场 TypeError（Cannot read properties of
+  // undefined (reading 'join')）——这正是本模块为它而建的那类脏配置（mcp.ts:82-83 与 ipc.ts 信任弹窗
+  // 对同一个输入都在使用点各自兜了底，config-migration 从不修 args）。补形必须发生在闸门里。----
+  const normInput = [
+    { id: 'f1', name: 'F1', command: '', launch: { bin: 'node' } },
+    { id: 'f2', name: 'F2', command: '', launch: { bin: 'node', args: 'x.js' } },
+    { id: 'f3', name: 'F3', command: 'node y.js', launch: { bin: '', args: undefined } },
+    { id: 'f4', name: 'F4', command: 'node z.js', launch: 'not-an-object' }
+  ]
+  const normOut = typeof ml.sanitizeMcpList === 'function' ? ml.sanitizeMcpList(JSON.parse(JSON.stringify(normInput))) : []
+  ok('闸门补形：launch.bin 已填但 args 缺失/非数组 → args 规范成 []；launch 本体是脏值 → 按缺失处理（渲染层 args.join 不再炸）',
     (() => {
-      const seg = ipcSrc.slice(ipcSrc.indexOf("tool: 'mcp'"), ipcSrc.indexOf("tool: 'mcp'") + 1200)
-      return /s\.launch\?\.bin/.test(seg) && /s\.command/.test(seg) && seg.includes('已停用')
-    })(), ipcSrc.slice(ipcSrc.indexOf("tool: 'mcp'"), ipcSrc.indexOf("tool: 'mcp'") + 400))
+      if (normOut.length !== 4) return false
+      const [f1, f2, f3, f4] = normOut
+      return [f1, f2, f3].every((x) => Array.isArray(x.launch?.args) && x.launch.args.length === 0) &&
+        f1.legacyInvalid === undefined && f3.legacyInvalid === true && f3.enabled === false &&
+        !f4.launch && f4.legacyInvalid === true
+    })(), JSON.stringify(normOut).slice(0, 300))
+  ok('补形幂等：同一批脏 launch 记录跑两遍与一遍逐字节相同',
+    typeof ml.sanitizeMcpList === 'function' && normOut.length === 4 &&
+      JSON.stringify(ml.sanitizeMcpList(normOut)) === JSON.stringify(normOut),
+    JSON.stringify(ml.sanitizeMcpList ? ml.sanitizeMcpList(normOut) : null).slice(0, 300))
+  // 注：mcp:set 放行 launch-only 记录、信任弹窗 bin+args 标签这两条"处理器行为"原先用 ipc.ts 源码文本
+  // grep 充当断言（评审修复3：排版一变、或行为回归，grep 照样绿——它不是行为断言）。改在真机层逐条驱动：
+  // approval-shot「command 为空但 launch 已填的记录保存后仍在列表」「MCP 首次连接信任弹窗标签=bin+args」。
+  // 逻辑层起不了 electron 的 ipcMain，这两个 handler 无法在本层真调——这是够不到的半边，如实标注于此。
 }
 
 rmSync(tmp, { recursive: true, force: true })
