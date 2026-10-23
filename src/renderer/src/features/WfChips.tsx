@@ -20,7 +20,8 @@ export const STATUS_TEXT: Record<string, string> = {
   rework_limit: '返工达到上限',
   interrupted: '状态未知（应用重启）',
   timeout: '超时已停止',
-  token_limit: 'Token 上限已停止'
+  token_limit: 'Token 上限已停止',
+  budget_limit: '预算上限已停止'
 }
 
 /** 待确认 > 执行中 > 已结束；同级按开始时间倒序 */

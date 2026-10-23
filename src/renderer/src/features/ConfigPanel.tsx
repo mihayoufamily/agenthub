@@ -187,6 +187,23 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
           />
           <span className="help">整个任务真实调用累计消耗 Token 达到上限后自动停止（0 = 不限制）；已完成卡片与记录保留</span>
         </div>
+
+        <div className="form-row" style={{ marginTop: 10 }}>
+          <label>预算上限（元）</label>
+          <input
+            type="number"
+            min={0}
+            step={0.5}
+            value={config.budgetYuan ?? 0}
+            onChange={(e) => patchConfig({ budgetYuan: Math.max(0, Number(e.target.value) || 0) })}
+            style={{ width: 100 }}
+            data-testid="budget-yuan"
+          />
+          <span className="help">
+            硬闸：每个阶段开始前核对<b>本次任务</b>已折算的费用（同时发生的工作站对话不算进来），到线就停在阶段之前（0 = 不限制）。
+            只统计算得出金额的调用——没单价又没自填的模型不计入，所以这是<b>下界</b>不是总账。金额口径来自「设置 → 用量统计」。
+          </span>
+        </div>
       </div>
     </Modal>
   )

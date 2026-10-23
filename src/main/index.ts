@@ -5,7 +5,9 @@ import { registerIpc } from './ipc'
 import { Store } from './store'
 import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
+import { configurePriceOverrides } from '../shared/overrides'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
+import * as ledger from './ledger'
 
 // 窗口状态持久化（简化：保存位置尺寸，启动时恢复并做屏幕边界校验）
 interface WindowState { x?: number; y?: number; width: number; height: number; maximized?: boolean }
@@ -344,10 +346,13 @@ function startApp() {
 
   app.whenReady().then(() => {
     store = new Store()
+    // 主进程侧的单价口径要先就位，账本补算费用与预算闸才用得上你填的价
+    configurePriceOverrides(store.getConfig().priceOverrides ?? [])
     const ud = app.getPath('userData')
     // 命令审批的规则与历史落在 userData，位置在这里注入（纯规则层不碰磁盘）
     approvals.init(join(ud, 'approvals.json'))
     checkpoints.init(join(ud, 'checkpoints'))
+    ledger.init(join(ud, 'ledger.jsonl'))
     registerIpc(() => store as Store, () => mainWindow)
     buildAppMenu()
     // 跟随主题（渲染进程可通过 theme:set 覆盖 themeSource）

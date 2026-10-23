@@ -246,6 +246,8 @@ export type TaskStatus =
   | 'timeout'
   /** 累计 Token 达到上限自动停止（非失败：成果与记录保留） */
   | 'token_limit'
+  /** 折算费用达到预算上限自动停止（非失败：成果与记录保留） */
+  | 'budget_limit'
 
 export type Stage = 'planning' | 'executing' | 'reviewing' | 'delivering'
 
@@ -343,6 +345,11 @@ export interface WorkflowConfig {
   /** 整个任务真实调用累计消耗 Token 上限；0 = 不限制 */
   maxTokens: number
   /**
+   * 整个任务的费用上限（元）；0 = 不限制。
+   * 只统计算得出金额的调用（有公开单价或你填了单价）——是下界，不是总账。
+   */
+  budgetYuan?: number
+  /**
    * 产物目录：本次工作流的落盘位置。
    * 执行角色若已授权文件工具，其沙箱根临时覆盖为此目录（只换目录，不提升访问级别）；
    * 未授权工具时，AgentHub 把执行结论写成本目录下的一篇文本产物。
@@ -405,6 +412,22 @@ export interface AppConfig {
   presets?: WorkflowPreset[]
   /** Skill 提示包（Markdown 可复用；聊天引用注入，设置页管理） */
   skills?: Skill[]
+  /**
+   * 自定义单价（元 / 1M tokens）：内置表是手写快照，价格变了或没收录的模型由你自己填，
+   * 带填写日期，界面据此说明金额是按哪份数据折算的。
+   */
+  priceOverrides?: PriceOverride[]
+}
+
+/** 自定义单价覆盖条目（元 / 1M tokens） */
+export interface PriceOverride {
+  /** 匹配 modelId 的正则（与内置表同一口径，忽略大小写） */
+  pattern: string
+  input: number
+  output: number
+  cacheHit?: number
+  /** 这份价格的日期（你自己填的，界面如实标"填写于 X"） */
+  asOf: string
 }
 
 /** 保存的任务：目标 + 三角色完整配置 + 审核方式（点击卡片直接恢复整套配置发起新任务） */
@@ -438,6 +461,8 @@ export interface LedgerEntry {
   agentId?: string
   agentName?: string
   workflow?: boolean
+  /** 属于哪次工作流任务：预算闸只算本次任务的调用，不把同时发生的工作站对话算进来 */
+  runId?: string
   ok: boolean
   ms?: number
   tokens?: number

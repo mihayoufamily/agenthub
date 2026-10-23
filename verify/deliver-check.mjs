@@ -27,6 +27,13 @@ function loadTs(rel, asName) {
   return require(file)
 }
 
+/**
+ * pricing 现在值导入 shared/overrides（单价覆盖的缓存要 main/renderer 共用同一个实例），
+ * 单文件 transpile 会把那条 require 指到不存在的临时目录 —— 这里直接用编译产物，
+ * 顺带保证被测口径与真实运行时是同一份代码。
+ */
+const pricing = require('../out/shared/pricing.js')
+
 const { digestThinking } = loadTs('../src/renderer/src/lib/thinking.ts', 'thinking')
 const { buildRoleMessages, parseRoleOutput } = loadTs('../src/renderer/src/lib/rolePrompts.ts', 'rolePrompts')
 
@@ -100,9 +107,10 @@ const ctx = { goal: '写一个脚本', round: 1, maxRounds: 3, outputDir: 'D:\\a
   ok('结构化输出解析仍可用', parsed?.conclusion === '完成' && parsed.checklist?.length === 1)
 }
 
-console.log('\n[C] 自定义键位 / 视觉判定 / 常驻提示词注入（本轮：快捷键可改 + 图片附件 + Agent 提示词）')
 const { matchKeyBinding, formatKeyBinding, safeName, validateKeyBinding } = loadTs('../src/renderer/src/lib/utils.ts', 'utils')
-const { visionOf } = loadTs('../src/shared/pricing.ts', 'pricing')
+// pricing 现在会值导入 shared/overrides，单文件 transpile 会断链：直接用编译产物，
+// 被测口径与真实运行时口径是同一份
+const { visionOf } = pricing
 {
   const ev = (o) => ({ ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, key: '', ...o })
   ok('Ctrl+M 命中', matchKeyBinding('Ctrl+M', ev({ ctrlKey: true, key: 'm' })))

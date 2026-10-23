@@ -7,6 +7,7 @@ import { useWorkflow, runBusy } from './stores/workflow'
 import { HOTKEY_DEFAULTS, type HotkeyAction } from '@shared/types'
 import { matchKeyBinding, validateKeyBinding } from './lib/utils'
 import { bridge } from './lib/ipc'
+import { configurePriceOverrides } from '@shared/overrides'
 import { installDebugHooks } from './lib/debug'
 import { Splash } from './features/Splash'
 import { BrandHome } from './features/BrandHome'
@@ -117,6 +118,8 @@ export function App() {
       try {
         await useSettings.getState().init()
         const cfg = await bridge.config.get()
+        // 单价口径要在任何金额计算之前就位（费用估算、用量表、预算闸共用同一份）
+        configurePriceOverrides(cfg.priceOverrides ?? [])
         const store = useAgents.getState()
         store.init(cfg.agents)
         // 首次运行无 Agent：种入演示 Agent（不连接任何真实服务），并把工作流三角色默认绑定
@@ -149,6 +152,7 @@ export function App() {
           timeoutMin: wd?.timeoutMin ?? 30,
           confirmEveryRound: wd?.confirmEveryRound ?? false,
           maxTokens: wd?.maxTokens ?? 0,
+          budgetYuan: wd?.budgetYuan ?? 0,
           outputDir: wd?.outputDir ?? ''
         })
         // 预设（角色 + 模型方案）；工作流任务列表与进度由 restore() 从 runs/ 落盘记录恢复

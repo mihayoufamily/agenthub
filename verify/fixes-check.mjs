@@ -482,6 +482,63 @@ console.log('\n[K] checkpoint / diff / rollback（工具层改动可看可退）
   rmSync(root, { recursive: true, force: true })
 }
 
+// ---------- L. 单价口径与预算闸 ----------
+console.log('\n[L] 自定义单价（覆盖内置表）+ 预算硬闸的账本口径')
+{
+  const pr = await import('../out/shared/pricing.js')
+  const ov = await import('../out/shared/overrides.js')
+  ok('内置表的时点如实写成"手抄快照"，不冒充复核过的日期', /未逐条复核|手抄/.test(pr.PRICING_AS_OF), pr.PRICING_AS_OF)
+  ok('未配置覆盖时按内置价', pr.pricingSource('deepseek-chat') === 'builtin' && pr.estimateCost('deepseek-chat', { prompt: 1_000_000, completion: 0 }) === 1)
+  ok('没收录的模型不折算金额（返回 null 而不是 0）', pr.estimateCost('some-unknown-model', { prompt: 1000, completion: 1000 }) === null)
+  ok('内置价的"新鲜度"不给假日期', pr.pricingFreshness('deepseek-chat').asOf === null)
+
+  ov.configurePriceOverrides([{ pattern: 'kimi-k2', input: 0.5, output: 2, asOf: '2026-10-23' }])
+  ok('自填价优先于内置表', pr.pricingSource('kimi-k2-0905') === 'override' && pr.estimateCost('kimi-k2-0905', { prompt: 1_000_000, completion: 0 }) === 0.5)
+  ok('自填价带日期一起给界面（金额来源要说得清）', pr.pricingFreshness('kimi-k2').asOf === '2026-10-23')
+  ok('覆盖不影响未命中的模型', pr.pricingSource('deepseek-chat') === 'builtin')
+  ov.configurePriceOverrides([{ pattern: '([', input: 1, output: 1, asOf: '' }])
+  ok('非法正则的覆盖条目被跳过而不是打挂计价', pr.estimateCost('deepseek-chat', { prompt: 1_000_000, completion: 0 }) === 1)
+  ov.configurePriceOverrides(null)
+  ok('清空覆盖后回到内置表', pr.pricingSource('kimi-k2') === 'none')
+
+  const bad = [
+    [{ pattern: '', input: 1, output: 1 }, false, '空规则被拒'],
+    [{ pattern: 'a(', input: 1, output: 1 }, false, '非法正则被拒'],
+    [{ pattern: 'x', input: -1, output: 1 }, false, '负单价被拒'],
+    [{ pattern: 'x', input: 'abc', output: 1 }, false, '非数字被拒'],
+    [{ pattern: 'x', input: 0, output: 0 }, false, '两个都 0 要先确认'],
+    [{ pattern: 'x', input: 0.4, output: 1.2 }, true, '正常单价通过']
+  ]
+  for (const [o, want, name] of bad) ok(`单价校验：${name}`, pr.validatePriceOverride(o).ok === want, JSON.stringify(pr.validatePriceOverride(o)))
+}
+{
+  const root = mkdtempSync(join(tmpdir(), 'ahub-budget-'))
+  const fake = join(root, 'appdata')
+  mkdirSync(fake)
+  process.env.LOCALAPPDATA = fake
+  process.env.APPDATA = fake
+  const led = await import('../out/main/ledger.js')
+  led.init(join(root, 'ledger.jsonl'))
+  const now = Date.now()
+  led.record({ ts: now - 5000, channel: 'model', harness: 'api.deepseek.com', model: 'deepseek-chat', ok: true, prompt: 1_000_000, completion: 0 })
+  led.record({ ts: now - 4000, channel: 'model', harness: 'api.deepseek.com', model: 'deepseek-chat', ok: true, prompt: 1_000_000, completion: 0 })
+  led.record({ ts: now - 3000, channel: 'cli', harness: 'codex', model: 'gpt-5', ok: true, tokens: 90000 })
+  const spentAll = led.costSince(now - 10_000)
+  ok('预算闸按账本折算（有单价的才算钱）', Math.abs(spentAll - 2) < 1e-6, String(spentAll))
+  ok('时间窗生效：只看最近这一段时间', led.costSince(now - 4500) >= 1 && led.costSince(now - 4500) <= spentAll, String(led.costSince(now - 4500)))
+  const ov2 = await import('../out/shared/overrides.js')
+  ov2.configurePriceOverrides([{ pattern: 'gpt-5', input: 1, output: 4, asOf: '2026-10-23' }])
+  ok('补上单价后同一条记录的金额自己长出来（不重写历史）', led.costSince(now - 10_000) > spentAll, String(led.costSince(now - 10_000)))
+  ov2.configurePriceOverrides([])
+  ok('没有单价的调用不计入合计（预算是下界，界面已如实说明）', Math.abs(led.costSince(now - 10_000) - spentAll) < 1e-6)
+  // 归本：预算闸只算这次任务的钱，同时发生的工作站对话不该把任务提前掐停
+  led.record({ ts: now - 2000, channel: 'model', harness: 'api.deepseek.com', model: 'deepseek-chat', ok: true, prompt: 1_000_000, completion: 0, workflow: true, runId: 'run-A' })
+  led.record({ ts: now - 1000, channel: 'model', harness: 'api.deepseek.com', model: 'deepseek-chat', ok: true, prompt: 2_000_000, completion: 0 })
+  ok('传 runId 时只算本次任务的调用', Math.abs(led.costSince(now - 10_000, 'run-A') - 1) < 1e-6, String(led.costSince(now - 10_000, 'run-A')))
+  ok('不传 runId 仍是全量口径（用量统计页用的就是这个）', led.costSince(now - 10_000) > led.costSince(now - 10_000, 'run-A'))
+  rmSync(root, { recursive: true, force: true })
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

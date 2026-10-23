@@ -18,8 +18,17 @@ export type { LedgerEntry, LedgerUsageRow }
 const MAX_ENTRIES = 2000
 
 let cached = ''
+
+/** 落盘位置由主进程启动时注入（不注入就不落盘，逻辑层可直接在 node 里测） */
+export function init(filePath: string) {
+  cached = filePath
+}
+
 const file = () => {
-  if (!cached) cached = join(app.getPath('userData'), 'ledger.jsonl')
+  if (!cached) {
+    const { app } = require('electron') as typeof import('electron')
+    cached = join(app.getPath('userData'), 'ledger.jsonl')
+  }
   return cached
 }
 
@@ -81,6 +90,24 @@ export function dump(): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * 某时刻以来已折算的费用合计（预算硬闸用）。传 runId 就只算这次工作流任务的调用——
+ * 同时发生的工作站对话不该算进本次预算。只加"算得出金额"的条目，
+ * 无公开单价的模型不折算——所以这个数是下界，界面必须这么说。
+ */
+export function costSince(ts: number, runId?: string): number {
+  let sum = 0
+  for (const line of readLines()) {
+    try {
+      const e = withCost(JSON.parse(line) as LedgerEntry)
+      if (e.ts < ts) continue
+      if (runId && e.runId !== runId) continue
+      if (e.cost) sum += e.cost
+    } catch { /* 坏行跳过 */ }
+  }
+  return Math.round(sum * 1e6) / 1e6
 }
 
 /** 按 harness × 模型 聚合用量 */

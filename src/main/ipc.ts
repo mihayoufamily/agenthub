@@ -6,7 +6,8 @@ import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
-import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill } from '../shared/types'
+import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride } from '../shared/types'
+import { configurePriceOverrides } from '../shared/overrides'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
@@ -159,6 +160,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- 调用账本（脱敏元数据；用量统计与排障共用一份数据源） ----------
   ipcMain.handle('ledger:list', (_e, limit?: number) => ledger.list(limit ?? 200))
   ipcMain.handle('ledger:stats', (_e, sinceTs?: number) => ledger.aggregate(ledger.list(100000).filter((e) => !sinceTs || e.ts >= sinceTs)))
+  ipcMain.handle('ledger:costSince', (_e, sinceTs: number, runId?: string) => ledger.costSince(Number(sinceTs) || 0, runId))
   ipcMain.handle('ledger:clear', () => {
     ledger.clear()
     return { ok: true }
@@ -211,6 +213,24 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   /** 当前应用菜单的加速键清单（验证脚本据此确认 Ctrl+R 刷新等默认键已不再注册） */
+  // ---------- 自定义单价（覆盖内置表；随配置导出导入） ----------
+  ipcMain.handle('prices:get', () => getStore().getConfig().priceOverrides ?? [])
+  ipcMain.handle('prices:set', (_e, list: PriceOverride[]) => {
+    const clean = (Array.isArray(list) ? list : [])
+      .filter((o) => o && typeof o.pattern === 'string' && o.pattern.trim())
+      .map((o) => ({
+        pattern: o.pattern.trim(),
+        input: Number(o.input) || 0,
+        output: Number(o.output) || 0,
+        ...(o.cacheHit != null ? { cacheHit: Number(o.cacheHit) || 0 } : {}),
+        asOf: String(o.asOf ?? '').slice(0, 40)
+      }))
+      .slice(0, 100)
+    getStore().setPriceOverrides(clean)
+    configurePriceOverrides(clean)
+    return { ok: true, list: clean }
+  })
+
   ipcMain.handle('app:menuSummary', () => {
     const { Menu } = require('electron') as typeof import('electron')
     const out: string[] = []
@@ -306,7 +326,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return openai.listModels(cfg, key)
   })
 
-  ipcMain.handle('model:chat', async (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string }) => {
+  ipcMain.handle('model:chat', async (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string }) => {
     const key = getStore().getCredential(cfg.keyId)
     if (!key) {
       const win = getWin()
@@ -335,7 +355,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       model: cfg.modelId,
       ...(opts?.agentId ? { agentId: opts.agentId } : {}),
       ...(agentName ? { agentName } : {}),
-      workflow: !!opts?.workflow
+      workflow: !!opts?.workflow,
+      ...(opts?.runId ? { runId: opts.runId } : {})
     })
     // 改动检查点：一次工作流任务共用 run.id（返工/续跑都回到任务开始前的状态），
     // 工作站对话按 reqId 单独成一个检查点。目录取主进程侧的 grant.dir，不信渲染层传的路径。

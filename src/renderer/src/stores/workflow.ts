@@ -97,7 +97,7 @@ let lastAnnounce = ''
  */
 function announce(run: WorkflowRun) {
   const atGate = run.status === 'waiting_review' && !!run.gate
-  const terminal = ['completed', 'failed', 'cancelled', 'timeout', 'rework_limit', 'token_limit'].includes(run.status)
+  const terminal = ['completed', 'failed', 'cancelled', 'timeout', 'rework_limit', 'token_limit', 'budget_limit'].includes(run.status)
   if (!atGate && !terminal) return
   const key = `${run.id}:${run.status}`
   if (key === lastAnnounce) return
@@ -180,7 +180,7 @@ function agentChatToCard(
   user: string,
   cardId: string,
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
-  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number; workflow?: boolean; cliWorkDir?: string; checkpointId?: string }
+  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number; workflow?: boolean; cliWorkDir?: string; checkpointId?: string; runId?: string }
 ): Promise<{ ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }> {
   const reqId = uid('req')
   activeModelReqId = reqId
@@ -286,7 +286,13 @@ function agentChatToCard(
               opts?.modelOverride ? { ...agent.modelConfig, modelId: opts.modelOverride } : agent.modelConfig,
               reqId,
               messages,
-              { agentId: agent.id, workflow: opts?.workflow, ...(opts?.checkpointId ? { checkpointId: opts.checkpointId } : {}) }
+              {
+                agentId: agent.id,
+                workflow: opts?.workflow,
+                ...(opts?.checkpointId ? { checkpointId: opts.checkpointId } : {}),
+                // 账本按 runId 归本：预算闸只算这次任务的钱，同时发生的工作站对话不算进来
+                ...(opts?.runId ? { runId: opts.runId } : {})
+              }
             )
           : Promise.resolve({ ok: false })
     void launched.then((r: { ok: boolean }) => {
@@ -310,11 +316,30 @@ async function runStage(
   const agent = useAgents.getState().agents.find((a) => a.id === roleCfg.agentId)
   const isDemoAgent = agent?.isDemo === true
   const stage: Stage = role === 'planner' ? 'planning' : role === 'executor' ? 'executing' : 'reviewing'
+  const runId = get().run?.id
+  // 预算硬闸：每个阶段开始前先核对本次任务已经花掉多少（账本按 runId 归本，
+  // 同时发生的工作站对话不算进来），到线就停在这里，而不是"跑完这一轮再说"
+  if (cfg.budgetYuan && cfg.budgetYuan > 0) {
+    const startedAt = get().run?.startedAt ?? Date.now()
+    const spent = await bridge.ledger.costSince(startedAt, runId)
+    if (spent >= cfg.budgetYuan) {
+      setRun((r) => ({
+        ...r,
+        status: 'budget_limit' as const,
+        stage: null,
+        endedAt: Date.now(),
+        notes: [...(r.notes ?? []), `折算费用已达预算上限（¥${cfg.budgetYuan}，本次已 ¥${spent.toFixed(4)}），任务在「${role}」阶段前自动停止`]
+      }))
+      get().saveRun()
+      useSettings.getState().addMemory('progress', `任务因预算上限（¥${cfg.budgetYuan}）自动停止`, false)
+      useUi.getState().toast(`已达预算上限 ¥${cfg.budgetYuan}（本次折算 ¥${spent.toFixed(4)}），任务自动停止`, 'warn')
+      return null
+    }
+  }
   setRun((r) => ({ ...r, stage, ...(role === 'reviewer' ? { status: 'waiting_review' as const } : {}) }))
 
   const card = makeCard(role, round, cfg, isDemoAgent)
   setRun((r) => ({ ...r, cards: [...r.cards, card] }))
-  const runId = get().run?.id
 
   // ---- 演示 Agent：脚本化内容（卡片逐张标注"演示"） ----
   if (isDemoAgent) {
@@ -375,7 +400,7 @@ async function runStage(
     cliTimeoutMs,
     workflow: useOutDir,
     // 整个任务共用一个检查点：回滚回到任务开始前，而不是某一轮开始前
-    ...(runId ? { checkpointId: runId } : {}),
+    ...(runId ? { checkpointId: runId, runId } : {}),
     ...(useOutDir ? { cliWorkDir: ctx.outputDir } : {})
   })
   if (isCancelled()) return null
@@ -533,7 +558,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     maxRounds: 3,
     timeoutMin: 30,
     confirmEveryRound: false,
-    maxTokens: 0
+    maxTokens: 0,
+    budgetYuan: 0
   },
   run: null,
   tasks: [],
@@ -559,6 +585,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       timeoutMin: get().config.timeoutMin,
       confirmEveryRound: get().config.confirmEveryRound,
       maxTokens: get().config.maxTokens,
+      budgetYuan: get().config.budgetYuan ?? 0,
       outputDir: get().config.outputDir
     })
   },

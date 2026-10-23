@@ -132,13 +132,18 @@ export function TaskView() {
           ))}
           {run.gate && run.status === 'waiting_user' && <GateCard run={run} />}
           {run.status === 'rework_limit' && <ReworkLimitCard run={run} />}
-          {run.status === 'token_limit' && (
-            <div className="gate-card" style={{ borderColor: 'rgba(180,83,9,.4)', background: 'var(--warn-bg)' }}>
+          {(run.status === 'token_limit' || run.status === 'budget_limit') && (
+            <div className="gate-card" style={{ borderColor: 'rgba(180,83,9,.4)', background: 'var(--warn-bg)' }} data-limit-card={run.status}>
               <div className="gate-title" style={{ color: 'var(--warn)' }}>
-                <Icon name="warn" size={16} /> 累计 Token 已达上限，任务自动停止
+                <Icon name="warn" size={16} />
+                {run.status === 'budget_limit'
+                  ? `折算费用已达预算上限（${config.budgetYuan} 元），任务自动停止`
+                  : '累计 Token 已达上限，任务自动停止'}
               </div>
               <div className="gate-review">
-                为控制成本已按设置自动停止（可在工作流设置中调整 Token 上限）。已完成的卡片与记录均已保留，可导出或以此为目标开新任务。
+                {run.status === 'budget_limit'
+                  ? '预算闸只统计折算得出金额的调用（无公开单价又未自填单价的模型不计入），实际花费可能高于这个数。已完成的卡片与记录均已保留，可导出或以此为目标开新任务。'
+                  : '为控制成本已按设置自动停止（可在工作流设置中调整 Token 上限）。已完成的卡片与记录均已保留，可导出或以此为目标开新任务。'}
               </div>
               <div className="gate-actions">
                 <Button variant="secondary" onClick={() => useWorkflow.getState().continueModify()}>以此为目标开新任务</Button>
@@ -232,7 +237,8 @@ const STATUS_BADGE: Record<string, 'ok' | 'info' | 'warn' | 'danger' | 'default'
   waiting_user: 'warn',
   interrupted: 'info',
   timeout: 'warn',
-  token_limit: 'warn'
+  token_limit: 'warn',
+  budget_limit: 'warn'
 }
 
 function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {

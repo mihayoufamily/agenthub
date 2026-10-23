@@ -96,6 +96,13 @@ export class Store {
     this.writeJson(this.dirs.config, cfg)
   }
 
+  /** 自定义单价覆盖：随 config 一起导出/导入，换机器不用重抄一遍价格 */
+  setPriceOverrides(list: AppConfig['priceOverrides']) {
+    const cfg = this.getConfig()
+    cfg.priceOverrides = list
+    this.writeJson(this.dirs.config, cfg)
+  }
+
   /** 导出配置：剥离一切敏感信息（API Key 只在凭据存储，本方法额外确保不含 keyId 明文密钥） */
   exportConfig(): string {
     const cfg = JSON.parse(JSON.stringify(this.getConfig())) as AppConfig
@@ -288,7 +295,8 @@ function migrateV0toV1(raw: Partial<AppConfig> & Record<string, unknown>): AppCo
       maxRounds: 3,
       timeoutMin: 30,
       confirmEveryRound: false,
-      maxTokens: 0
+      maxTokens: 0,
+      budgetYuan: 0
     }
   }
 }

@@ -3,7 +3,7 @@ import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
   LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord,
-  CheckpointManifest, RollbackResult, FileChange
+  CheckpointManifest, RollbackResult, FileChange, PriceOverride
 } from '../shared/types'
 
 /**
@@ -95,7 +95,7 @@ const api = {
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
     /** 余额查询（DeepSeek 官方 /user/balance；其他接口 ok=false） */
     balance: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:balance', cfg) as Promise<{ ok: boolean; message?: string; balance?: number; currency?: string }>,
-    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string; images?: { name: string; dataUrl: string; path: string }[] }[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string }) =>
+    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string; images?: { name: string; dataUrl: string; path: string }[] }[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string }) =>
       ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts) as Promise<{ ok: boolean; checkpoint?: string }>,
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
     /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */
@@ -121,10 +121,17 @@ const api = {
     /** 导入 Agent Skills 标准目录（含 SKILL.md） */
     importDir: () => ipcRenderer.invoke('skills:importDir') as Promise<{ ok: boolean; skill?: Skill; message?: string }>
   },
+  /** 自定义单价覆盖（内置表是手写快照，价格变了由你填，带填写日期） */
+  prices: {
+    get: () => ipcRenderer.invoke('prices:get') as Promise<PriceOverride[]>,
+    set: (list: PriceOverride[]) => ipcRenderer.invoke('prices:set', list) as Promise<{ ok: boolean; list: PriceOverride[] }>
+  },
   /** 调用账本：只含元数据的用量与排障数据（不含正文与凭据） */
   ledger: {
     list: (limit?: number) => ipcRenderer.invoke('ledger:list', limit) as Promise<LedgerEntry[]>,
     stats: (sinceTs?: number) => ipcRenderer.invoke('ledger:stats', sinceTs) as Promise<LedgerUsageRow[]>,
+    /** 某时刻以来能折算出的金额合计（预算闸用；传 runId 只算这次任务的调用） */
+    costSince: (sinceTs: number, runId?: string) => ipcRenderer.invoke('ledger:costSince', sinceTs, runId) as Promise<number>,
     clear: () => ipcRenderer.invoke('ledger:clear') as Promise<{ ok: boolean }>,
     export: () => ipcRenderer.invoke('ledger:export') as Promise<{ ok: boolean; message?: string }>
   },

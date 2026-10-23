@@ -3,6 +3,10 @@
 // 只收录有官方公开价格的模型；查不到 = 界面只显示 token 不折算金额（不编造价格）。
 
 import type { UsageInfo } from './types'
+import { overrideOf, overridePricings } from './overrides'
+
+export type { PriceOverride } from './overrides'
+export { configurePriceOverrides, priceOverrides } from './overrides'
 
 export interface ModelPricing {
   /** 匹配 modelId 的正则（忽略大小写） */
@@ -14,6 +18,9 @@ export interface ModelPricing {
   cacheHit?: number
 }
 
+/** 内置表的时点：手抄的快照，不是实时行情。界面必须把它显示出来，别拿旧数字冒充准确 */
+export const PRICING_AS_OF = '2025（DeepSeek 官网公布价，未逐条复核）'
+
 const PRICING: ModelPricing[] = [
   // DeepSeek 官方价格（2025 年公布价）
   { pattern: /deepseek-reasoner/i, input: 4, output: 16, cacheHit: 1 },
@@ -21,10 +28,44 @@ const PRICING: ModelPricing[] = [
   { pattern: /deepseek/i, input: 1, output: 8, cacheHit: 0.1 }
 ]
 
-/** 查某模型的单价；没有公开价格返回 null（界面据此只显示 token） */
+/** 查某模型的单价；用户填写的覆盖优先，其次内置表，都没有返回 null（界面只显示 token） */
 export function pricingOf(modelId: string | undefined): ModelPricing | null {
   if (!modelId) return null
-  return PRICING.find((p) => p.pattern.test(modelId)) ?? null
+  return overridePricings().find((p) => p.pattern.test(modelId)) ?? PRICING.find((p) => p.pattern.test(modelId)) ?? null
+}
+
+/** 这个价是从哪来的：让界面能说清金额按的是哪份数据，而不是统一装作官方实时价 */
+export function pricingSource(modelId: string | undefined): 'override' | 'builtin' | 'none' {
+  if (!modelId) return 'none'
+  if (overrideOf(modelId)) return 'override'
+  return PRICING.some((p) => p.pattern.test(modelId)) ? 'builtin' : 'none'
+}
+
+/** 校验一条自定义单价：正则要能编译、价格要非负且至少填一个方向 */
+export function validatePriceOverride(o: { pattern: string; input: unknown; output: unknown }): { ok: boolean; message?: string } {
+  if (!o.pattern?.trim()) return { ok: false, message: '匹配规则不能为空' }
+  try {
+    new RegExp(o.pattern, 'i')
+  } catch (e) {
+    return { ok: false, message: `匹配规则不是合法正则：${(e as Error).message}` }
+  }
+  const input = Number(o.input)
+  const output = Number(o.output)
+  if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) {
+    return { ok: false, message: '输入/输出单价必须是非负数字（元 / 1M tokens）' }
+  }
+  if (input === 0 && output === 0) return { ok: false, message: '两个单价都是 0：那是"免费"这个结论，请确认再填' }
+  return { ok: true }
+}
+
+/**
+ * 这个价有多新：用户自填的价带上填写日期；内置表只有笼统时点（asOf=null），
+ * 因为那是一行人手抄的数字、不是逐条复核过的——界面不许显示成像"截至 2025"那样可靠的写法。
+ */
+export function pricingFreshness(modelId: string | undefined): { source: 'override' | 'builtin' | 'none'; asOf: string | null } {
+  const source = pricingSource(modelId)
+  if (source === 'override') return { source, asOf: overrideOf(modelId)?.asOf || null }
+  return { source, asOf: null }
 }
 
 /** 折算单次用量费用（元）；无单价数据返回 null */
