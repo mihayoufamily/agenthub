@@ -4,7 +4,7 @@
 // 收尾等实例退净后按字节还原（修复波 B · 项 1b；此前只删本次新增的 Mock Agent 与任务记录，
 // 角色绑定 workflowDefaults 不回滚，见文件内注释），审批历史不进这个套件。
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, readdirSync, statSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -227,9 +227,24 @@ const main = async () => {
     // 落点问应用自己要（与 approval-shot 同一取法），不猜路径；猜错会把字节写进另一个文件，比不写更糟。
     const appUserData = String((await js(cdp, 'window.agenthub.app.info()'))?.userDataPath ?? '')
     cfgFile = join(appUserData || join(process.env.APPDATA ?? '', 'agenthub'), 'config.json')
+    // 落点核对按**文件身份**比，不按字面字符串比（收尾 C1 实测修的红）：
+    // Windows 上 app.getPath('userData') 拼出来是包名大小写 `…\Roaming\AgentHub`，磁盘上的目录名却是
+    // `agenthub`，而 NTFS 大小写不敏感 → 两个路径 stat 出来的 dev/ino 完全相同，是同一个目录里的同一份文件
+    // （实测 statSync 两边 dev=2461287389 ino=4785074604607996 size 都是 3588）。
+    // 原来的 `resolve(a) === resolve(b)` 把这条真断言判成永久假红。现在：两边都存在就比 dev+ino（比字符串比较更强，
+    // 换目录/换文件一定红），任一不存在就退回忽略大小写的路径比较（大小写差异在 Windows 上不可能表示两个目录）。
+    const scriptCfgFile = join(process.env.APPDATA ?? '', 'agenthub', 'config.json')
+    const sameConfigFile = (() => {
+      try {
+        const a = statSync(cfgFile), b = statSync(scriptCfgFile)
+        return a.dev === b.dev && a.ino === b.ino
+      } catch {
+        return resolve(cfgFile).toLowerCase() === resolve(scriptCfgFile).toLowerCase()
+      }
+    })()
     ok('快照落点核对：应用报的 userDataPath 就是本套件会写的那份配置目录（写错文件比不写更糟）',
-      resolve(cfgFile) === resolve(join(process.env.APPDATA ?? '', 'agenthub', 'config.json')),
-      `应用=${appUserData || '(拿不到，退回 APPDATA)'} 脚本按 APPDATA=${join(process.env.APPDATA ?? '', 'agenthub')}`)
+      sameConfigFile,
+      `应用=${appUserData || '(拿不到，退回 APPDATA)'} 脚本按 APPDATA=${join(process.env.APPDATA ?? '', 'agenthub')} 同一份文件=${sameConfigFile}`)
     configSnapshot = existsSync(cfgFile) ? readFileSync(cfgFile) : null
     snapshotDefaults = defaultsOf(configSnapshot)
     console.log(`[ui] config.json 快照：${cfgFile} · ${configSnapshot?.length ?? 0} 字节 · workflowDefaults=${JSON.stringify(snapshotDefaults)}`)
