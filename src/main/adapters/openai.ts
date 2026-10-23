@@ -380,7 +380,8 @@ export function chatStream(
             ...call,
             status: res.ok ? 'done' : 'error',
             result: res.output.length > 5000 ? res.output.slice(0, 5000) + '…（已截断）' : res.output,
-            ...(res.change ? { change: res.change } : {})
+            ...(res.change ? { change: res.change } : {}),
+            ...(res.hooks?.length ? { hooks: res.hooks } : {})
           }
           onEvent({ reqId, type: 'tool', toolCall: done, ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}) })
           convo.push({ role: 'tool', tool_call_id: tc.id, content: res.output.slice(0, MAX_OUTPUT) })

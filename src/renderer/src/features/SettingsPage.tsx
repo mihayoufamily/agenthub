@@ -1,10 +1,11 @@
-// 设置页：九分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 命令审批 / 快捷键 / 数据 / 关于）
+// 设置页：十分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 命令审批 / 工具 Hook / 快捷键 / 数据 / 关于）
 import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
-import type { Skill, HotkeyAction, ApprovalRecord } from '@shared/types'
+import type { Skill, HotkeyAction, ApprovalRecord, HookRule } from '@shared/types'
+import { validateHook } from '@shared/hooks'
 import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
@@ -12,7 +13,7 @@ import { UsagePanel } from '../components/UsagePanel'
 import { bridge } from '../lib/ipc'
 import { fmtTime, fmtTokens, uid, cls, formatKeyBinding, validateKeyBinding } from '../lib/utils'
 
-type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'approvals' | 'shortcuts' | 'data' | 'about'
+type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'approvals' | 'hooks' | 'shortcuts' | 'data' | 'about'
 
 const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'appearance', label: '外观', icon: 'info' },
@@ -21,6 +22,7 @@ const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'workflow', label: '工作流', icon: 'reorder' },
   { key: 'usage', label: '用量统计', icon: 'file' },
   { key: 'approvals', label: '命令审批', icon: 'shield' },
+  { key: 'hooks', label: '工具 Hook', icon: 'terminal' },
   { key: 'shortcuts', label: '快捷键', icon: 'send' },
   { key: 'data', label: '数据', icon: 'folder' },
   { key: 'about', label: '关于', icon: 'info' }
@@ -66,6 +68,7 @@ export function SettingsPage() {
             {section === 'workflow' && <WorkflowSection />}
             {section === 'usage' && <UsageSection />}
             {section === 'approvals' && <ApprovalSection />}
+            {section === 'hooks' && <HookSection />}
             {section === 'shortcuts' && <ShortcutsSection />}
             {section === 'data' && <DataSection />}
             {section === 'about' && <AboutSection />}
@@ -447,6 +450,126 @@ function ApprovalSection() {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+/* ---- 工具 Hook：在工具调用前后跑你自己配的命令 ---- */
+const EMPTY_RULE: HookRule = { id: '', event: 'post', command: '', match: '', enabled: true }
+
+function HookSection() {
+  const [rules, setRules] = useState<HookRule[]>([])
+  const [draft, setDraft] = useState<HookRule>(EMPTY_RULE)
+  const [err, setErr] = useState('')
+
+  const load = () => {
+    void bridge.hooks.list().then(setRules)
+  }
+  useEffect(load, [])
+
+  const save = async (next: HookRule[]) => {
+    const r = await bridge.hooks.set(next)
+    setRules(r.list)
+    return r
+  }
+
+  const patch = (id: string, p: Partial<HookRule>) => {
+    void save(rules.map((h) => (h.id === id ? { ...h, ...p } : h)))
+  }
+
+  const add = async () => {
+    const v = validateHook(draft)
+    if (!v.ok) {
+      setErr(v.message ?? 'Hook 不合法')
+      return
+    }
+    setErr('')
+    await save([...rules, { ...draft, id: uid('hook'), createdAt: Date.now(), enabled: true }])
+    setDraft(EMPTY_RULE)
+    useUi.getState().toast('Hook 已添加（下一次工具调用起生效）', 'ok')
+  }
+
+  return (
+    <div className="set-group" data-testid="hook-settings">
+      <div className="group-title">工具 Hook</div>
+      <div className="desc" style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 10 }}>
+        在模型 Agent 的工具调用前后执行你配置的命令。<b>pre</b> 退出码非 0 = 否决这次调用（脚本的 stdout/stderr 会原样回传给模型）；
+        <b>post</b> 只观察与后处理（跑格式化、跑测试、记流水），失败不会撤销已经发生的改动，但会如实报告。
+        <br />
+        数据只通过环境变量传入（<code>AHUB_HOOK_TOOL</code> / <code>_ARGS</code> / <code>_RESULT</code> / <code>_FILE</code> / <code>_DIR</code>，
+        以及 <code>AHUB_AGENT_NAME</code> / <code>AHUB_RUN_ID</code>）——不把这些拼进命令串，免得模型给的参数变成可执行内容。
+        工作目录固定为该 Agent 的沙箱根，超时默认 15 秒、输出有上限。
+        <br />
+        <b style={{ color: 'var(--danger)' }}>风险：</b>配了 Hook 就是让 AgentHub 在每次工具调用时代你执行这些命令，
+        与命令审批不同，Hook 不再逐条问你。只写你自己完全信任的脚本。CLI Agent 不经过这一层。
+      </div>
+
+      {rules.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginBottom: 8 }}>（还没有 Hook）</div>}
+      {rules.map((h) => (
+        <div key={h.id} data-hook-row style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+            <Switch on={h.enabled !== false} onChange={(v) => patch(h.id, { enabled: v })} label={`启用 Hook ${h.id}`} />
+            <select
+              value={h.event}
+              onChange={(e) => patch(h.id, { event: e.target.value as 'pre' | 'post' })}
+              style={{ height: 28, font: 'inherit', fontSize: 12.5 }}
+            >
+              <option value="pre">pre（执行前，可否决）</option>
+              <option value="post">post（执行后）</option>
+            </select>
+            <input
+              placeholder="匹配工具的正则（留空=全部），如 write_file|replace_in_file"
+              value={h.match ?? ''}
+              onChange={(e) => patch(h.id, { match: e.target.value })}
+              style={{ flex: 1, minWidth: 120, height: 28, font: 'inherit', fontSize: 12.5 }}
+            />
+            <Button variant="ghost" onClick={() => void save(rules.filter((x) => x.id !== h.id))}>删除</Button>
+          </div>
+          <input
+            value={h.command}
+            onChange={(e) => patch(h.id, { command: e.target.value })}
+            placeholder='node -e "console.log(process.env.AHUB_HOOK_FILE)"'
+            style={{ width: '100%', boxSizing: 'border-box', height: 28, font: 'inherit', fontSize: 12.5 }}
+          />
+        </div>
+      ))}
+
+      <div className="group-title" style={{ marginTop: 12 }}>新增一条</div>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+        <select
+          value={draft.event}
+          onChange={(e) => setDraft({ ...draft, event: e.target.value as 'pre' | 'post' })}
+          style={{ height: 28, font: 'inherit', fontSize: 12.5 }}
+        >
+          <option value="pre">pre</option>
+          <option value="post">post</option>
+        </select>
+        <input
+          placeholder="匹配正则（可留空）"
+          value={draft.match ?? ''}
+          onChange={(e) => setDraft({ ...draft, match: e.target.value })}
+          style={{ flex: 1, minWidth: 0, height: 28, font: 'inherit', fontSize: 12.5 }}
+          data-testid="hook-match"
+        />
+        <input
+          placeholder="超时毫秒（默认 15000）"
+          value={draft.timeoutMs ?? ''}
+          onChange={(e) => setDraft({ ...draft, timeoutMs: e.target.value ? Number(e.target.value) : undefined })}
+          style={{ width: 130, height: 28, font: 'inherit', fontSize: 12.5 }}
+          inputMode="numeric"
+        />
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          placeholder="要执行的命令（工作目录=沙箱根）"
+          value={draft.command}
+          onChange={(e) => setDraft({ ...draft, command: e.target.value })}
+          style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }}
+          data-testid="hook-command"
+        />
+        <Button variant="primary" onClick={() => void add()}>添加</Button>
+      </div>
+      {err && <div style={{ fontSize: 12, color: 'var(--danger)', marginTop: 6 }} data-hook-err>{err}</div>}
     </div>
   )
 }

@@ -140,6 +140,8 @@ export interface ToolCall {
   ts: number
   /** 本次改动登记（有检查点时）：界面显示行级 diff 与"能不能回滚" */
   change?: FileChange
+  /** 这次工具调用跑过的 Hook（含被 pre 否决的情况） */
+  hooks?: HookRun[]
 }
 
 /** CLI Agent 配置：执行走 CLI 可执行文件，凭据走 CLI 自身（如 arkcli 的 profile） */
@@ -412,6 +414,14 @@ export interface AppConfig {
   presets?: WorkflowPreset[]
   /** Skill 提示包（Markdown 可复用；聊天引用注入，设置页管理） */
   skills?: Skill[]
+  /** 工具前后 Hook（用户在设置里配置；开启即等于让 AgentHub 替你执行这些命令） */
+  hooks?: HookRule[]
+  /**
+   * 内置单价是手写快照（只收录有公开价格的模型，查不到就不折算金额）。
+   * 这里记的是最近一次核对官方价目页的时间；填自填单价时也会刷新。
+   * 它不是"实时价格"，只是提醒这个数有多旧。
+   */
+  priceCheckedAt?: number
   /**
    * 自定义单价（元 / 1M tokens）：内置表是手写快照，价格变了或没收录的模型由你自己填，
    * 带填写日期，界面据此说明金额是按哪份数据折算的。
@@ -534,6 +544,38 @@ export interface RollbackResult {
   moved: number
   failed: { rel: string; message: string }[]
   message?: string
+}
+
+/**
+ * 工具 Hook：在工具调用前后插一段你自己的命令（对齐 PreToolUse / PostToolUse 语义）。
+ * 数据通过环境变量传（AHUB_HOOK_TOOL / _ARGS / _RESULT / _FILE），不做字符串模板替换——
+ * 命令是你写的，参数是模型给的，拼接会把注入面留在命令串里。
+ */
+export interface HookRule {
+  id: string
+  /** pre=执行前（可否决）；post=执行后（观察/后处理，不撤销已发生的改动） */
+  event: 'pre' | 'post'
+  /** 匹配工具名的正则（忽略大小写）；空 = 全部工具 */
+  match?: string
+  /** 要跑的命令（shell 语法，工作目录 = 该 Agent 的沙箱根） */
+  command: string
+  /** 缺省视为启用 */
+  enabled?: boolean
+  /** 默认 15 秒 */
+  timeoutMs?: number
+  createdAt?: number
+}
+
+/** 一次 Hook 的执行结果（如实回传给模型与界面） */
+export interface HookRun {
+  id: string
+  command: string
+  exit: number | null
+  ok: boolean
+  blocked: boolean
+  timedOut?: boolean
+  /** stdout/stderr 摘要（截断后） */
+  output?: string
 }
 
 /** 长期记忆条目（区别于单次任务记录） */export interface MemoryEntry {

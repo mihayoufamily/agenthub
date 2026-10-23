@@ -5,7 +5,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import type { ChatChunkEvent } from './openai'
 import { humanizeError } from './openai'
-import { killTree } from '../tools'
+import { killTree } from '../shell'
 import type { ThinkingLevel } from '../../shared/types'
 
 /**

@@ -665,6 +665,19 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
           {tc.status === 'running' ? '执行中…' : tc.status === 'error' ? '失败' : '完成'}
         </span>
       </button>
+      {open && tc.hooks?.length && (
+        <div className="tool-diff" data-tool-hooks>
+          {tc.hooks.map((h, i) => (
+            <div key={`${h.id}-${i}`}>
+              <b style={{ color: h.blocked ? 'var(--danger)' : 'var(--text-3)' }}>
+                Hook {h.id} · 退出码 {h.exit ?? 'null'}{h.timedOut ? ' · 超时' : ''}{h.blocked ? ' · 已否决本次调用' : ''}
+              </b>
+              <div>{h.command}</div>
+              {h.output && <div style={{ whiteSpace: 'pre-wrap' }}>{h.output}</div>}
+            </div>
+          ))}
+        </div>
+      )}
       {open && tc.change?.diff && (
         <div className="tool-diff" data-tool-diff>
           <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>

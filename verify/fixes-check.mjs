@@ -539,6 +539,86 @@ console.log('\n[L] 自定义单价（覆盖内置表）+ 预算硬闸的账本�
   rmSync(root, { recursive: true, force: true })
 }
 
+// ---------- M. 工具 Hook ----------
+console.log('\n[M] Hooks：pre 可否决 / post 只观察 / 参数只走环境变量')
+{
+  const hk = await import('../out/shared/hooks.js')
+  const R = (o) => ({ id: 'h', event: 'pre', command: 'node -e "process.exit(0)"', ...o })
+  ok('空 match = 全部工具', hk.matchHook(R({}), 'write_file') && hk.matchHook(R({}), 'run_command'))
+  ok('正则按工具名命中', hk.matchHook(R({ match: 'write|replace' }), 'write_file') && !hk.matchHook(R({ match: 'write|replace' }), 'read_file'))
+  ok('enabled=false 的规则不参与', !hk.matchHook(R({ match: 'write', enabled: false }), 'write_file'))
+  ok('坏正则不命中，也不至于拦下所有工具', !hk.matchHook(R({ match: '([' }), 'write_file'))
+  const env = hk.hookEnv('post', { tool: 'write_file', argsJson: '{"path":"a;b && c","content":"x"}', dir: 'C:/work', result: { ok: true, output: 'done', writtenPath: 'C:/work/a' }, agentName: 'A', runId: 'run-1' })
+  ok('参数原文进环境变量（不拼进命令串）', env.AHUB_HOOK_ARGS === '{"path":"a;b && c","content":"x"}', env.AHUB_HOOK_ARGS)
+  ok('post 才带结果与落盘路径', env.AHUB_HOOK_FILE === 'C:/work/a' && env.AHUB_HOOK_OK === '1')
+  ok('pre 不带结果（模型还没跑呢）', hk.hookEnv('pre', { tool: 'x', argsJson: '{}' }).AHUB_HOOK_RESULT === '')
+  ok('缺省字段给空串而不是 undefined 字样', hk.hookEnv('pre', { tool: 'x', argsJson: '{}' }).AHUB_AGENT_NAME === '')
+  ok('校验拒绝空命令', !hk.validateHook({ event: 'pre', command: '  ' }).ok)
+  ok('校验拒绝坏正则与非法事件', !hk.validateHook({ event: 'before', command: 'x' }).ok && !hk.validateHook({ event: 'post', command: 'x', match: '(' }).ok)
+  ok('校验接受合法规则', hk.validateHook({ event: 'post', command: 'node -e "0"', match: 'write', timeoutMs: 5000 }).ok)
+}
+{
+  const root = mkdtempSync(join(tmpdir(), 'ahub-hook-'))
+  // 脚本落成文件再调用：命令串里不嵌套引号，测的才是行为而不是转义
+  const script = (name, body) => writeFileSync(join(root, name), body, 'utf8')
+  script('preinfo.js', "console.log('pre:' + process.env.AHUB_HOOK_TOOL)")
+  script('block.js', "console.log('这个目录不许写'); process.exit(3)")
+  script('pass.js', 'process.exit(0)')
+  script('marker.js', "require('fs').writeFileSync('hooked.txt', process.env.AHUB_HOOK_FILE)")
+  script('postfail.js', "console.log('测试没过'); process.exit(1)")
+  script('slow.js', 'setTimeout(() => process.exit(0), 4000)')
+  script('silent.js', "require('fs').writeFileSync('silent.txt', '1')")
+  const H = (id, event, file, extra = {}) => ({ id, event, command: `node ${file}`, ...extra })
+  const hooksExec = (tool, args, userHooks) =>
+    execTool({ dir: root, allowCommands: false, commandPolicy: 'auto' }, tool, JSON.stringify(args), undefined, { userHooks })
+
+  // ① pre 退出码非 0 = 否决，且被否决的写入不会发生
+  const blocked = await hooksExec('write_file', { path: 'never.txt', content: 'x' }, [H('b1', 'pre', 'block.js')])
+  ok('pre 非零退出 = 否决本次调用', !blocked.ok && blocked.output.includes('Hook 否决'), blocked.output.slice(0, 100))
+  ok('否决理由原样回传给模型', blocked.output.includes('这个目录不许写'), blocked.output)
+  ok('被否决的写入确实没发生', !existsSync(join(root, 'never.txt')))
+  ok('否决记录带退出码', blocked.hooks?.[0]?.blocked === true && blocked.hooks?.[0]?.exit === 3, JSON.stringify(blocked.hooks))
+
+  // ② pre 通过 + post 处理：脚本能从环境变量拿到工具名与落盘路径
+  const passed = await hooksExec('write_file', { path: 'ok.txt', content: '内容\n' }, [H('p1', 'pre', 'preinfo.js'), H('p2', 'post', 'marker.js')])
+  ok('pre 退出码 0 则放行', passed.ok && existsSync(join(root, 'ok.txt')), passed.output.slice(0, 100))
+  ok('脚本输出如实拼进工具结果（模型看得见）', passed.output.includes('pre:write_file'), passed.output.slice(-200))
+  // 工作目录=沙箱根，且 AHUB_HOOK_FILE 是真实绝对路径：这才叫"脚本能接着处理产物"
+  const hookedAbs = existsSync(join(root, 'hooked.txt')) ? readFileSync(join(root, 'hooked.txt'), 'utf8') : ''
+  ok('post 脚本拿到落盘绝对路径并在沙箱根内运行', hookedAbs === join(root, 'ok.txt'), hookedAbs)
+
+  // ③ 只有 post 失败不撤销改动，但要如实报告
+  const postFail = await hooksExec('write_file', { path: 'keep.txt', content: '留着\n' }, [H('f1', 'post', 'postfail.js')])
+  ok('post 失败不撤销已写入的文件', postFail.ok && existsSync(join(root, 'keep.txt')))
+  ok('post 失败仍然如实报出', postFail.output.includes('测试没过'), postFail.output.slice(-160))
+  ok('post 记录标为非否决', postFail.hooks?.[0]?.blocked === false)
+
+  // ④ 超时：pre 超时按否决处理（不能因为脚本卡住就默认放行）
+  const t0 = Date.now()
+  const to = await hooksExec('write_file', { path: 'late.txt', content: 'x' }, [H('t1', 'pre', 'slow.js', { timeoutMs: 400 })])
+  ok('pre 超时按否决（默认拒绝而非默认放行）', !to.ok && to.hooks?.[0]?.timedOut === true, JSON.stringify(to.hooks))
+  ok('超时被有界截住（没有干等 4 秒）', Date.now() - t0 < 2500, `${Date.now() - t0}ms`)
+  ok('超时的脚本没把写入留下', !existsSync(join(root, 'late.txt')))
+
+  // ④b 直接量一次超时：外壳先死会让 taskkill 找不到进程树（实测 code=128），
+  //     孙子进程带着管道继续活，"超时"了却还要干等到它自然结束
+  {
+    script('always.js', 'setTimeout(() => process.exit(0), 3000)')
+    const tk0 = Date.now()
+    const sh = await (await import('../out/main/shell.js')).runShell('node always.js', { cwd: root, timeoutMs: 400 })
+    const took = Date.now() - tk0
+    ok('命令超时真的被截住（不等子进程自然结束）', sh.timedOut === true && took < 1500, `${took}ms ${JSON.stringify({ t: sh.timedOut, c: sh.code, e: sh.error })}`)
+  }
+
+  // ⑤ 放行的 pre 也要留痕；停用的规则完全不跑；不匹配的工具完全不跑
+  ok('放行的 pre 也在记录里', (passed.hooks ?? []).length === 2 && passed.hooks.every((h) => !h.blocked), JSON.stringify(passed.hooks))
+  const quiet = await hooksExec('read_file', { path: 'keep.txt' }, [H('q1', 'pre', 'silent.js', { enabled: false })])
+  ok('停用规则不执行', quiet.ok && !existsSync(join(root, 'silent.txt')) && !quiet.hooks?.length)
+  const nomatch = await hooksExec('read_file', { path: 'keep.txt' }, [H('q2', 'pre', 'silent.js', { match: '^write_file$' })])
+  ok('不匹配该工具的规则不执行', nomatch.ok && !existsSync(join(root, 'silent.txt')))
+  rmSync(root, { recursive: true, force: true })
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

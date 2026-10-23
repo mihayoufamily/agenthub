@@ -3,7 +3,7 @@ import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
   LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord,
-  CheckpointManifest, RollbackResult, FileChange, PriceOverride
+  CheckpointManifest, RollbackResult, FileChange, PriceOverride, HookRule
 } from '../shared/types'
 
 /**
@@ -120,6 +120,11 @@ const api = {
     remove: (id: string) => ipcRenderer.invoke('skills:remove', id) as Promise<{ ok: true }>,
     /** 导入 Agent Skills 标准目录（含 SKILL.md） */
     importDir: () => ipcRenderer.invoke('skills:importDir') as Promise<{ ok: boolean; skill?: Skill; message?: string }>
+  },
+  /** 工具前后 Hook：pre 可否决调用，post 只观察/后处理 */
+  hooks: {
+    list: () => ipcRenderer.invoke('hooks:list') as Promise<HookRule[]>,
+    set: (list: HookRule[]) => ipcRenderer.invoke('hooks:set', list) as Promise<{ ok: boolean; list: HookRule[] }>
   },
   /** 自定义单价覆盖（内置表是手写快照，价格变了由你填，带填写日期） */
   prices: {

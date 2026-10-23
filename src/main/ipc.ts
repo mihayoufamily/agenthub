@@ -8,6 +8,8 @@ import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride } from '../shared/types'
 import { configurePriceOverrides } from '../shared/overrides'
+import { validateHook } from './hooks'
+import type { HookRule } from '../shared/types'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
@@ -213,6 +215,14 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   /** 当前应用菜单的加速键清单（验证脚本据此确认 Ctrl+R 刷新等默认键已不再注册） */
+  // ---------- 工具 Hook（用户在设置里配置） ----------
+  ipcMain.handle('hooks:list', () => getStore().getConfig().hooks ?? [])
+  ipcMain.handle('hooks:set', (_e, list: HookRule[]) => {
+    const clean = (Array.isArray(list) ? list : []).filter((h) => validateHook(h).ok).slice(0, 40)
+    getStore().setHooks(clean)
+    return { ok: true, list: clean }
+  })
+
   // ---------- 自定义单价（覆盖内置表；随配置导出导入） ----------
   ipcMain.handle('prices:get', () => getStore().getConfig().priceOverrides ?? [])
   ipcMain.handle('prices:set', (_e, list: PriceOverride[]) => {
@@ -368,19 +378,25 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
         checkpoint = cpId
       }
     }
+    const userHooks = stored.hooks ?? []
     openai.chatStream(cfg, key, reqId, messages, (ev) => {
       tap(ev)
       getWin()?.webContents.send('model:event', ev)
-    }, grant, grant
-      ? {
-          approver: makeApprover(reqId, {
-            dir: grant.dir,
-            ...(opts?.agentId ? { agentId: opts.agentId } : {}),
-            ...(agentName ? { agentName } : {})
-          }),
-          ...(checkpoint ? { checkpoint } : {})
-        }
-      : undefined)
+    }, grant, grant ? {
+      approver: makeApprover(reqId, {
+        dir: grant.dir,
+        ...(opts?.agentId ? { agentId: opts.agentId } : {}),
+        ...(agentName ? { agentName } : {})
+      }),
+      ...(checkpoint ? { checkpoint } : {}),
+      ...(userHooks.length ? { userHooks } : {}),
+      meta: {
+        ...(opts?.agentId ? { agentId: opts.agentId } : {}),
+        ...(agentName ? { agentName } : {}),
+        ...(opts?.runId ? { runId: opts.runId } : {}),
+        reqId
+      }
+    } : undefined)
     return { ok: true, checkpoint }
   })
 
@@ -475,9 +491,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     // 只是问的是"正在调用它的那个人"，而不是某个 Agent 的白名单
     const cp = typeof checkpointId === 'string' ? checkpointId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) : ''
     if (cp) await checkpoints.start(cp, grant.dir)
+    const userHooks = getStore().getConfig().hooks ?? []
     return execTool(grant, tool, argsJson, undefined, {
       approver: makeApprover('tools:exec', { dir: grant.dir }),
-      ...(cp ? { checkpoint: cp } : {})
+      ...(cp ? { checkpoint: cp } : {}),
+      ...(userHooks.length ? { userHooks } : {})
     })
   })
 

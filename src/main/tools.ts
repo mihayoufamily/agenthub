@@ -5,17 +5,17 @@
 import { promises as fs, realpathSync } from 'node:fs'
 import { resolve as resolvePath, dirname, sep, relative } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { spawn, type ChildProcess } from 'node:child_process'
 import type { ToolGrant } from '../shared/types'
-import type { ApprovalDecision, FileChange } from '../shared/types'
+import type { ApprovalDecision, FileChange, HookRun } from '../shared/types'
 import { checkCommand } from '../shared/approvals'
 import { relativeOf, beforeChange as cpBefore, record as cpRecord, diffOfFile, diffLines } from './checkpoints'
+import { runShell, MAX_OUTPUT } from './shell'
+import { runHooks } from './hooks'
 
 const MAX_READ = 200 * 1024 // 读文件上限
 const MAX_WRITE = 1024 * 1024 // 写文件上限
 const MAX_LIST = 500 // 列目录条目上限
-const MAX_OUTPUT = 100 * 1024 // 命令输出/工具结果上限
-export { MAX_OUTPUT }
+export { MAX_OUTPUT } // 工具结果上限（shell.ts 定义，openai 适配层按此截断）
 const CMD_TIMEOUT_MS = 60_000 // 命令超时
 const MAX_SEARCH_HITS = 100 // 文本搜索匹配上限
 const MAX_GLOB = 200 // 通配符匹配文件上限
@@ -399,14 +399,6 @@ function replaceFirstLiteral(text: string, find: string, replace: string): strin
   return text.slice(0, i) + replace + text.slice(i + find.length)
 }
 
-/** Windows 杀进程树：taskkill /T /F（含所有孙子进程）；不可用时退回普通 kill */
-export function killTree(proc: ChildProcess): void {
-  try {
-    if (proc.pid) spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-  } catch { /* taskkill 缺失时退回普通 kill */ }
-  try { proc.kill() } catch { /* noop */ }
-}
-
 /** 文件此刻是否存在（决定这次算"改"还是"新建"） */
 async function existsFile(p: string): Promise<boolean> {
   try {
@@ -424,6 +416,8 @@ export interface ToolExecResult {
   writtenPath?: string
   /** 本次改动登记（有检查点时）：界面据此显示 diff 与"能不能回滚" */
   change?: FileChange
+  /** 跑过的 Hook 记录（含被否决的原因），界面与模型都能看到 */
+  hooks?: HookRun[]
 }
 
 /**
@@ -444,15 +438,60 @@ export interface CommandApprover {
   }) => Promise<ApprovalDecision>
 }
 
-/** 工具执行的外挂：命令审批 + 改动检查点（两者都由调用方按场景注入） */
+/** 工具执行的外挂：命令审批 + 改动检查点 + 用户 Hook（都由调用方按场景注入） */
 export interface ToolHooks {
   approver?: CommandApprover
   /** 检查点 id：有值则在文件改动前备份原件并登记变更，之后可整体回滚 */
   checkpoint?: string
+  /** 用户配置的工具前后 Hook（pre 可否决本次调用） */
+  userHooks?: import('../shared/types').HookRule[]
+  meta?: { agentId?: string; agentName?: string; runId?: string; reqId?: string }
 }
 
-/** 执行一次工具调用。argsJson 为模型输出的 JSON 字符串（解析失败按参数错误处理）。signal 为外部取消信号（可中断命令/联网）。 */
+/**
+ * 工具执行入口：先跑 pre Hook（可否决），再执行沙箱逻辑，最后跑 post Hook。
+ * Hook 记录与说明拼进结果文本，模型和界面看到的是同一份，不会一边知道一边不知道。
+ */
 export async function execTool(
+  grant: ToolGrant,
+  tool: string,
+  argsJson: string,
+  signal?: AbortSignal,
+  hooks?: ToolHooks
+): Promise<ToolExecResult> {
+  const ctx = {
+    tool,
+    argsJson,
+    dir: grant.dir,
+    ...(hooks?.meta?.agentId ? { agentId: hooks.meta.agentId } : {}),
+    ...(hooks?.meta?.agentName ? { agentName: hooks.meta.agentName } : {}),
+    ...(hooks?.meta?.runId ? { runId: hooks.meta.runId } : {}),
+    ...(hooks?.meta?.reqId ? { reqId: hooks.meta.reqId } : {})
+  }
+  const pre = await runHooks('pre', hooks?.userHooks, ctx, signal)
+  if (pre.blocked) {
+    return { ok: false, output: `拒绝：Hook 否决了这次调用。\n${pre.notes.join('\n')}`, ...(pre.runs.length ? { hooks: pre.runs } : {}) }
+  }
+  const res = await dispatch(grant, tool, argsJson, signal, hooks)
+  const post = await runHooks(
+    'post',
+    hooks?.userHooks,
+    { ...ctx, result: { ok: res.ok, output: res.output, ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}) } },
+    signal
+  )
+  const runs = [...pre.runs, ...post.runs]
+  if (!runs.length) return res
+  // pre 的脚本输出也要带上去：放行不等于无声——审计时"谁跑过、说了什么"要能查到
+  const notes = [...pre.notes, ...post.notes]
+  return {
+    ...res,
+    output: `${res.output}${notes.length ? `\n\n${notes.join('\n')}` : ''}`,
+    hooks: runs
+  }
+}
+
+/** 沙箱与审批本体（不含 Hook）：单独拆出来让 Hook 层能包在它外面 */
+async function dispatch(
   grant: ToolGrant,
   tool: string,
   argsJson: string,
@@ -727,75 +766,14 @@ export async function execTool(
         const full = grant.access === 'full'
         const cwdRoot = grant.dir?.trim() ? resolvePath(grant.dir) : ''
         if (!full && !cwdRoot) return { ok: false, output: '拒绝：未配置沙箱目录' }
-        return await new Promise<ToolExecResult>((res) => {
-          const child = spawn(command, {
-            shell: true,
-            ...(cwdRoot ? { cwd: cwdRoot } : {}),
-            windowsHide: true
-            // 注意：不用 spawn 的 timeout 选项——它只终止 cmd.exe 外壳，
-            // 外壳启动的孙子进程会继续运行。超时/取消统一走 killTree 杀整棵树。
-          })
-          let killed = false
-          let timedOut = false
-          const cleanup = () => {
-            clearTimeout(timer)
-            if (signal) signal.removeEventListener('abort', onAbort)
-          }
-          const timer = setTimeout(() => {
-            timedOut = true
-            killed = true
-            killTree(child)
-          }, CMD_TIMEOUT_MS)
-          const onAbort = () => {
-            killed = true
-            killTree(child)
-          }
-          if (signal) {
-            if (signal.aborted) onAbort()
-            else signal.addEventListener('abort', onAbort, { once: true })
-          }
-          // 输出按 Buffer 收集，结束后统一解码（避免多字节序列被 chunk 边界切断）
-          const chunks: Buffer[] = []
-          let total = 0
-          // 字节上限是"丢数据"而非"切字符"：记录是否丢过，截断必须如实标注（静默截断会骗模型）
-          let capped = false
-          const append = (b: Buffer | string) => {
-            if (typeof b === 'string') { chunks.push(Buffer.from(b, 'utf8')); total += b.length; return }
-            if (total < MAX_OUTPUT) { chunks.push(b); total += b.length } else capped = true
-          }
-          child.stdout?.on('data', append)
-          child.stderr?.on('data', append)
-          child.on('error', (e) => { cleanup(); res({ ok: false, output: `启动失败：${e.message}` }) })
-          child.on('close', (code, signalName) => {
-            cleanup()
-            // 中文 Windows 的 cmd 输出为 GBK（代码页 936）：先严格按 UTF-8 解码，失败则回退 GBK。
-            // 输出按字节截断可能切碎末尾多字节字符：严格解码失败时先回退最多 3 字节重试，
-            // 成功说明是截断边界问题而非 GBK，避免整段 UTF-8 被按 GBK 误解码成乱码
-            const buf = Buffer.concat(chunks)
-            const strict = new TextDecoder('utf-8', { fatal: true })
-            let out: string | null = null
-            try {
-              out = strict.decode(buf)
-            } catch {
-              for (let cut = 1; cut <= 3 && out === null; cut++) {
-                try { out = strict.decode(buf.subarray(0, buf.length - cut)) } catch { /* 继续回退 */ }
-              }
-            }
-            if (out === null) {
-              try { out = new TextDecoder('gbk').decode(buf) } catch { out = buf.toString('utf8') }
-            }
-            if (capped || out.length >= MAX_OUTPUT) out = out.slice(0, MAX_OUTPUT) + '…（输出已截断）'
-            if (timedOut) {
-              res({ ok: false, output: `命令超时（${CMD_TIMEOUT_MS / 1000}s）已终止（含子进程）。已产生的输出：\n${out || '（无）'}` })
-            } else if (killed && signal?.aborted) {
-              res({ ok: false, output: `已取消：命令被用户停止（进程树已终止）。已产生的输出：\n${out || '（无）'}` })
-            } else if (signalName === 'SIGTERM' || signalName === 'SIGKILL') {
-              res({ ok: false, output: `命令被终止。已产生的输出：\n${out || '（无）'}` })
-            } else {
-              res({ ok: true, output: `退出码 ${code}\n${out || '（无输出）'}` })
-            }
-          })
-        })
+        // 执行统一走 shell.ts：进程树、超时、GBK 这些坑只在一个地方踩一次
+        const sh = await runShell(command, { ...(cwdRoot ? { cwd: cwdRoot } : {}), timeoutMs: CMD_TIMEOUT_MS, ...(signal ? { signal } : {}) })
+        if (sh.timedOut) return { ok: false, output: `命令超时（${CMD_TIMEOUT_MS / 1000}s）已终止（含子进程）。已产生的输出：\n${sh.output || '（无）'}` }
+        if (sh.aborted) return { ok: false, output: `已取消：命令被用户停止（进程树已终止）。已产生的输出：\n${sh.output || '（无）'}` }
+        // 没跑起来（目录不存在、exe 缺失、被信号终止）：如实失败，别报成"退出码 null"
+        if (sh.code === null && sh.error) return { ok: false, output: `${sh.error}\n${sh.output || ''}`.trim() }
+        // 非零退出码不是工具失败：模型要看得到"退出码 1 + 输出"才能自己改，这里与旧行为一致
+        return { ok: true, output: `退出码 ${sh.code}\n${sh.output || '（无输出）'}` }
       }
       default:
         return { ok: false, output: `未知工具：${tool}` }
