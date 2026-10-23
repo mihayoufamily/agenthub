@@ -8,7 +8,7 @@
  * （ipc.ts 挑 server 用 !!s），这里把这道消费者闸门做成可断言的纯函数。
  * 不放在 mcp.ts：那是主进程模块，逻辑层测试不该为断言形状闸门去起 MCP 代码。
  */
-import type { McpServer } from './types'
+import type { McpServer, RejectedEntry } from './types'
 
 /** 形状正确 = 非空对象 + 字符串 id。其余（null、字符串、数字、没 id 的残片）一律不收 */
 function isWellFormed(s: unknown): s is McpServer {
@@ -45,4 +45,63 @@ export function stampMcpLegacy(s: McpServer): McpServer {
 export function sanitizeMcpList(list: unknown): McpServer[] {
   if (!Array.isArray(list)) return []
   return list.filter(isWellFormed).map(stampMcpLegacy)
+}
+
+/**
+ * 一张 mcpServers 表最多存多少条。界面上一次只加一条，所以这个界挡的是"整表暴涨"，
+ * 不是日常使用（与 shared/hooks.HOOK_RULES_MAX 同一取向）。
+ */
+export const MCP_SERVERS_MAX = 20
+
+/**
+ * 形状不合格（名称为空，且 command 与 launch.bin 都为空）时的拒收原因。
+ * 与设置页「添加并探测」按钮上既有的那句是**同一份**（SettingsPage 直接引这个常量），
+ * 免得"表单里说 A、保存时说 B"。
+ */
+export const MCP_SHAPE_REJECT_MESSAGE = '名称与启动命令都要填'
+
+/** 形状合格 = 有名称，且 command 与 launch.bin 至少填了一个（与旧 handler 的 filter 同一口径） */
+function isShapedEntry(raw: unknown): raw is McpServer {
+  if (!raw || typeof raw !== 'object') return false
+  const s = raw as Partial<McpServer>
+  if (typeof s.name !== 'string' || !s.name.trim()) return false
+  const hasCommand = typeof s.command === 'string' && !!s.command.trim()
+  const hasBin = typeof s.launch?.bin === 'string' && !!s.launch.bin.trim()
+  return hasCommand || hasBin
+}
+
+/**
+ * `mcp:set` 的落盘闸门（修复波 A · 项 3）。返回「该存什么」与「哪些条目没被接受、为什么」。
+ *
+ * 旧写法是 `.filter(形状).slice(0, 20).map(stampMcpLegacy)`：第 21 条被 .slice 静默丢掉。
+ * 界面那次 save 提交的永远是整表（拨一个"启用"开关也会把整份列表回传），
+ * 所以用户加到第 21 个 server 时看到的是"保存成功但列表里没了"——最难查的那一类。
+ * 拒收本身没错，错的是**静默**：现在每一条被拒的都点名回界面。
+ *
+ * 落盘口径与 hooks 那一侧**刻意不同**，理由是读路径不同：`mcp:list` 走 sanitizeMcpList，
+ * 形状不合格的记录本来就不会回到渲染层，把它们留在配置里只会造成"存了但界面看不见、
+ * 下一次整表 save 又把它覆盖掉"，比明确拒收更坏；hooks:list 是原样返回整表的，
+ * 所以那一侧保留被拒条目（不删用户数据，见 shared/hooks.partitionHookRules）。
+ * 这里的形状不合格＝名称空且两个命令位都空，是"一行空表单"，不含用户数据。
+ * 补形与旧格式打标沿用同一个 stampMcpLegacy，缺 id 的合法记录由这里补一个
+ * （原来这半句写在 handler 的 .map 里，搬进闸门后不能丢）。
+ */
+export function partitionMcpServers(list: unknown): { kept: McpServer[]; rejected: RejectedEntry[] } {
+  const incoming: unknown[] = Array.isArray(list) ? list : []
+  const kept: McpServer[] = []
+  const rejected: RejectedEntry[] = []
+  for (let i = 0; i < incoming.length; i++) {
+    const raw = incoming[i]
+    const id = String((raw && typeof raw === 'object' ? (raw as { id?: unknown }).id : undefined) ?? `#${i + 1}`)
+    if (!isShapedEntry(raw)) {
+      rejected.push({ id, message: MCP_SHAPE_REJECT_MESSAGE })
+      continue
+    }
+    if (kept.length >= MCP_SERVERS_MAX) {
+      rejected.push({ id, message: `最多 ${MCP_SERVERS_MAX} 条，这一条没有保存` })
+      continue
+    }
+    kept.push(stampMcpLegacy({ ...raw, id: raw.id || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` }))
+  }
+  return { kept, rejected }
 }

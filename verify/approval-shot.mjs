@@ -347,6 +347,55 @@ try {
     JSON.stringify(await js(cdp, 'window.agenthub.mcp.list()')) === JSON.stringify(before) &&
       trusted8.length === trustedBefore8.length && trustedBefore8.every((id) => trusted8.includes(id)))
 
+  // ---- 8b. 修复波 A · 项 3：Hook 整表保存不再静默删掉校验不通过的旧规则 ----
+  // 缺陷：hooks:set 对**整表**跑 validateHook 并按 ok 过滤，而界面那次 save 提交的正是整表
+  // （SettingsPage 的 patch → save(rules.map(...))）——用户拨一下任意一个 Hook 开关，
+  // 一条 >4096 字符的旧规则（导入来的 / 手改的 / v0.3.0 写的）就地消失，且不告诉他。
+  // 走真导入路径把超长规则放进 config（hooks:list 原样返回整表，所以设置页看得见它）；
+  // config.json 整份由 finally 按字节还原，这里另外把运行中进程的 hooks 表也还原一次。
+  console.log('\n[8b] Hook 整表保存：超长旧规则不被静默删掉，拒收原因点名显示在界面上')
+  const hooksBefore = (await js(cdp, 'window.agenthub.hooks.list()')) ?? []
+  const LONG_ID = 'ahub_verify_long_hook'
+  const OTHER_ID = 'ahub_verify_other_hook'
+  const longRule = { id: LONG_ID, event: 'post', command: 'x'.repeat(5000), match: '', enabled: true }
+  const otherRule = { id: OTHER_ID, event: 'pre', command: 'node -e "process.exit(0)"', match: '', enabled: true }
+  const hooksRt = await js(cdp, `window.__ahub_debug.configRoundTrip({ hooks: ${JSON.stringify([longRule, otherRule])} })`)
+  ok('前置：超长规则经真导入路径进了 config（导入不校验 Hook，hooks:list 原样返回整表）',
+    hooksRt?.import?.ok === true && Array.isArray(hooksRt?.config?.hooks) && hooksRt.config.hooks.length === 2 &&
+      hooksRt.config.hooks[0]?.id === LONG_ID && hooksRt.config.hooks[0]?.command?.length === 5000,
+    JSON.stringify((hooksRt?.config?.hooks ?? []).map((h) => ({ id: h?.id, len: h?.command?.length }))))
+  await js(cdp, 'window.__ahub_debug.closeSettings()')
+  await sleep(150)
+  await js(cdp, 'window.__ahub_debug.openSettings("hooks")')
+  await sleep(700)
+  const hookRows = await js(cdp, `document.querySelectorAll('[data-hook-row]').length`)
+  ok('设置页把两条都显示出来（超长那条也在：显示走脱敏 + 160 字符可见宽度，不撑破版面）',
+    hookRows === 2, String(hookRows))
+  // 「一次无关的开关改动」＝拨另一条的启用开关；界面提交的仍然是整表
+  const toggled = await js(cdp, `(() => { const b = document.querySelector(${JSON.stringify(`[aria-label="启用 Hook ${OTHER_ID}"]`)}); if (!b) return false; b.click(); return true })()`)
+  await sleep(800)
+  ok('前置：拨的是另一条的开关（与超长那条无关）', toggled === true, String(toggled))
+  const hookNotice = String(await js(cdp, `document.querySelector('[data-testid="hook-rejected"]')?.textContent ?? ''`))
+  const hookNoticeIds = await js(cdp, `[...document.querySelectorAll('[data-testid="hook-rejected"] [data-rejected-id]')].map((x) => x.getAttribute('data-rejected-id'))`)
+  ok('拨完无关的开关后界面出现拒绝提示：点名是哪一条、为什么（旧写法静默删掉，界面上什么都不发生）',
+    hookNotice.includes(LONG_ID) && hookNotice.includes('命令最长') &&
+      Array.isArray(hookNoticeIds) && hookNoticeIds.includes(LONG_ID),
+    `提示文案=${hookNotice.slice(0, 200)} 点名的 id=${JSON.stringify(hookNoticeIds)}`)
+  const hooksAfter = (await js(cdp, 'window.agenthub.hooks.list()')) ?? []
+  ok('那条超长规则仍在配置里（不删用户数据：改短还是删掉由用户自己决定）',
+    hooksAfter.some((h) => h?.id === LONG_ID && h?.command?.length === 5000),
+    JSON.stringify(hooksAfter.map((h) => ({ id: h?.id, len: h?.command?.length }))))
+  ok('无关的那次开关改动照常落盘（保留被拒条目不影响同表其它条目的保存）',
+    hooksAfter.find((h) => h?.id === OTHER_ID)?.enabled === false,
+    JSON.stringify(hooksAfter.find((h) => h?.id === OTHER_ID) ?? null).slice(0, 160))
+  await js(cdp, `window.agenthub.hooks.set(${JSON.stringify(hooksBefore)})`)
+  await js(cdp, 'window.__ahub_debug.closeSettings()')
+  await sleep(300)
+  const hooksRestored = (await js(cdp, 'window.agenthub.hooks.list()')) ?? []
+  ok('Hook 测试已还原：hooks 表回到测试前',
+    JSON.stringify(hooksRestored) === JSON.stringify(hooksBefore),
+    `${JSON.stringify(hooksRestored).slice(0, 120)} vs ${JSON.stringify(hooksBefore).slice(0, 120)}`)
+
   // ---- 9. 导入往返（任务2 遗留的真机收口；本节写真实 config.json，脚本末尾按字节还原）----
   console.log('\n[9] MCP 导入往返：旧记录标失效、脏元素不进取渲染层')
   const rt = await js(cdp, `window.__ahub_debug.configRoundTrip({ mcpServers: [{ id:'rt-old', name:'导入旧版', command:'node x.js', enabled:true }, null, { id:'rt-new', name:'导入新版', command:'node y.js', launch:{ bin:'node', args:['y.js'] }, enabled:true }] })`)
@@ -471,6 +520,7 @@ try {
   // 评审 finding 3：徽章单挂 Shell 要覆盖两种模式——数量断言"只挂一处"，工作流断言"换屏不消失"
   const badgeCountWb = await js(cdp3, "document.querySelectorAll('[data-compat-badge]').length")
   ok('工作站内徽章恰好一枚（Shell 单挂，不再是 Workbench/ChatView 两处各挂一份）', badgeCountWb === 1, String(badgeCountWb))
+
   const onWf12 = await gotoWorkflow(cdp3)
   const badgeInWf = onWf12 ? await waitJs(cdp3, "document.querySelectorAll('[data-compat-badge]').length === 1", 12000) : false
   ok('Ctrl+M 进工作流模式徽章仍在（沙箱被关掉这件事换屏也看得见——用户"可见"那一半）',

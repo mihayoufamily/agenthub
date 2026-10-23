@@ -8,8 +8,8 @@ import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer } from '../shared/types'
 import { configurePriceOverrides } from '../shared/overrides'
-import { validateHook } from './hooks'
-import { sanitizeMcpList, stampMcpLegacy } from '../shared/mcp-list'
+import { partitionHookRules } from '../shared/hooks'
+import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
 import { normalizePolicy, VERIFY_SWITCH } from '../shared/compat'
 import { execTool, type CommandApprover } from './tools'
 import * as approvals from './approvals'
@@ -236,20 +236,14 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // 手改 config.json 的 null 不该活到渲染层被解引用炸掉设置页/ChatView。
   ipcMain.handle('mcp:list', () => sanitizeMcpList(getStore().getConfig().mcpServers))
   ipcMain.handle('mcp:set', (_e, list: McpServer[]) => {
-    const clean = (Array.isArray(list) ? list : [])
-      // launch 已填好但 command 为空的记录也要放行：「重填」过程中旧 command 会先清空，
-      // 旧条件只认 command，会把这种记录静默丢掉（保存"成功"但列表里没了，最难查的一类）
-      .filter((s) => s && typeof s.name === 'string' && s.name.trim()
-        && ((typeof s.command === 'string' && s.command.trim()) || (s.launch && typeof s.launch.bin === 'string' && s.launch.bin.trim())))
-      .slice(0, 20)
-      // stampMcpLegacy：只有旧 command 没有 launch 的记录存下时就标失效（与加载期迁移同一口径），
-      // 界面立刻能看到停用横幅与「重填」，不用等下一次冷启动迁移才显形；planSpawn 本来就拒收这类记录
-      .map((s) => stampMcpLegacy({ ...s, id: s.id || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` }))
-    getStore().setMcpServers(clean)
+    // 闸门抽到 shared/mcp-list.partitionMcpServers（逻辑层可断言）：形状判定 + 条数上限 + 补形打标，
+    // 被拒的条目一律点名回界面（rejected），不再由 .slice 静默丢掉第 21 条。
+    const { kept, rejected } = partitionMcpServers(list)
+    getStore().setMcpServers(kept)
     // 删掉的 server 要把信任一起清掉：留着一条没人认领的信任，将来同 id 复用就自动放行了
-    const keep = new Set(clean.map((s) => s.id))
+    const keep = new Set(kept.map((s) => s.id))
     for (const id of approvals.mcpTrusted()) if (!keep.has(id)) approvals.setMcpTrust(id, false)
-    return { ok: true, list: clean }
+    return { ok: true, list: kept, rejected }
   })
   ipcMain.handle('mcp:probe', (_e, server: McpServer) => mcp.probeServer(server))
   ipcMain.handle('mcp:trust', () => approvals.mcpTrusted())
@@ -258,9 +252,13 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- 工具 Hook（用户在设置里配置） ----------
   ipcMain.handle('hooks:list', () => getStore().getConfig().hooks ?? [])
   ipcMain.handle('hooks:set', (_e, list: HookRule[]) => {
-    const clean = (Array.isArray(list) ? list : []).filter((h) => validateHook(h).ok).slice(0, 40)
-    getStore().setHooks(clean)
-    return { ok: true, list: clean }
+    // 闸门抽到 shared/hooks.partitionHookRules（内部逐条跑 validateHook(h)，逻辑层可断言）：
+    // 校验不通过的条目**原样留在配置里**（不删用户数据），只把原因回给界面点名显示。
+    // 旧写法 `.filter((h) => …ok).slice(0, 40)` 对整表重校验，用户拨一下任意一个开关，
+    // 一条 >4096 字符的旧规则就地消失且没人告诉他。
+    const { kept, rejected } = partitionHookRules(list)
+    getStore().setHooks(kept)
+    return { ok: true, list: kept, rejected }
   })
 
   // ---------- 自定义单价（覆盖内置表；随配置导出导入） ----------

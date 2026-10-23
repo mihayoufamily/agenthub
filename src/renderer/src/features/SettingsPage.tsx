@@ -4,8 +4,9 @@ import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
-import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe } from '@shared/types'
+import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe, RejectedEntry } from '@shared/types'
 import { validateHook, HOOK_COMMAND_MAX_LENGTH } from '@shared/hooks'
+import { MCP_SHAPE_REJECT_MESSAGE } from '@shared/mcp-list'
 import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
 import { fingerprintCommand, redactCommandForDisplay } from '@shared/approvals'
 import { compatBadgeText, SANDBOX_FALLBACK_OPTIONS } from '@shared/compat'
@@ -463,10 +464,37 @@ function ApprovalSection() {
 /* ---- 工具 Hook：在工具调用前后跑你自己配的命令 ---- */
 const EMPTY_RULE: HookRule = { id: '', event: 'post', command: '', match: '', enabled: true }
 
+/**
+ * 保存整表时被主进程点名拒收的条目（hooks:set / mcp:set 都回 rejected）。
+ *
+ * 为什么必须显示：界面那次保存提交的永远是**整表**（拨一个"启用"开关也会把整份列表回传），
+ * 主进程按条校验后就只有"过滤掉不合格的再落盘"这一种写法——于是用户碰了一下无关的开关，
+ * 一条旧记录（导入来的、手改的、上个版本写的）就地消失，而且没人告诉他。
+ * 拒收本身没错，错的是静默。id 与原因都由主进程回传，这里只负责说出来。
+ */
+function RejectedNotice({ testId, rejected, note }: { testId: string; rejected: RejectedEntry[]; note: string }) {
+  if (!rejected?.length) return null
+  return (
+    <div
+      data-testid={testId}
+      style={{ fontSize: 12, color: 'var(--warn)', border: '1px solid var(--warn)', borderRadius: 'var(--r-sm)', padding: '6px 10px', marginBottom: 8, lineHeight: 1.7 }}
+    >
+      {rejected.length} 条没有被接受。{note}
+      {rejected.map((r) => (
+        <div key={r.id} data-rejected-id={r.id}>
+          <code style={{ wordBreak: 'break-all' }}>{r.id}</code>：{r.message}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function HookSection() {
   const [rules, setRules] = useState<HookRule[]>([])
   const [draft, setDraft] = useState<HookRule>(EMPTY_RULE)
   const [err, setErr] = useState('')
+  // 被主进程点名的条目：校验不通过的**仍留在配置里**（不删用户数据），但必须说出来
+  const [rejected, setRejected] = useState<RejectedEntry[]>([])
 
   const load = () => {
     void bridge.hooks.list().then(setRules)
@@ -476,6 +504,7 @@ function HookSection() {
   const save = async (next: HookRule[]) => {
     const r = await bridge.hooks.set(next)
     setRules(r.list)
+    setRejected(r.rejected ?? [])
     return r
   }
 
@@ -504,7 +533,7 @@ function HookSection() {
         <br />
         数据只通过环境变量传入（<code>AHUB_HOOK_TOOL</code> / <code>_ARGS</code> / <code>_RESULT</code> / <code>_FILE</code> / <code>_DIR</code>，
         以及 <code>AHUB_AGENT_NAME</code> / <code>AHUB_RUN_ID</code>）——不把这些拼进命令串，免得模型给的参数变成可执行内容。
-        工作目录固定为该 Agent 的沙箱根，超时默认 15 秒、输出有上限。命令最长 {HOOK_COMMAND_MAX_LENGTH} 个字符——超长不予保存（新增时这里会直接把原因显示出来），也不会在背后替你截断。
+        工作目录固定为该 Agent 的沙箱根，超时默认 15 秒、输出有上限。命令最长 {HOOK_COMMAND_MAX_LENGTH} 个字符——新增时超长不予保存（原因直接显示出来），也不会在背后替你截断；表里已有的超长旧规则不会被静默删掉：它原样留着，并在下面点名告诉你为什么没被接受，改短还是删掉由你决定。
         <br />
         <b style={{ color: 'var(--danger)' }}>风险：</b>配了 Hook 就是让 AgentHub 在每次工具调用时代你执行这些命令，
         与命令审批不同，Hook 不再逐条问你。只写你自己完全信任的脚本。CLI Agent 不经过这一层。
@@ -512,6 +541,11 @@ function HookSection() {
       </div>
 
       {rules.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginBottom: 8 }}>（还没有 Hook）</div>}
+      <RejectedNotice
+        testId="hook-rejected"
+        rejected={rejected}
+        note="它们原样留在配置里（没有替你删）："
+      />
       {rules.map((h) => (
         <div key={h.id} data-hook-row style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
@@ -610,6 +644,8 @@ function McpSection() {
   const [busy, setBusy] = useState('')
   // 「重填」的目标旧条目（null=没有在重填）。见 refill 的注释：移除推迟到保存那一刻。
   const [refillTarget, setRefillTarget] = useState<McpServer | null>(null)
+  // 被主进程点名拒收的条目（第 21 条超限、形状不合格）：旧写法是 .slice(0, 20) 静默丢掉
+  const [rejected, setRejected] = useState<RejectedEntry[]>([])
 
   const load = () => {
     void bridge.mcp.list().then(setList)
@@ -620,6 +656,7 @@ function McpSection() {
   const save = async (next: McpServer[]) => {
     const r = await bridge.mcp.set(next)
     setList(r.list)
+    setRejected(r.rejected ?? [])
     return r.list
   }
 
@@ -642,7 +679,9 @@ function McpSection() {
   const add = async () => {
     const plan = toLaunchPlan(draft.command)
     if (!draft.name.trim() || !plan) {
-      useUi.getState().toast('名称与启动命令都要填', 'warn')
+      // 与主进程 mcp:set 的拒收原因是**同一份**文案（shared/mcp-list.MCP_SHAPE_REJECT_MESSAGE）：
+      // 表单里说 A、保存时说 B 会让人以为是两回事
+      useUi.getState().toast(MCP_SHAPE_REJECT_MESSAGE, 'warn')
       return
     }
     const unsafe = comspecUnsafe(plan)
@@ -695,6 +734,11 @@ function McpSection() {
       </div>
 
       {list.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginBottom: 8 }}>（还没配 MCP server）</div>}
+      <RejectedNotice
+        testId="mcp-rejected"
+        rejected={rejected}
+        note="它们没有保存（读的那一侧本来也不返回形状不合格的记录，留在配置里只会看不见又改不动）："
+      />
       {list.map((s) => {
         const p = probes[s.id]
         const users = usedBy(s.id)

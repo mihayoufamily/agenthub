@@ -675,6 +675,81 @@ console.log('\n[M] Hooks：pre 可否决 / post 只观察 / 参数只走环境�
       /ipcMain\.handle\(\s*'hooks:set'[\s\S]{0,240}validateHook\(/.test(ipcSrcM.text) &&
       /validateHook\(draft\)/.test(settingsSrcM.text),
     `${ipcSrcM.error ?? ''}${settingsSrcM.error ?? ''}没找到 hooks:set→validateHook 或 SettingsPage 的 add()→validateHook`)
+
+  // ---- 修复波 A · 项 3：hooks:set 不再静默删掉整表里校验不通过的旧规则 ----
+  // 缺陷：旧写法是 `list.filter((h) => validateHook(h).ok).slice(0, 40)`——对**整表**重校验并按 ok 过滤，
+  // 而界面那次 save 提交的正是整表（SettingsPage 的 patch → save(rules.map(...))）。
+  // 于是用户拨一下任意一个 Hook 开关，一条 >4096 字符的旧规则（导入来的 / 手改的 / v0.3.0 写的）
+  // 就地消失，且没人告诉他。落盘口径按仓库既有先例改成"不删用户数据"（Task 4：重填不得销毁旧记录）。
+  {
+    const overLong = { id: 'hook_legacy_long', event: 'post', command: 'x'.repeat(HOOK_MAX + 1), match: '', enabled: true }
+    const other = { id: 'hook_other', event: 'pre', command: 'node -e "process.exit(0)"', match: '', enabled: true }
+    // 「一次无关的开关改动」＝界面上拨另一个 Hook 的 enabled，整表原样回传（超长那条一个字没动）
+    const input = [JSON.parse(JSON.stringify(overLong)), { ...other, enabled: false }]
+    const part = typeof hk.partitionHookRules === 'function' ? hk.partitionHookRules(input) : null
+    const keptIds = Array.isArray(part?.kept) ? part.kept.map((h) => h?.id) : []
+    const rej = Array.isArray(part?.rejected) ? part.rejected : []
+    ok('整表含一条超长规则 + 一次无关的开关改动：那条规则仍在落盘列表里（不删用户数据）',
+      keptIds.length === 2 && keptIds[0] === 'hook_legacy_long' &&
+        part.kept[0]?.command?.length === HOOK_MAX + 1,
+      `partitionHookRules=${typeof hk.partitionHookRules} kept 的 id=${JSON.stringify(keptIds)} 超长条命令长度=${part?.kept?.[0]?.command?.length}`)
+    ok('rejected 点名了它的 id 与原因，且原因是 validateHook 的既有文案（不是新编措辞）',
+      rej.length === 1 && rej[0]?.id === 'hook_legacy_long' &&
+        rej[0]?.message === hk.validateHook(overLong).message &&
+        String(rej[0]?.message ?? '').includes('命令最长'),
+      JSON.stringify(rej).slice(0, 220))
+    ok('无关的那次开关改动照常落盘（保留被拒条目不影响同表其它条目）',
+      part?.kept?.[1]?.id === 'hook_other' && part?.kept?.[1]?.enabled === false,
+      JSON.stringify(part?.kept?.[1] ?? null).slice(0, 160))
+    ok('全部合法时 rejected 为空、逐条原样落盘（正常路径不被这道闸门扰动）',
+      (() => {
+        const p = hk.partitionHookRules?.([{ ...other }, { ...other, id: 'b2', match: 'write' }])
+        return Array.isArray(p?.kept) && p.kept.length === 2 && Array.isArray(p?.rejected) && p.rejected.length === 0
+      })(), JSON.stringify(hk.partitionHookRules?.([{ ...other }]) ?? null).slice(0, 160))
+    ok('残片（null / 字符串 / 数字）不留在配置里：hooks:list 原样返回整表，留着会让设置页 rules.map 当场解引用炸掉',
+      (() => {
+        const p = hk.partitionHookRules?.([null, 'x', 5, { ...other }])
+        return Array.isArray(p?.kept) && p.kept.length === 1 && p.kept[0]?.id === 'hook_other' &&
+          Array.isArray(p?.rejected) && p.rejected.length === 3 && p.rejected.every((r) => typeof r.message === 'string' && r.message.length > 0)
+      })(), JSON.stringify(hk.partitionHookRules?.([null, 'x', 5, { ...other }]) ?? null).slice(0, 220))
+    ok('非数组入参不抛异常（config.json 被手改成别的类型时按空表处理）',
+      (() => {
+        for (const bad of [undefined, null, 'x', 5, {}]) {
+          const p = hk.partitionHookRules?.(bad)
+          if (!Array.isArray(p?.kept) || p.kept.length !== 0 || !Array.isArray(p?.rejected)) return false
+        }
+        return true
+      })())
+    ok(`条数上限只挡合法条目增长，且被挡下的点名回界面（不再静默丢第 ${hk.HOOK_RULES_MAX + 1} 条）`,
+      (() => {
+        const MAX = hk.HOOK_RULES_MAX
+        if (!Number.isInteger(MAX) || MAX < 1) return false
+        const many = Array.from({ length: MAX + 2 }, (_, i) => ({ ...other, id: `h${i}` }))
+        const p = hk.partitionHookRules?.(many)
+        return p?.kept?.length === MAX && p?.rejected?.length === 2 &&
+          p.rejected.map((r) => r.id).join(',') === `h${MAX},h${MAX + 1}` &&
+          p.rejected.every((r) => String(r.message).includes(String(MAX)))
+      })(), `HOOK_RULES_MAX=${hk.HOOK_RULES_MAX} kept=${hk.partitionHookRules?.(Array.from({ length: (hk.HOOK_RULES_MAX ?? 0) + 2 }, (_, i) => ({ ...other, id: 'h' + i })))?.kept?.length} rejected=${JSON.stringify(hk.partitionHookRules?.(Array.from({ length: (hk.HOOK_RULES_MAX ?? 0) + 2 }, (_, i) => ({ ...other, id: 'h' + i })))?.rejected ?? null)?.slice(0, 160)}`)
+    ok('校验不通过的条目不计入上限（否则一条超长旧规则会顺带把表尾的合法规则挤出去）',
+      (() => {
+        const MAX = hk.HOOK_RULES_MAX
+        const many = Array.from({ length: MAX }, (_, i) => ({ ...other, id: `h${i}` }))
+        const p = hk.partitionHookRules?.([...many, JSON.parse(JSON.stringify(overLong))])
+        return p?.kept?.length === MAX + 1 && p?.rejected?.length === 1 && p.rejected[0]?.id === 'hook_legacy_long'
+      })(), `kept=${hk.partitionHookRules?.([...Array.from({ length: hk.HOOK_RULES_MAX ?? 0 }, (_, i) => ({ ...other, id: 'h' + i })), JSON.parse(JSON.stringify(overLong))])?.kept?.length}`)
+    ok('hooks:set 走的是这道 shared 闸门并把 rejected 回给界面（不再在 handler 里各写一份过滤）',
+      ipcSrcM.error === null &&
+        /ipcMain\.handle\(\s*'hooks:set'[\s\S]{0,320}?partitionHookRules\(list\)[\s\S]{0,240}?return \{ ok: true, list: kept, rejected \}/.test(ipcSrcM.text) &&
+        !/\.filter\(\(h\) => validateHook\(h\)\.ok\)/.test(ipcSrcM.text),
+      `partitionHookRules 接线=${/partitionHookRules\(list\)/.test(ipcSrcM.text)}；旧的整表 filter 还在=${/\.filter\(\(h\) => validateHook\(h\)\.ok\)/.test(ipcSrcM.text)}`)
+    ok('设置页把 rejected 显示出来（点名 id + 原因），不是只在返回值里躺着',
+      settingsSrcM.error === null &&
+        /data-testid=\{testId\}/.test(settingsSrcM.text) &&
+        /testId="hook-rejected"/.test(settingsSrcM.text) &&
+        /setRejected\(r\.rejected/.test(settingsSrcM.text) &&
+        /data-rejected-id=\{r\.id\}/.test(settingsSrcM.text),
+      `hook-rejected 接线=${/testId="hook-rejected"/.test(settingsSrcM.text)}；save 收下 rejected=${/setRejected\(r\.rejected/.test(settingsSrcM.text)}；逐条点名 id=${/data-rejected-id=\{r\.id\}/.test(settingsSrcM.text)}`)
+  }
 }
 {
   const root = mkdtempSync(join(tmpdir(), 'ahub-hook-'))
@@ -1303,6 +1378,73 @@ child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ c
     typeof ml.sanitizeMcpList === 'function' && normOut.length === 4 &&
       JSON.stringify(ml.sanitizeMcpList(normOut)) === JSON.stringify(normOut),
     JSON.stringify(ml.sanitizeMcpList ? ml.sanitizeMcpList(normOut) : null).slice(0, 300))
+  // ---- 修复波 A · 项 3：mcp:set 的 .slice(0, 20) 静默丢掉第 21 条 ----
+  // 与 hooks:set 同一类缺陷：界面那次 save 提交整表，超限的那条就地消失、没人告诉用户。
+  // 差别在落盘口径：mcp:list 走 sanitizeMcpList（读的那一侧本来就不返回形状不合格的记录），
+  // 把形状不合格的条目留在配置里只会造成"存了但界面看不见、下一次 save 又被整表覆盖掉"，
+  // 所以这一侧是**点名回界面**而不保留；hooks 那一侧保留（hooks:list 原样返回，界面看得见也改得动）。
+  {
+    const srv = (id, extra = {}) => ({ id, name: id.toUpperCase(), command: '', launch: { bin: 'node', args: ['x.js'] }, formatVersion: 2, enabled: true, ...extra })
+    const MAX = ml.MCP_SERVERS_MAX
+    ok('MCP_SERVERS_MAX 是个正整数常量（上限不再只活在 handler 的 .slice 字面量里）',
+      Number.isInteger(MAX) && MAX >= 1, String(MAX))
+    const many = Array.from({ length: (MAX ?? 0) + 2 }, (_, i) => srv(`m${i}`))
+    const pm = typeof ml.partitionMcpServers === 'function' ? ml.partitionMcpServers(many) : null
+    ok(`第 ${MAX + 1}、${MAX + 2} 条不再静默丢：rejected 点名了它们的 id 与上限`,
+      Array.isArray(pm?.kept) && pm.kept.length === MAX &&
+        Array.isArray(pm?.rejected) && pm.rejected.length === 2 &&
+        pm.rejected.map((r) => r.id).join(',') === `m${MAX},m${MAX + 1}` &&
+        pm.rejected.every((r) => String(r.message).includes(String(MAX))),
+      `partitionMcpServers=${typeof ml.partitionMcpServers} kept=${pm?.kept?.length} rejected=${JSON.stringify(pm?.rejected ?? null)?.slice(0, 200)}`)
+    ok('形状不合格的记录被点名拒收，用的是界面上既有的那句措辞（不新编）',
+      (() => {
+        const p = ml.partitionMcpServers?.([{ id: 'empty1', name: '', command: '', launch: { bin: '', args: [] } }, srv('ok1')])
+        return Array.isArray(p?.kept) && p.kept.length === 1 && p.kept[0]?.id === 'ok1' &&
+          Array.isArray(p?.rejected) && p.rejected.length === 1 && p.rejected[0]?.id === 'empty1' &&
+          p.rejected[0]?.message === ml.MCP_SHAPE_REJECT_MESSAGE &&
+          typeof ml.MCP_SHAPE_REJECT_MESSAGE === 'string' && ml.MCP_SHAPE_REJECT_MESSAGE.length > 0
+      })(), JSON.stringify(ml.partitionMcpServers?.([{ id: 'empty1', name: '', command: '' }]) ?? null).slice(0, 200))
+    ok('残片（null/字符串）不会把闸门掀掉：按形状不合格点名，且不进落盘列表',
+      (() => {
+        const p = ml.partitionMcpServers?.([null, 'x', srv('ok2')])
+        return Array.isArray(p?.kept) && p.kept.length === 1 && p.kept[0]?.id === 'ok2' && p?.rejected?.length === 2
+      })(), JSON.stringify(ml.partitionMcpServers?.([null, 'x', srv('ok2')]) ?? null).slice(0, 200))
+    ok('闸门沿用同一份补形/打标（launch-only 记录仍被放行并补 args，旧单命令仍标失效停用）',
+      (() => {
+        const p = ml.partitionMcpServers?.([
+          { id: 'lo', name: 'LO', command: '', launch: { bin: 'node' } },
+          { id: 'lg', name: 'LG', command: 'node x.js' }
+        ])
+        return p?.kept?.length === 2 && Array.isArray(p.kept[0]?.launch?.args) && p.kept[0].launch.args.length === 0 &&
+          p.kept[1]?.legacyInvalid === true && p.kept[1]?.enabled === false && p?.rejected?.length === 0
+      })(), JSON.stringify(ml.partitionMcpServers?.([{ id: 'lo', name: 'LO', command: '', launch: { bin: 'node' } }, { id: 'lg', name: 'LG', command: 'node x.js' }]) ?? null).slice(0, 260))
+    ok('缺 id 的合法记录仍由闸门补一个（原来这半句写在 handler 的 .map 里，搬进闸门后不能丢）',
+      (() => {
+        const p = ml.partitionMcpServers?.([{ name: 'NoId', command: '', launch: { bin: 'node', args: [] } }])
+        return p?.kept?.length === 1 && typeof p.kept[0]?.id === 'string' && /^mcp_/.test(p.kept[0].id)
+      })(), JSON.stringify(ml.partitionMcpServers?.([{ name: 'NoId', command: '', launch: { bin: 'node', args: [] } }]) ?? null).slice(0, 200))
+    ok('非数组入参不抛异常（config.json 被手改成别的类型时按空表处理）',
+      (() => {
+        for (const bad of [undefined, null, 'x', 5, {}]) {
+          const p = ml.partitionMcpServers?.(bad)
+          if (!Array.isArray(p?.kept) || p.kept.length !== 0 || !Array.isArray(p?.rejected)) return false
+        }
+        return true
+      })())
+    const ipcSrcX = readSrcSafe('src/main/ipc.ts')
+    ok('mcp:set 走的是这道 shared 闸门并把 rejected 回给界面（handler 里不再自己 filter+slice）',
+      ipcSrcX.error === null &&
+        /ipcMain\.handle\(\s*'mcp:set'[\s\S]{0,420}?partitionMcpServers\(list\)[\s\S]{0,420}?return \{ ok: true, list: kept, rejected \}/.test(ipcSrcX.text) &&
+        !/\.slice\(0, 20\)/.test(ipcSrcX.text),
+      `${ipcSrcX.error ?? ''}partitionMcpServers 接线=${/partitionMcpServers\(list\)/.test(ipcSrcX.text)}；旧的 .slice(0, 20) 还在=${/\.slice\(0, 20\)/.test(ipcSrcX.text)}`)
+    const settingsSrcX = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
+    ok('设置页把 MCP 的 rejected 显示出来（点名 id + 原因）',
+      settingsSrcX.error === null &&
+        /testId="mcp-rejected"/.test(settingsSrcX.text) &&
+        /setRejected\(r\.rejected/.test(settingsSrcX.text) &&
+        /MCP_SHAPE_REJECT_MESSAGE/.test(settingsSrcX.text),
+      `${settingsSrcX.error ?? ''}mcp-rejected 接线=${/testId="mcp-rejected"/.test(settingsSrcX.text)}；save 收下 rejected=${/setRejected\(r\.rejected/.test(settingsSrcX.text)}；表单与主进程共用同一句拒收文案=${/MCP_SHAPE_REJECT_MESSAGE/.test(settingsSrcX.text)}`)
+  }
   // 注：mcp:set 放行 launch-only 记录、信任弹窗 bin+args 标签这两条"处理器行为"原先用 ipc.ts 源码文本
   // grep 充当断言（评审修复3：排版一变、或行为回归，grep 照样绿——它不是行为断言）。改在真机层逐条驱动：
   // approval-shot「command 为空但 launch 已填的记录保存后仍在列表」「MCP 首次连接信任弹窗标签=bin+args」。

@@ -5,7 +5,7 @@
 // - post：只观察与后处理，失败不撤销已发生的改动，但如实报告；
 // - 数据只通过环境变量传入：命令是人写的、参数是模型给的，
 //   把参数拼进命令串等于把注入面留在自己的脚本里。
-import type { HookRule } from './types'
+import type { HookRule, RejectedEntry } from './types'
 
 export const HOOK_DEFAULT_TIMEOUT = 15_000
 
@@ -83,4 +83,55 @@ export function validateHook(rule: { event?: string; command?: string; match?: s
     return { ok: false, message: '超时请填 0～300000 毫秒' }
   }
   return { ok: true }
+}
+
+/**
+ * 一张 hooks 表最多存多少条。界面上一次只加一条，所以这个界挡的是"整表暴涨"
+ * （脚本化写入、导入进来的异常配置），不是日常使用。
+ */
+export const HOOK_RULES_MAX = 40
+
+/**
+ * `hooks:set` 的落盘闸门（修复波 A · 项 3）。返回「该存什么」与「哪些条目没被接受、为什么」。
+ *
+ * 旧写法是 `list.filter((h) => validateHook(h).ok).slice(0, 40)`，两个静默：
+ * ① 对**整表**重校验并按 ok 过滤，而界面那次 save 提交的正是整表
+ *   （SettingsPage 的 patch → save(rules.map(...))）——用户拨一下任意一个 Hook 开关，
+ *   一条 >4096 字符的旧规则（导入来的 / 手改的 / v0.3.0 写的）就地消失；
+ * ② 第 41 条被 .slice 丢掉，同样没人说。
+ *
+ * 现在的口径按仓库既有先例：**不删用户数据**（Task 4「重填不得销毁旧记录」、Ruling I「迁移从不删」）。
+ * 校验不通过的条目**原样留在配置里**，只把原因回给界面显示，由用户自己决定改短还是删掉——
+ * 程序替他删还不告诉他，是不可恢复的那一类。这里能保留是因为 hooks:list 原样返回整表、
+ * 设置页看得见也改得动；MCP 那一侧的读路径（sanitizeMcpList）本来就不返回形状不合格的记录，
+ * 保留只会造成"存了但看不见"，所以那边是点名回界面而不保留（见 shared/mcp-list.partitionMcpServers）。
+ *
+ * 上限只挡**合法条目**的增长：校验不通过的不计数，否则一条超长旧规则会顺带把表尾的合法规则挤出去。
+ * 残片（null / 字符串 / 数字）不保留：那不是用户数据，而 hooks:list 原样返回整表，
+ * 留着会让设置页的 rules.map 当场解引用炸掉。
+ */
+export function partitionHookRules(list: unknown): { kept: HookRule[]; rejected: RejectedEntry[] } {
+  const incoming: unknown[] = Array.isArray(list) ? list : []
+  const kept: HookRule[] = []
+  const rejected: RejectedEntry[] = []
+  let valid = 0
+  for (let i = 0; i < incoming.length; i++) {
+    const raw = incoming[i]
+    const isRule = !!raw && typeof raw === 'object'
+    const id = String((isRule ? (raw as { id?: unknown }).id : undefined) ?? `#${i + 1}`)
+    // 残片按"空规则"过一遍 validateHook，为的是拿它**既有的**那句措辞，不另编一套
+    const v = validateHook((isRule ? raw : {}) as { event?: string; command?: string; match?: string; timeoutMs?: number })
+    if (!v.ok) {
+      rejected.push({ id, message: v.message ?? '事件只能是 pre 或 post' })
+      if (isRule) kept.push(raw as HookRule)
+      continue
+    }
+    if (valid >= HOOK_RULES_MAX) {
+      rejected.push({ id, message: `最多 ${HOOK_RULES_MAX} 条，这一条没有保存` })
+      continue
+    }
+    valid += 1
+    kept.push(raw as HookRule)
+  }
+  return { kept, rejected }
 }

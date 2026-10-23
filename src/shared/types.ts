@@ -649,6 +649,21 @@ export interface McpProbe {
   serverVersion?: string
 }
 
+/**
+ * 保存整表时「这一条没被接受」的回报（hooks:set / mcp:set 共用）。
+ *
+ * 为什么必须有它：界面那次保存提交的永远是**整表**（拨一个开关也会把整份列表回传），
+ * 主进程按条校验后就只有"过滤掉不合格的再落盘"这一种写法——用户碰了一下无关的开关，
+ * 一条旧记录（导入来的、手改的、上一个版本写的）就地消失，而且没人告诉他。
+ * 拒收本身没错，错的是**静默**：id 用来在界面上点名是哪一条，message 用既有的拒绝原因文案。
+ * 落盘那一半的口径见 shared/hooks.partitionHookRules 与 shared/mcp-list.partitionMcpServers。
+ */
+export interface RejectedEntry {
+  /** 被拒条目的 id；条目自己没带 id 时是它在表里的位置（`#3`） */
+  id: string
+  message: string
+}
+
 /** 长期记忆条目（区别于单次任务记录） */export interface MemoryEntry {
   id: string
   kind: 'goal' | 'constraint' | 'decision' | 'progress' | 'review' | 'confirm' | 'summary'

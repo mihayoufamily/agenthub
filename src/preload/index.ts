@@ -4,7 +4,8 @@ import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
   LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord,
-  CheckpointManifest, CheckpointDelta, RollbackResult, FileChange, PriceOverride, HookRule, McpServer, McpProbe
+  CheckpointManifest, CheckpointDelta, RollbackResult, FileChange, PriceOverride, HookRule, McpServer, McpProbe,
+  RejectedEntry
 } from '../shared/types'
 
 /**
@@ -134,7 +135,8 @@ const api = {
   /** MCP server（tools-only + stdio）：配置在 config，信任标记在主进程 approvals.json */
   mcp: {
     list: () => ipcRenderer.invoke('mcp:list') as Promise<McpServer[]>,
-    set: (list: McpServer[]) => ipcRenderer.invoke('mcp:set', list) as Promise<{ ok: boolean; list: McpServer[] }>,
+    /** rejected：这次保存里没被接受的条目（点名 id + 既有拒绝原因文案）。静默丢条目是本波修掉的缺陷 */
+    set: (list: McpServer[]) => ipcRenderer.invoke('mcp:set', list) as Promise<{ ok: boolean; list: McpServer[]; rejected: RejectedEntry[] }>,
     probe: (server: McpServer) => ipcRenderer.invoke('mcp:probe', server) as Promise<McpProbe>,
     trusted: () => ipcRenderer.invoke('mcp:trust') as Promise<string[]>,
     setTrust: (id: string, trusted: boolean) => ipcRenderer.invoke('mcp:trust:set', id, trusted) as Promise<{ ok: boolean; list: string[] }>
@@ -142,7 +144,8 @@ const api = {
   /** 工具前后 Hook：pre 可否决调用，post 只观察/后处理 */
   hooks: {
     list: () => ipcRenderer.invoke('hooks:list') as Promise<HookRule[]>,
-    set: (list: HookRule[]) => ipcRenderer.invoke('hooks:set', list) as Promise<{ ok: boolean; list: HookRule[] }>
+    /** rejected：校验不通过的条目**原样留在配置里**（不删用户数据），这里只把原因回给界面显示 */
+    set: (list: HookRule[]) => ipcRenderer.invoke('hooks:set', list) as Promise<{ ok: boolean; list: HookRule[]; rejected: RejectedEntry[] }>
   },
   /** 自定义单价覆盖（内置表是手写快照，价格变了由你填，带填写日期） */
   prices: {
