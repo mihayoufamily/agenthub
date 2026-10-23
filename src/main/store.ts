@@ -1,10 +1,11 @@
 import { app, safeStorage } from 'electron'
-import { migrateV1toV2, type McpConfigShape } from '../shared/config-migration'
+import { migrateV1toV2, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs'
 import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
 
-const CURRENT_SCHEMA_VERSION = 1
+/** 迁移链要处理的原始配置形状：可能有未知键，也可能缺字段，一切以"保留"为先 */
+type RawCfg = Partial<AppConfig> & Record<string, unknown>
 
 interface StoreDirs {
   config: string
@@ -61,19 +62,17 @@ export class Store {
 
   // ---------- 配置（带版本迁移） ----------
   getConfig(): AppConfig {
-    type RawCfg = Partial<AppConfig> & Record<string, unknown>
     let raw: RawCfg = this.readJson<RawCfg>(this.dirs.config, {} as RawCfg)
     // 迁移链：v0(空/旧结构) -> v1 -> v2。规则在 shared/config-migration.ts，这里只读写盘
     const v = (raw as { schemaVersion?: number }).schemaVersion ?? 0
     let changed = false
     if (v < 1) {
-      raw = migrateV0toV1(raw) as RawCfg
-      raw.schemaVersion = 1
+      raw = migrateV0toV1(raw)
       changed = true
     }
     if (v < 2) {
       raw = migrateV1toV2(raw as McpConfigShape) as RawCfg
-      raw.schemaVersion = 2
+      raw.schemaVersion = SCHEMA_HEAD
       changed = true
     }
     if (changed) this.writeJson(this.dirs.config, raw)
@@ -136,8 +135,9 @@ export class Store {
     try {
       const incoming = JSON.parse(json) as Partial<AppConfig>
       if (!incoming || typeof incoming !== 'object') return { ok: false, message: '格式错误：不是有效 JSON 对象' }
-      const merged = migrateV0toV1(incoming)
-      merged.schemaVersion = CURRENT_SCHEMA_VERSION
+      // 迁移只做"补齐结构 + 跑规则"，不再重建字面量（重建会把 mcpServers/presets/hooks/价格覆盖全丢掉）
+      const merged = normalizeImported(migrateV0toV1(incoming as RawCfg)) as AppConfig
+      merged.schemaVersion = SCHEMA_HEAD
       // 导入的 Agent 中 hasKey 一律重置为 false，需重新授权
       for (const a of merged.agents ?? []) {
         if (a.modelConfig) {
@@ -288,8 +288,26 @@ export class Store {
   }
 }
 
-/** v0 -> v1：补齐默认偏好与字段 */
-function migrateV0toV1(raw: Partial<AppConfig> & Record<string, unknown>): AppConfig {
+/** v0 -> v1 缺的工作流骨架：谁都没选、审核走人工、预算不设上限（0=不限） */
+const defaultWorkflowDefaults: NonNullable<AppConfig['workflowDefaults']> = {
+  plannerAgentId: '',
+  executorAgentId: '',
+  reviewerAgentId: '',
+  reviewMode: 'human',
+  maxRounds: 3,
+  timeoutMin: 30,
+  confirmEveryRound: false,
+  maxTokens: 0,
+  budgetYuan: 0
+}
+
+/**
+ * v0 -> v1：补齐默认偏好与工作流骨架。
+ * 返回结构必须是"**展开 raw 再覆盖必填项**"——以前这里是重新拼一个字面量，只留
+ * schemaVersion/prefs/agents/workflowDefaults，任何调用它的路径都会静默丢掉
+ * mcpServers/presets/hooks/priceOverrides/skills（导入配置就是踩的这条）。
+ */
+function migrateV0toV1(raw: RawCfg): RawCfg {
   const defaultPrefs: Prefs = {
     theme: 'system',
     animations: true,
@@ -302,21 +320,13 @@ function migrateV0toV1(raw: Partial<AppConfig> & Record<string, unknown>): AppCo
     firstRunDone: false,
     lastMode: null
   }
-  const oldPrefs = ((raw.prefs ?? {}) as Partial<Prefs>) || {}
+  const oldPrefs = (raw.prefs ?? {}) as Partial<Prefs>
+  const oldWd = (raw.workflowDefaults ?? {}) as Partial<NonNullable<AppConfig['workflowDefaults']>>
   return {
+    ...raw,
     schemaVersion: 1,
     prefs: { ...defaultPrefs, ...oldPrefs },
     agents: (raw.agents as AppConfig['agents']) ?? [],
-    workflowDefaults: (raw.workflowDefaults as AppConfig['workflowDefaults']) ?? {
-      plannerAgentId: '',
-      executorAgentId: '',
-      reviewerAgentId: '',
-      reviewMode: 'human',
-      maxRounds: 3,
-      timeoutMin: 30,
-      confirmEveryRound: false,
-      maxTokens: 0,
-      budgetYuan: 0
-    }
+    workflowDefaults: { ...defaultWorkflowDefaults, ...oldWd }
   }
 }

@@ -945,6 +945,34 @@ console.log('\n[W] migrateV1toV2：legacy MCP 标失效、sandboxFallback 补默
     `null→${JSON.stringify(pNull.out?.mcpServers)} 字符串数字→${JSON.stringify(pPrim.out?.mcpServers)}`)
 }
 
+// ---------- W2. 导入配置不得丢字段（v0.3.0 既有缺陷） ----------
+console.log('\n[W2] importConfig 保字段')
+{
+  const st = await import('../out/shared/config-migration.js')
+  // 这条断言只依赖纯函数的合并逻辑：把 importConfig 里的规范化抽成 normalizeImported(raw)，
+  // 它在 shared 层做"保留未知键 + 跑完迁移链"，store.ts 只负责写盘。
+  const incoming = {
+    schemaVersion: 2,
+    agents: [],
+    mcpServers: [{ id: 'a', name: 'A', command: 'node a.js' }],
+    presets: [{ id: 'p1', name: '预设', roles: {} }],
+    hooks: [{ id: 'h1', event: 'pre', command: 'x', match: '', enabled: true }],
+    priceOverrides: [{ pattern: '^deepseek', input: 1, output: 2, at: 1 }],
+    skills: [{ id: 's1', name: 'S', content: 'x', createdAt: 1 }]
+  }
+  const out = st.normalizeImported(incoming)
+  ok('导入保留 mcpServers 并给它跑完迁移（旧记录标失效）', Array.isArray(out.mcpServers) && out.mcpServers[0].legacyInvalid === true, JSON.stringify(out.mcpServers))
+  ok('导入保留 presets / hooks / priceOverrides / skills', !!out.presets && !!out.hooks && !!out.priceOverrides && !!out.skills)
+  ok('导入后的版本号等于 SCHEMA_HEAD', out.schemaVersion === st.SCHEMA_HEAD, String(out.schemaVersion))
+  // 评审后补：接线本身也要有断言——Store 构造函数第一行就 app.getPath，脚本起不了实例，
+  // 只能打在编译产物上：importConfig 真调了 normalizeImported，且停在 1 的 CURRENT_SCHEMA_VERSION 已删除。
+  const storeJs = readFileSync(new URL('../out/main/store.js', import.meta.url), 'utf-8')
+  const wired = /importConfig[\s\S]{0,700}normalizeImported/.test(storeJs)
+  ok('store.ts 的 importConfig 改走 normalizeImported，且不再各写各的版本号',
+    wired && storeJs.includes('SCHEMA_HEAD') && !storeJs.includes('CURRENT_SCHEMA_VERSION'),
+    `importConfig→normalizeImported=${wired} 用 SCHEMA_HEAD=${storeJs.includes('SCHEMA_HEAD')} 旧常量残留=${storeJs.includes('CURRENT_SCHEMA_VERSION')}`)
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

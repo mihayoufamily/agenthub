@@ -36,3 +36,16 @@ export function migrateV1toV2(raw: McpConfigShape): McpConfigShape {
   }
   return out
 }
+
+/**
+ * 导入配置时的规范化：跑完整条迁移链，并把版本号盖成 SCHEMA_HEAD。
+ * 关键约定是**保留未知键**——v0.3.0 的 importConfig 走的是"重建字面量"式迁移（只留
+ * schemaVersion/prefs/agents/workflowDefaults），导入任何配置都会静默丢掉
+ * mcpServers / presets / hooks / priceOverrides / skills。这里只做透传式合并，一个键都不丢。
+ * 结构补齐（prefs、agents、workflowDefaults 的默认值）由调用方先跑 v0->v1 再进来。
+ */
+export function normalizeImported<T extends Record<string, unknown>>(incoming: T): T {
+  const merged: T = { ...incoming }
+  const stepped = migrateV1toV2(merged as unknown as McpConfigShape)
+  return { ...merged, ...stepped, schemaVersion: SCHEMA_HEAD } as T
+}
