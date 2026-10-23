@@ -25,7 +25,11 @@
   animation: rise-in 420ms var(--ease) both;
 }
 .wf-desc { margin-top: 8px; font-size: 13.5px; color: var(--text-2); animation: rise-in 420ms var(--ease) 60ms both; }
-.wf-composer-wrap { width: min(760px, 92vw); margin-top: 26px; animation: rise-in 420ms var(--ease) 120ms both; position: relative; }
+/* 宽度用 %（不是 vw）：本元素坐在「侧栏 + 内容列」的 flex 里（Shell.tsx），vw 量的却是**视口**。
+   实测（视口 960 / 用户窗口内容区 956 两档）：内容列 clientWidth 只有 696 / 692，而 min() 仍取 760
+   → .screen.workflow 的 scrollWidth 728/726 撑过 clientWidth，composer 右缘 992/990 越出视口 32~34px，
+   工作流首页出现横向滚动。% 量的是包含块（内容列），宽窗口下 min() 照样取 760、视觉不变。 */
+.wf-composer-wrap { width: min(760px, 92%); margin-top: 26px; animation: rise-in 420ms var(--ease) 120ms both; position: relative; }
 
 /* 配置条 */
 .wf-configbar {

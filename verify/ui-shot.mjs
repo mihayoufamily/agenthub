@@ -143,6 +143,27 @@ const main = async () => {
   const baseUrl = `http://127.0.0.1:${mock.address().port}/v1`
   console.log('[ui] mock 服务：' + baseUrl + '，沙箱：' + SANDBOX)
 
+  // 起跑前先把"上一轮本套件自己留下的、没跑完的任务记录"扫掉（必须在 spawn 之前：应用一启动就会把
+  // runs/*.json 里 status 还是 preparing/running 的记录恢复成任务视图，工作流首页于是根本不在 DOM 里，
+  // 第 6/6c 步那几条断言会连带红——实测踩过：一次中途崩溃的 ui-shot 把后面两轮都带歪）。
+  // 判据只认"产物目录落在本套件的临时沙箱名下"（ahub-ui-*），用户自己跑的任务的 outputDir 不可能是这个
+  // 形态，所以这条清理不会碰用户数据；本轮自己新增的记录仍由收尾处按 runsBefore 差集删除。
+  {
+    const runsDir0 = join(process.env.APPDATA ?? '', 'agenthub', 'runs')
+    let swept = 0
+    for (const f of existsSync(runsDir0) ? readdirSync(runsDir0) : []) {
+      if (!f.endsWith('.json')) continue
+      try {
+        const rec = JSON.parse(readFileSync(join(runsDir0, f), 'utf-8'))
+        if (typeof rec?.outputDir === 'string' && /[\\/]ahub-ui-/.test(rec.outputDir)) {
+          rmSync(join(runsDir0, f), { force: true })
+          swept++
+        }
+      } catch { /* 读不动的记录不动它：宁可少删，不可误删 */ }
+    }
+    if (swept) console.log(`  清理  起跑前扫掉上一轮遗留的套件任务记录 ${swept} 个`)
+  }
+
   proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
   try {
     const page = await waitHttp(PORT, 30000)
@@ -300,6 +321,31 @@ const main = async () => {
     await js(cdp, 'window.__ahub_debug.workflow()')
     await sleep(1200)
     await shot('09-workflow-home')
+    // ---- 修复波 A · 项 7：这一段显式定视口，不拿"用户上次把窗口拖成多大"当被测宽度 ----
+    // 第 4 步跑完窄窗阶梯后 clearDeviceMetricsOverride，于是第 5、6 步的审计用的是**用户持久化的
+    // 真实窗口宽**（src/main/index.ts 的 WindowState 会记住上次拖多大）——同一条断言在不同机器上
+    // 绿红不定（本机内容区 956 就红，宽窗口机器上就绿）。所以这里先把视口钉死再量一次。
+    // 注意 main 里 BrowserWindow 的 minWidth: 960 是**外框**宽，Windows 上内容区实测 956；
+    // Emulation 定的是内容区，取 960×720 即"外框最小宽度"这一档（比实测内容区还宽 4px，是宽松侧）。
+    await setViewport(960, 720)
+    const wfMinAudit = await layoutAudit()
+    const wfMinBox = await js(cdp, `(() => {
+      const s = document.querySelector('.screen.workflow')
+      const c = document.querySelector('.wf-composer-wrap')
+      return {
+        vw: document.documentElement.clientWidth,
+        screen: s ? { clientWidth: s.clientWidth, scrollWidth: s.scrollWidth } : null,
+        composer: c ? Math.round(c.getBoundingClientRect().width) : null
+      }
+    })()`)
+    ok('应用自身最小宽度（显式定视口 960×720）下工作流首页无横向溢出',
+      // composer != null 是**前提**而不是装饰：上一轮实测到，若用户配置里留着未跑完的工作流任务，
+      // 应用启动会把它恢复成任务视图（.wf-topbar），首页的 .wf-composer-wrap 根本不在 DOM 里，
+      // 那时 layoutAudit 拿不到溢出、这条就"绿得没测到任何东西"。所以先要求被测对象在场。
+      wfMinBox.composer != null && wfMinAudit.total === 0,
+      `${JSON.stringify(wfMinAudit.issues?.slice(0, 4))} 视口/内容列/composer=${JSON.stringify(wfMinBox)}`)
+    await cdp.send('Emulation.clearDeviceMetricsOverride')
+    await sleep(400)
     const wfAudit = await layoutAudit()
     ok('工作流首页无横向溢出', wfAudit.total === 0, JSON.stringify(wfAudit.issues?.slice(0, 4)))
     const saved = await js(cdp, `(() => {
