@@ -1,7 +1,9 @@
 // UI 布局与新功能真机核验（CDP 驱动便携版）
 // 用法：node verify/ui-shot.mjs [--exe=d:/AgentHub/AgentHub.exe] [--port=9231]
-// 会写入真实 %APPDATA%/agenthub：结束后自动删除本次新增的 Mock Agent（含历史）
-import { spawn } from 'node:child_process'
+// 会写入真实 %APPDATA%/agenthub：整份 config.json 在动任何配置**之前**按字节快照，
+// 收尾等实例退净后按字节还原（修复波 B · 项 1b；此前只删本次新增的 Mock Agent 与任务记录，
+// 角色绑定 workflowDefaults 不回滚，见文件内注释），审批历史不进这个套件。
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, readdirSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -131,6 +133,42 @@ let proc
 // 用户原本的产物目录：必须在动它之前记下，并且无论本轮是否跑完都要还原
 // （此前只在正常走完时还原，中途被打断就把配置留在测试沙箱路径上了）
 let prevOutDir = null
+// ---- 修复波 B · 项 1b：整份 config.json 的字节快照 + 还原（照 approval-shot 已有的模式，别自创）----
+// 根因（A 波 concern 4 / 报告 §11.6、§12）：src/renderer/src/lib/debug.ts 的 startMockToolTask 走
+// patchConfig 改的是用户**全局角色绑定 workflowDefaults**，而收尾只按名字删 Mock Agent（removeAgentByName），
+// 绑定不回滚 → 一轮 ui-shot 之后 workflowDefaults 三个 id 指向已删的 Mock Agent，水合时审核角色
+// 回落成「本地 · 自动」。真机层写的是用户真实 %APPDATA%\agenthub，这是脚手架在写用户的真配置，
+// A 波那三次还原是人肉补的，不该指望人肉。快照按文件字节取，workflowDefaults 三个 id 天然在范围内；
+// 还原后再显式核对那三个 id，作为"还原真的跑了"的断言。
+let cfgFile = null
+let configSnapshot = null
+let snapshotDefaults = null
+// 残留实例在场时禁止回写（同 approval-shot 的闸门）：往活实例正在用的 config.json 里写字节，
+// 它退出时又会把内存里的测试态盖回来，用户配置就留在测试中间态了。
+let snapshotWriteAllowed = true
+
+/** 等 AgentHub.exe 退干净：回写快照前必须确认没有活实例（与 approval-shot 同一实现口径） */
+function waitAppGone(timeoutMs = 30000) {
+  const t0 = Date.now()
+  const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  for (;;) {
+    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq AgentHub.exe', '/NH'], { encoding: 'utf-8' })
+    if (!/AgentHub\.exe/i.test(r.stdout ?? '')) return true
+    if (Date.now() - t0 > timeoutMs) return false
+    sleepMs(400)
+  }
+}
+
+/** 从 config.json 字节里取 workflowDefaults 的三个角色 id（快照与还原后各取一次做对照） */
+const defaultsOf = (buf) => {
+  try {
+    const wd = JSON.parse(String(buf ?? '').toString())?.workflowDefaults ?? {}
+    return { planner: wd.plannerAgentId ?? null, executor: wd.executorAgentId ?? null, reviewer: wd.reviewerAgentId ?? null }
+  } catch {
+    return null
+  }
+}
+
 const setViewport = async (w, h) => {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false })
   await sleep(500)
@@ -139,33 +177,37 @@ const setViewport = async (w, h) => {
 const main = async () => {
   if (!existsSync(EXE)) { console.error('未找到便携版：' + EXE); process.exit(2) }
   mkdirSync(OUT, { recursive: true })
-  await new Promise((r) => mock.listen(0, '127.0.0.1', r))
-  const baseUrl = `http://127.0.0.1:${mock.address().port}/v1`
-  console.log('[ui] mock 服务：' + baseUrl + '，沙箱：' + SANDBOX)
-
-  // 起跑前先把"上一轮本套件自己留下的、没跑完的任务记录"扫掉（必须在 spawn 之前：应用一启动就会把
-  // runs/*.json 里 status 还是 preparing/running 的记录恢复成任务视图，工作流首页于是根本不在 DOM 里，
-  // 第 6/6c 步那几条断言会连带红——实测踩过：一次中途崩溃的 ui-shot 把后面两轮都带歪）。
-  // 判据只认"产物目录落在本套件的临时沙箱名下"（ahub-ui-*），用户自己跑的任务的 outputDir 不可能是这个
-  // 形态，所以这条清理不会碰用户数据；本轮自己新增的记录仍由收尾处按 runsBefore 差集删除。
-  {
-    const runsDir0 = join(process.env.APPDATA ?? '', 'agenthub', 'runs')
-    let swept = 0
-    for (const f of existsSync(runsDir0) ? readdirSync(runsDir0) : []) {
-      if (!f.endsWith('.json')) continue
-      try {
-        const rec = JSON.parse(readFileSync(join(runsDir0, f), 'utf-8'))
-        if (typeof rec?.outputDir === 'string' && /[\\/]ahub-ui-/.test(rec.outputDir)) {
-          rmSync(join(runsDir0, f), { force: true })
-          swept++
-        }
-      } catch { /* 读不动的记录不动它：宁可少删，不可误删 */ }
-    }
-    if (swept) console.log(`  清理  起跑前扫掉上一轮遗留的套件任务记录 ${swept} 个`)
-  }
-
-  proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
+  let baseUrl = null
+  // 修复波 B · 项 1 的同类（评审 Minor ㉛ 在 approval-shot 那条）：listen 与 try 之间原来还夹着
+  // baseUrl、起跑前清扫、spawn 三步，任一抛异常就没有 finally 去 close 那个监听中的 socket，
+  // 进程因活跃 handle 永不退出——表现是"套件挂住"而不是"套件失败"（比红更糟）。现在收进同一个 try/finally。
   try {
+    await new Promise((r) => mock.listen(0, '127.0.0.1', r))
+    baseUrl = `http://127.0.0.1:${mock.address().port}/v1`
+    console.log('[ui] mock 服务：' + baseUrl + '，沙箱：' + SANDBOX)
+
+    // 起跑前先把"上一轮本套件自己留下的、没跑完的任务记录"扫掉（必须在 spawn 之前：应用一启动就会把
+    // runs/*.json 里 status 还是 preparing/running 的记录恢复成任务视图，工作流首页于是根本不在 DOM 里，
+    // 第 6/6c 步那几条断言会连带红——实测踩过：一次中途崩溃的 ui-shot 把后面两轮都带歪）。
+    // 判据只认"产物目录落在本套件的临时沙箱名下"（ahub-ui-*），用户自己跑的任务的 outputDir 不可能是这个
+    // 形态，所以这条清理不会碰用户数据；本轮自己新增的记录仍由收尾处按 runsBefore 差集删除。
+    {
+      const runsDir0 = join(process.env.APPDATA ?? '', 'agenthub', 'runs')
+      let swept = 0
+      for (const f of existsSync(runsDir0) ? readdirSync(runsDir0) : []) {
+        if (!f.endsWith('.json')) continue
+        try {
+          const rec = JSON.parse(readFileSync(join(runsDir0, f), 'utf-8'))
+          if (typeof rec?.outputDir === 'string' && /[\\/]ahub-ui-/.test(rec.outputDir)) {
+            rmSync(join(runsDir0, f), { force: true })
+            swept++
+          }
+        } catch { /* 读不动的记录不动它：宁可少删，不可误删 */ }
+      }
+      if (swept) console.log(`  清理  起跑前扫掉上一轮遗留的套件任务记录 ${swept} 个`)
+    }
+
+    proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
     const page = await waitHttp(PORT, 30000)
     cdp = new CdpClient(page.webSocketDebuggerUrl)
     await cdp.connect()
@@ -181,6 +223,16 @@ const main = async () => {
     console.log('[ui] 用户产物目录（结束时要还原成这个）：' + JSON.stringify(prevOutDir))
     const RUNS_DIR = join(process.env.APPDATA ?? '', 'agenthub', 'runs')
     const runsBefore = new Set(existsSync(RUNS_DIR) ? readdirSync(RUNS_DIR) : [])
+    // 快照必须在**动任何配置之前**取（addMockToolAgent / startMockToolTask / setWorkflowOutputDir 都在它后面）。
+    // 落点问应用自己要（与 approval-shot 同一取法），不猜路径；猜错会把字节写进另一个文件，比不写更糟。
+    const appUserData = String((await js(cdp, 'window.agenthub.app.info()'))?.userDataPath ?? '')
+    cfgFile = join(appUserData || join(process.env.APPDATA ?? '', 'agenthub'), 'config.json')
+    ok('快照落点核对：应用报的 userDataPath 就是本套件会写的那份配置目录（写错文件比不写更糟）',
+      resolve(cfgFile) === resolve(join(process.env.APPDATA ?? '', 'agenthub', 'config.json')),
+      `应用=${appUserData || '(拿不到，退回 APPDATA)'} 脚本按 APPDATA=${join(process.env.APPDATA ?? '', 'agenthub')}`)
+    configSnapshot = existsSync(cfgFile) ? readFileSync(cfgFile) : null
+    snapshotDefaults = defaultsOf(configSnapshot)
+    console.log(`[ui] config.json 快照：${cfgFile} · ${configSnapshot?.length ?? 0} 字节 · workflowDefaults=${JSON.stringify(snapshotDefaults)}`)
     await js(cdp, 'window.__ahub_debug.brand()')
     await sleep(700)
 
@@ -299,7 +351,10 @@ const main = async () => {
     await sleep(400)
 
     // ---- 5. 设置页：Skill / Agent 与模型（余额、用量）----
-    await js(cdp, 'window.__ahub_debug.settings()')
+    // 修复波 B · 项 1（评审 Minor ㉘）：debug.ts 里 settings() 与 openSettings() 是同一件事的两个名字
+    // （settings 就是不带分区的 openSettings），并存会让"打开设置"在脚本里看起来有两种动作。
+    // 统一到修复波 A 实际用的那一个（openSettings），语义逐字节相同：openSettings(undefined) → settingsSection: null。
+    await js(cdp, 'window.__ahub_debug.openSettings()')
     await sleep(900)
     ok('打开 Skill 分区', await clickText('Skill'))
     await sleep(700)
@@ -620,12 +675,38 @@ const main = async () => {
         await js(cdp, `window.__ahub_debug.setWorkflowOutputDir(${JSON.stringify(prevOutDir)})`)
         await sleep(600)
         console.log('  清理  已还原用户产物目录：' + JSON.stringify(prevOutDir))
-      } catch { /* 页面可能已关，下面还会检查一次配置文件 */ }
+      } catch { /* 页面可能已关，下面还会按字节还原整份配置 */ }
     }
     try { cdp?.socket?.end() } catch { /* noop */ }
     try { proc?.kill() } catch { /* noop */ }
     await sleep(1000)
-    mock.close()
+    // 修复波 B · 项 1b：按字节把整份 config.json 还原回测试前（含 workflowDefaults 三个角色 id）。
+    // 先等实例退净：残留实例在场时回写，写的是那个活实例正在用的文件，它退出又会把测试态盖回去。
+    if (!waitAppGone()) snapshotWriteAllowed = false
+    if (cfgFile && snapshotWriteAllowed) {
+      try {
+        if (configSnapshot) writeFileSync(cfgFile, configSnapshot)
+        else if (existsSync(cfgFile)) rmSync(cfgFile, { force: true })
+      } catch (e) {
+        fail++
+        console.log(`  FAIL  config.json 快照还原抛错 —— ${e.message}（需要手工还原 ${cfgFile}）`)
+      }
+      const nowBytes = existsSync(cfgFile) ? readFileSync(cfgFile) : null
+      const nowDefaults = defaultsOf(nowBytes)
+      ok('还原真的跑了：config.json 回到测试前的字节内容，workflowDefaults 三个角色 id 逐一对上',
+        !!configSnapshot && !!nowBytes && nowBytes.equals(configSnapshot) &&
+          !!snapshotDefaults && !!nowDefaults &&
+          nowDefaults.planner === snapshotDefaults.planner &&
+          nowDefaults.executor === snapshotDefaults.executor &&
+          nowDefaults.reviewer === snapshotDefaults.reviewer,
+        `快照=${JSON.stringify(snapshotDefaults)} 现在=${JSON.stringify(nowDefaults)} 字节 ${nowBytes?.length ?? '文件不存在'} / ${configSnapshot?.length ?? 0}`)
+    } else if (cfgFile) {
+      fail++
+      console.log('  FAIL  残留实例，拒绝回写快照 — AgentHub.exe 30s 内没退干净：宁可把 config.json 留在测试现场，也不往活实例的文件里写（需手工还原 ' + cfgFile + '）')
+    } else {
+      console.log('  注意  快照未取到（在读取配置之前就中止）：本轮没有字节快照可还原，config.json 保持现场不动')
+    }
+    try { mock.close() } catch { /* noop */ }
     rmSync(SANDBOX, { recursive: true, force: true })
   }
   console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
