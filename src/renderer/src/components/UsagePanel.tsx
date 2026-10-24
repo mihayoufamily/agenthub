@@ -7,6 +7,7 @@ import { bridge } from '../lib/ipc'
 import { useUi } from '../stores/ui'
 import { Button, Spinner } from './primitives'
 import { Icon } from './Icons'
+import { DonutRings } from './DonutRings'
 import { cls, fmtTokens } from '../lib/utils'
 
 const RANGES = [
@@ -33,6 +34,9 @@ export function UsagePanel({ agentId, compact }: { agentId?: string; compact?: b
   const [rows, setRows] = useState<LedgerUsageRow[] | null>(null)
   const [recent, setRecent] = useState<LedgerEntry[]>([])
   const [busy, setBusy] = useState(false)
+  // 点外圈扇区 = 筛下方表（spec C3）；空串 = 不筛
+  const [modelFilter, setModelFilter] = useState('')
+  const shown = rows === null ? null : modelFilter ? rows.filter((r) => r.model === modelFilter) : rows
 
   const reload = async () => {
     setBusy(true)
@@ -88,8 +92,14 @@ export function UsagePanel({ agentId, compact }: { agentId?: string; compact?: b
       </div>
 
       {busy && rows === null && <Spinner />}
+      {shown && shown.length > 0 && <DonutRings rows={rows ?? []} mode="double" onPickSlice={(k) => setModelFilter(k.split('|').pop() ?? '')} />}
+      {modelFilter && (
+        <div style={{ fontSize: 12, color: 'var(--text-3)', margin: '4px 0 8px' }}>
+          正在只看模型「{modelFilter}」。<a className="link-btn" onClick={() => setModelFilter('')}>显示全部</a>
+        </div>
+      )}
       {rows && rows.length === 0 && <div className="usage-empty">这段时间还没有真实调用记录。发一条消息或跑一次工作流后回来看。</div>}
-      {rows && rows.length > 0 && (
+      {shown && shown.length > 0 && (
         <table className="usage-table">
           <thead>
             <tr>
@@ -103,7 +113,7 @@ export function UsagePanel({ agentId, compact }: { agentId?: string; compact?: b
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {shown.map((r) => (
               <tr key={`${r.harness}|${r.model}`}>
                 <td>{r.harness}</td>
                 <td className="mono">{r.model}</td>
@@ -230,8 +240,9 @@ function PriceEditor() {
   )
 }
 
-/** 与主进程 aggregate 同口径的前端聚合（按 Agent 过滤只能在渲染层做，故不复用主进程结果） */
-function rollup(entries: LedgerEntry[]): LedgerUsageRow[] {
+/** 与主进程 aggregate 同口径的前端聚合（按 Agent 过滤只能在渲染层做，故不复用主进程结果）。
+ *  导出是为了对话栏那个迷你单环复用同一份聚合——两处各写一遍必然算出两个数。 */
+export function rollup(entries: LedgerEntry[]): LedgerUsageRow[] {
   const map = new Map<string, LedgerUsageRow>()
   for (const e of entries) {
     const model = e.model || '（未上报模型名）'

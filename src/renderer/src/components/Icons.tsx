@@ -81,6 +81,13 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M4 20h16" />
       <path d="M7 20v-6M12 20V6M17 20v-9" />
     </>
+  ),
+  /* token 占比：带缺口的环（对话栏底部那个迷你图用 DonutRings 真画，这里只是兜底图标） */
+  pie: (
+    <>
+      <path d="M12 3a9 9 0 1 0 9 9" />
+      <path d="M12 3v9h9" />
+    </>
   )
 }
 
