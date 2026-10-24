@@ -58,18 +58,25 @@ jobs:
           # 加了退出码检查后真因露出来：runner 上 bsdtar **写包时崩溃**（exit=-1073741819 = 0xC0000005），
           # 而本机同一个 tar.exe 压同一份 318.5MB/126 文件的目录 10.2s 出包、exit 0——是 runner 环境的事，不是命令的事。
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "bsdtar 写包失败（exit=$LASTEXITCODE），改用 PowerShell 自带压缩。"
+            Write-Host "bsdtar 写包失败（exit=$LASTEXITCODE），改用 .NET 的 ZipFile。"
             Remove-Item $zip -Force -ErrorAction SilentlyContinue
-            # 实测：`-Path 目录/*` 这个平铺写法出来的包，tar 一样能解，根级就是 AgentHub.exe、126 个文件；
-            # 早前那条"Compress-Archive 会套一层目录"的结论是 `-Path 目录`（不带 /*）才有的问题。
-            # Compress-Archive 是 cmdlet，不设 $LASTEXITCODE，所以这里用 try/catch + Test-Path 判成败。
+            # 实测对比三种压缩（本机对同一份 126 文件 / 318.5MB 真产物）：
+            #   bsdtar `-a -c -f`：134,169,473 字节，exit 0（但 runner 上会崩 0xC0000005）
+            #   Compress-Archive -Path 目录/*：134,230,801 字节，能用，但**里面有一个空名条目**，
+            #     tar 读它会报 `Archive entry has empty or unreadable filename ... skipping` 并非零退出
+            #   ZipFile.CreateFromDirectory：134,230,575 字节，条目直接是 `AgentHub.exe` 打头
+            #     （不带 ./、没有空名条目），tar -tf 与 tar -xf 都 exit 0、解出来根级就是 AgentHub.exe、126 个文件
+            # CreateFromDirectory 压的是**目录内容**，所以平铺结构天然成立，不需要 glob。
+            # 它是 cmdlet/API，不设 $LASTEXITCODE，成败只能用 try/catch + Test-Path 判。
             try {
-              Compress-Archive -Path (Join-Path $dir '*') -DestinationPath $zip -Force -ErrorAction Stop
+              Add-Type -AssemblyName System.IO.Compression.FileSystem
+              [System.IO.Compression.ZipFile]::CreateFromDirectory(
+                [System.IO.Path]::GetFullPath($dir), [System.IO.Path]::GetFullPath($zip))
             } catch {
-              Write-Error "两种压缩都失败：bsdtar exit≠0，Compress-Archive 报 $($_.Exception.Message)"
+              Write-Error "两种压缩都失败：bsdtar exit≠0，ZipFile 报 $($_.Exception.Message)"
               exit 1
             }
-            if (-not (Test-Path $zip)) { Write-Error "Compress-Archive 没产出 zip"; exit 1 }
+            if (-not (Test-Path $zip)) { Write-Error "ZipFile 没产出 zip"; exit 1 }
           }
           if (-not (Test-Path $zip)) { Write-Error "zip 未生成"; exit 1 }
           $zipBytes = (Get-Item $zip).Length
@@ -97,6 +104,10 @@ jobs:
           Write-Host "解包自检：$($out.Count) 个文件，$([math]::Round($out.Sum / 1MB, 1)) MB"
           # 顺手把 sha256 打进日志，与 GitHub 侧资产的 digest 对得上才叫"发出去的就是这个包"
           Write-Host "sha256：$((Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower())"
+          # 必须显式退 0：Actions 的 pwsh 包装会把**残留的 $LASTEXITCODE** 当步骤退出码。
+          # 上一轮三条判据全过（126 文件 / 318.5MB / 根级 AgentHub.exe），却因为 `tar -xf` 留下的 1 被判失败——
+          # 判据都绿了还红，这种红没人看得懂。
+          exit 0
 
       - uses: softprops/action-gh-release@v2
         with:
