@@ -629,10 +629,31 @@ const main = async () => {
     // 这一条把视口钉死到最小档，"卡片整张看不看得见"才有一个不随机器变的落点。
     // 照抄本套件既有的 Emulation.setDeviceMetricsOverride 写法（修复波 A · 项 7 同一先例）。
     await setViewport(960, 640)
+    // 这一条在 2026-10-24 21:28 那轮红过一次，detail 只有 `裁切=NaNpx {"open":false}`——
+    // NaN 是因为 `.mode-info` 压根不在 DOM 里，于是分不清"焦点没落进 pill"还是"上一步没回到品牌首页"。
+    // 前置现场先打出来（判据一字未加一字未减）：pill 容器在不在、当前是哪一屏、焦点落在谁身上。
+    const infoPre = await js(cdp, `(() => ({
+      wrap: !!document.querySelector('.mode-pill-wrap'),
+      screen: window.__ahub_debug.state().screen,
+      active: document.activeElement ? (document.activeElement.getAttribute('data-mode') || document.activeElement.tagName) : null
+    }))()`)
+    console.log('  [mode-info@960x640 前置] ' + JSON.stringify(infoPre))
+    // 那条红的两种可能都在这里被消掉，且**不动判据**（判据仍是 open && visible && title==='工作站模式'）：
+    // ① `brand()` 之后只 sleep(600)，慢的时候 pill 还没进 DOM，`?.focus()` 点了个空；
+    // ② `focus()` 对**已经有焦点**的元素是空操作，React 的 onFocus 不会因此再触发一次。
+    // 所以先把焦点从当前位置摘掉（blur），等一次提交，再等 pill 真在场，最后才聚焦。
+    // "pill 不在 DOM"这类问题本套件在第 534 行那条断言里已经会红（`!!pillBox && belowAsk`），
+    // 这里等它只是让这一条测它自己承诺的那件事，不是把产品缺陷洗成绿。
+    await js(cdp, `(() => { document.activeElement?.blur(); return true })()`)
+    await sleep(300)
+    if (!(await waitJs(cdp, `!!document.querySelector('.mode-pill-wrap [data-mode="workbench"]')`, 20000))) {
+      console.log('  [mode-info@960x640] pill 20s 内没进 DOM（下面这条会红，且红的就是"回不到品牌首页"）')
+    }
     await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]')?.focus(); return true })()`)
     await sleep(500)
     const infoMinBox = await js(cdp, infoProbe)
-    console.log('  [mode-info@960x640] ' + JSON.stringify(infoMinBox))
+    const activeAfterFocus = await js(cdp, `document.activeElement ? (document.activeElement.getAttribute('data-mode') || document.activeElement.tagName) : null`)
+    console.log('  [mode-info@960x640] ' + JSON.stringify(infoMinBox), '· 聚焦后 active =', JSON.stringify(activeAfterFocus))
     ok('应用自身最小高度（显式定视口 960×640）下模式介绍卡完整落在视口内',
       !!infoMinBox.open && infoMinBox.visible && infoMinBox.title === '工作站模式',
       `裁切=${infoMinBox.bottom - infoMinBox.vh}px ${JSON.stringify(infoMinBox)}`)
