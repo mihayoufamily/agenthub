@@ -53,8 +53,24 @@ jobs:
           # AgentHub-win-x64/ 一层，解压后根目录没有 AgentHub.exe，与历史包/使用说明不一致；用系统自带 bsdtar
           & $tar -a -c -f $zip -C $dir .
           # pwsh 不会因为原生命令非零退出而停，必须自己接 $LASTEXITCODE——
-          # 上一轮就是死在这：tar 写包时报错、zip 文件照样存在，Test-Path 过关，问题被推到下一步
-          if ($LASTEXITCODE -ne 0) { Write-Error "bsdtar 创建 zip 失败（exit=$LASTEXITCODE）"; exit 1 }
+          # 上一轮就是死在这：tar 写包时报错、zip 文件照样存在，Test-Path 过关，问题被推到下一步的 `tar -tf`，
+          # 报出来的却是"读"的错误（ZIP decompression failed），看着像自检的锅。
+          # 加了退出码检查后真因露出来：runner 上 bsdtar **写包时崩溃**（exit=-1073741819 = 0xC0000005），
+          # 而本机同一个 tar.exe 压同一份 318.5MB/126 文件的目录 10.2s 出包、exit 0——是 runner 环境的事，不是命令的事。
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "bsdtar 写包失败（exit=$LASTEXITCODE），改用 PowerShell 自带压缩。"
+            Remove-Item $zip -Force -ErrorAction SilentlyContinue
+            # 实测：`-Path 目录/*` 这个平铺写法出来的包，tar 一样能解，根级就是 AgentHub.exe、126 个文件；
+            # 早前那条"Compress-Archive 会套一层目录"的结论是 `-Path 目录`（不带 /*）才有的问题。
+            # Compress-Archive 是 cmdlet，不设 $LASTEXITCODE，所以这里用 try/catch + Test-Path 判成败。
+            try {
+              Compress-Archive -Path (Join-Path $dir '*') -DestinationPath $zip -Force -ErrorAction Stop
+            } catch {
+              Write-Error "两种压缩都失败：bsdtar exit≠0，Compress-Archive 报 $($_.Exception.Message)"
+              exit 1
+            }
+            if (-not (Test-Path $zip)) { Write-Error "Compress-Archive 没产出 zip"; exit 1 }
+          }
           if (-not (Test-Path $zip)) { Write-Error "zip 未生成"; exit 1 }
           $zipBytes = (Get-Item $zip).Length
           Write-Host "zip：$([math]::Round($zipBytes / 1MB, 1)) MB"
@@ -64,8 +80,17 @@ jobs:
           $tmp = Join-Path $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }) "zipcheck"
           if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
           New-Item -ItemType Directory -Path $tmp | Out-Null
+          # 解包也用两套：runner 上 bsdtar 连写都会崩，读同样不能当成必然成立
           & $tar -xf $zip -C $tmp
-          if ($LASTEXITCODE -ne 0) { Write-Error "bsdtar 解 zip 失败（exit=$LASTEXITCODE）"; exit 1 }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "bsdtar 解包失败（exit=$LASTEXITCODE），改用 Expand-Archive 自检"
+            try {
+              Expand-Archive -Path $zip -DestinationPath $tmp -Force -ErrorAction Stop
+            } catch {
+              Write-Error "zip 两种工具都解不开：$($_.Exception.Message)"
+              exit 1
+            }
+          }
           if (-not (Test-Path (Join-Path $tmp 'AgentHub.exe'))) { Write-Error "解压后根目录没有 AgentHub.exe（平铺结构被改坏了）"; exit 1 }
           $out = Get-ChildItem -Path $tmp -Recurse -File -Force | Measure-Object -Property Length -Sum
           if ($out.Count -ne $src.Count) { Write-Error "包内文件数与源目录不符：$($out.Count) vs $($src.Count)"; exit 1 }
