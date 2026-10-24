@@ -72,8 +72,37 @@ console.log('\n[A] digestThinking（默认只显重点，其余段可展开）')
 }
 
 // ---------- B. 执行角色提示词按能力形态拼装（不再误称"无工具权限"） ----------
-console.log('\n[B] buildRoleMessages：执行角色能力形态 + 产物目录')
+// ctx 提到最前：[B2] 与 [B] 两段共用同一份上下文（原先只有 [B] 用，放后面会让 [B2] 撞进 TDZ）
 const ctx = { goal: '写一个脚本', round: 1, maxRounds: 3, outputDir: 'D:\\art' }
+console.log('\n[B2] spec 验证计划 D：技能注入的差异要真的落在装配出来的正文里')
+{
+  // 原先这条只有两处覆盖：partition 纯函数自己的返回，和 workflow.ts 里"有人调了它"的源码 includes。
+  // **装配这一步从未真跑过**——技能块到底进不进 system 正文、auto 与 reference 出来是不一样，没人验。
+  const autoBody = 'SENTINEL-AUTO 技能正文：步骤一、步骤二'
+  const refLine = 'SENTINEL-REF 可被引用的技能清单：技能A（需要时自行读取）'
+  const prompt = 'SENTINEL-PROMPT 常驻要求：始终用中文'
+  const withAuto = buildRoleMessages('planner', { ...ctx, skills: autoBody }, undefined, prompt)
+  const withRef = buildRoleMessages('planner', { ...ctx, skills: refLine }, undefined, prompt)
+  const plain = buildRoleMessages('planner', ctx, undefined, prompt)
+  // 先把实测位置打出来，再决定要不要把顺序写成断言（期望值不许是猜的）
+  console.log(`  [B2 实测] auto 正文位置=${withAuto.system.indexOf('SENTINEL-AUTO')} 常驻位置=${withAuto.system.indexOf('SENTINEL-PROMPT')} reference 位置=${withRef.system.indexOf('SENTINEL-REF')}`)
+  ok('角色绑定的技能正文真的进得了 system 正文（装配这一步以前从没跑过）',
+    withAuto.system.includes('SENTINEL-AUTO'), String(withAuto.system.length))
+  ok('reference 形态与 auto 形态产出确实不同（一个进正文、一个只给清单行）',
+    withRef.system.includes('SENTINEL-REF') && !withRef.system.includes('SENTINEL-AUTO'), '两个哨兵串的位置不同才算差异存在')
+  ok('没绑技能时正文里不留空壳（不凭空多出一层标题）',
+    !plain.system.includes('SENTINEL-AUTO') && !plain.system.includes('SENTINEL-REF'), String(plain.system.length))
+  ok('常驻要求仍然在（技能层没把它挤掉）',
+    withAuto.system.includes('SENTINEL-PROMPT') && plain.system.includes('SENTINEL-PROMPT'), '装配后常驻层丢失')
+  // 层序按 spec 钉死（协议 → 项目约定 → 历史记忆 → 角色技能 → 常驻要求）。
+  // 期望值来自上面那行实测（技能=290、常驻=336），不是推的：这一条断言的是"技能层在常驻层之前"。
+  ok('注入层序不变：角色技能排在常驻要求之前（spec 的五层顺序，装配这一步实测过）',
+    withAuto.system.indexOf('SENTINEL-AUTO') < withAuto.system.indexOf('SENTINEL-PROMPT') &&
+      withRef.system.indexOf('SENTINEL-REF') < withRef.system.indexOf('SENTINEL-PROMPT'),
+    `auto=${withAuto.system.indexOf('SENTINEL-AUTO')}/${withAuto.system.indexOf('SENTINEL-PROMPT')} ref=${withRef.system.indexOf('SENTINEL-REF')}/${withRef.system.indexOf('SENTINEL-PROMPT')}`)
+}
+
+console.log('\n[B] buildRoleMessages：执行角色能力形态 + 产物目录')
 {
   const cli = buildRoleMessages('executor', ctx, { kind: 'cli', dir: 'D:\\art', hasTools: true })
   ok('CLI 执行角色被告知可读写文件', /可读写文件、可执行命令/.test(cli.system) && !/无本机工具执行权限/.test(cli.system))

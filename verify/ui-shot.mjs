@@ -1004,6 +1004,36 @@ const main = async () => {
       cliNote.length > 0 && cliNote.includes(ART), JSON.stringify(cliNote.slice(0, 160)))
     ok('对照措辞里没有超出能力的承诺（"一定没改/绝对没改/保证没写"一类，CLI 那侧拦不到就不许说）',
       !/一定没改|绝对没改|保证没改|保证没写|没有改动文件/.test(cliNote), JSON.stringify(cliNote.slice(0, 160)))
+    // 计划门的动作面：正文可复制、**点「存为产物」才落盘**（前面已断言计划轮自己不产生产物）。
+    const artsBefore = existsSync(ART) ? readdirSync(ART).filter((f) => f.endsWith('.md')) : []
+    const saveClicked = await js(cdp, `(() => { const b = [...document.querySelectorAll('.gate-plan button')].find((x) => /存为产物/.test(x.textContent ?? '')); if (!b) return false; b.click(); return true })()`)
+    await sleep(1500)
+    const artsAfter = existsSync(ART) ? readdirSync(ART).filter((f) => f.endsWith('.md')) : []
+    const newPlanFiles = artsAfter.filter((f) => !artsBefore.includes(f))
+    ok('计划门上有「存为产物」这个动作', saveClicked === true, String(saveClicked))
+    ok('点「存为产物」才写成产物（正文落进这个任务的产物目录，点之前目录里没有它）',
+      newPlanFiles.length === 1 && /^计划-/.test(newPlanFiles[0]),
+      JSON.stringify({ artsBefore, artsAfter }))
+    const planFileBody = newPlanFiles.length === 1 ? readFileSync(join(ART, newPlanFiles[0]), 'utf-8') : ''
+    ok('存下来的产物带着这个任务的目标与正文（不是空文件，也不是执行成果）',
+      planFileBody.includes('计划态验证') && planFileBody.length > 40, `${planFileBody.length} 字`)
+    // 「按意见重出计划」：再跑一轮**计划态**规划 → 新增一张规划卡、批准门重挂、执行角色仍然进不来
+    await js(cdp, `(() => { const t = document.querySelector('.gate-plan textarea'); if (!t) return false; const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; set.call(t, '请更具体一些'); t.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await sleep(300)
+    const replanClicked = await js(cdp, `(() => { const b = [...document.querySelectorAll('.gate-plan button')].find((x) => /按意见重出计划/.test(x.textContent ?? '')); if (!b) return false; b.click(); return true })()`)
+    const afterReplan = await waitJs(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      if (!r) return null
+      const roles = (r.cardDetails || []).map((c) => c.role)
+      const planners = roles.filter((x) => x === 'planner').length
+      return r.gateKind === 'plan' && planners >= 2 ? { roles, planners, runId: r.id } : null
+    })()`, 180000)
+    ok('「按意见重出计划」重跑的是计划态那一轮：规划卡新增一张、批准门重挂、执行角色仍进不来',
+      replanClicked === true && !!afterReplan && !afterReplan.roles.includes('executor'),
+      JSON.stringify({ replanClicked, afterReplan }))
+    ok('重出计划不新建任务（run.id 与第一版计划同一个）',
+      !!afterReplan && !!planGate && afterReplan.runId === planGate.runId,
+      JSON.stringify({ before: planGate && planGate.runId, after: afterReplan && afterReplan.runId }))
     // 批准门不许有旁路：未批准时"单角色重跑执行"就是绕过批准去写盘的另一条路（复核时发现的洞，已堵）。
     await js(cdp, 'window.__ahub_debug.rerunRole("executor")')
     await sleep(1500)
@@ -1017,6 +1047,11 @@ const main = async () => {
     // 批准：同一个 run 从执行角色续跑，不新建任务、不重放计划轮
     const runIdBefore = planGate ? planGate.runId : null
     await js(cdp, 'window.__ahub_debug.passGate()')
+    // 单执行循环的占用位：批准后那条链**同步**占住 _started，所以探针要紧贴在 passGate 之后发，
+    // 不能等一会儿再发——等久了链可能已经跑到下一个门、占用位释放，那条断言就变成赌时长（会偶发假红）。
+    // 判据只看 run.id 没被顶掉：原先后果是第二个 start() 用 set({run}) 换掉两条链正在写的同一个 run。
+    await js(cdp, `void window.__ahub_debug.startDemoTask('链在跑时提交的第二个任务')`)
+    const afterSecond = await js(cdp, '(() => ({ runId: window.__ahub_debug.state().run?.id, status: window.__ahub_debug.state().run?.status }))()')
     const afterApprove = await waitJs(cdp, `(() => {
       const r = window.__ahub_debug.state().run
       if (!r) return null
@@ -1025,8 +1060,14 @@ const main = async () => {
     })()`, 180000)
     ok('批准后同一个 run 继续进三角色链（执行卡片出现，不是新建任务）',
       !!afterApprove && afterApprove.runId === runIdBefore, JSON.stringify({ before: runIdBefore, after: afterApprove }))
-    ok('计划轮没有被重放（planner 卡片仍只有 1 张：重放等于重复烧额度）',
-      !!afterApprove && afterApprove.planners === 1, JSON.stringify(afterApprove))
+    ok('链在跑时提交第二个任务被拒（run.id 没被顶掉：续跑那条链占着单执行循环）',
+      !!afterSecond && afterSecond.runId === runIdBefore, JSON.stringify({ before: runIdBefore, afterSecond }))
+    // "不重放计划轮"的判据是**规划卡张数与批准前一致**：上面已经重出过一次计划，
+    // 所以不能写死 1 张——要钉的是"批准之后没有再多出一张规划卡"
+    const plannersAtGate = afterReplan ? afterReplan.planners : 0
+    ok('计划轮没有被重放（批准后规划卡张数与批准前一致：重放等于重复烧额度）',
+      !!afterApprove && afterApprove.planners === plannersAtGate,
+      JSON.stringify({ atGate: plannersAtGate, after: afterApprove }))
     await js(cdp, 'window.__ahub_debug.stopTask()')
     await sleep(2000)
     await js(cdp, `window.__ahub_debug.setWorkflowOutputDir(${JSON.stringify(prevOutDir ?? '')})`)

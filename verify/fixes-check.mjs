@@ -2763,7 +2763,17 @@ console.log('\n[批次 C/D 评审留账] 这几条钉住已修的 Minor，不许
   ok('未批准的计划态任务：续跑与单角色重跑两条路都问 planApproved（批准门不能有旁路）',
     wfSrc.error === null && gResume.hasGuard === true && gRerun.hasGuard === true,
     JSON.stringify({ resume: gResume, rerun: gRerun, err: wfSrc.error }))
-  // 计划态开关必须"落盘 + 启动读回"两头都在：patchConfig 是**显式白名单**，App.tsx 水合也是逐字段列举，
+  // 单执行循环的占用位（_started）：续跑那条链必须**自己拿、自己还**。
+  // 原先是三个调用点各自置位却没人清位：清不掉＝之后再也提交不了新任务，
+  // 不置位（返工与计划批准这两条就没置）＝链正在写这个 run 时第二个任务把它顶掉。
+  const rrStart = wfSrc.text.indexOf('async function resumeRework(')
+  const rrEnd = wfSrc.text.indexOf('\n}\n', rrStart)
+  const rrBody = rrStart >= 0 && rrEnd > rrStart ? wfSrc.text.slice(rrStart, rrEnd) : ''
+  ok('resumeRework 自己占位并收尾清位（单执行循环不靠调用点记得置位）',
+    rrStart >= 0 && /set\(\{ _cancelled: false, _started: true \}\)/.test(rrBody) &&
+      /finally \{[\s\S]{0,80}_started: false/.test(rrBody),
+    `起点=${rrStart} 终点=${rrEnd} 体内取到 ${rrBody.length} 字；置位=${/_started: true/.test(rrBody)} 清位=${/_started: false/.test(rrBody)} finally=${/finally \{/.test(rrBody)}`)
+  // 计划态开关必须"落盘 + 启动读回"两头都在：patchConfig 是显式白名单、App.tsx 水合也是逐字段列举，
   // 少任何一头，表现都是"重启后悄悄忘掉我开了计划态"——而它改的是整个任务的执行方式。
   const patchStart = wfSrc.text.indexOf('patchConfig: (p) =>')
   // 切片终点必须从 patchStart 之后找：'savePreset:' 在接口声明里也出现一次（位置更靠前），

@@ -467,6 +467,7 @@ function ReviewGateCard({ run }: { run: WorkflowRun }) {
 function PlanGateCard({ run }: { run: WorkflowRun }) {
   const confirmGate = useWorkflow((s) => s.confirmGate)
   const [savedPath, setSavedPath] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState('')
   const text = run.planText ?? ''
   const savePlan = async () => {
     const name = `计划-${safeName(run.goal)}.md`
@@ -513,10 +514,18 @@ function PlanGateCard({ run }: { run: WorkflowRun }) {
           return `计划轮结束后，${where} 里的对照结果：${changes.slice(0, 8).join('；')}${changes.length > 8 ? `；另有 ${changes.length - 8} 条` : ''}。CLI 角色的写盘与命令由它自己的 CLI 执行，AgentHub 拦不到，只能事后列给你看。`
         })()}
       </div>
+      <div className="gate-feedback">
+        <textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          placeholder="对这一版计划的意见（选填；点「按意见重出计划」时生效）…"
+        />
+      </div>
       <div className="gate-actions">
-        <Button variant="primary" onClick={() => void confirmGate('deliver')}>
+        <Button variant="primary" disabled={!text.trim()} onClick={() => void confirmGate('deliver')}>
           <Icon name="check" size={13} /> 批准并继续
         </Button>
+        <Button variant="secondary" onClick={() => void confirmGate('rework', feedback)}>按意见重出计划</Button>
         <Button variant="secondary" onClick={() => void copyPlan()}>复制正文</Button>
         <Button variant="secondary" disabled={!text.trim()} onClick={() => void savePlan()}>
           {savedPath ? '已存为产物' : '存为产物'}
@@ -525,6 +534,7 @@ function PlanGateCard({ run }: { run: WorkflowRun }) {
           停止任务
         </Button>
       </div>
+      {!text.trim() && <div className="gate-plan-note">这一版计划是空的：没有可批准的东西，请填意见重出一版。</div>}
       {savedPath && <div className="gate-plan-note">已写入：{savedPath}</div>}
     </div>
   )

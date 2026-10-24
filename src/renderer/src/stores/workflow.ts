@@ -348,6 +348,76 @@ async function skillsBlockFor(ids?: string[], mode: 'auto' | 'reference' = 'auto
 }
 
 /** 执行一个角色阶段（演示 Agent 走脚本；真实模型走流式调用） */
+/** 计划轮的目录清单快照（Task 11）：取不到、被截断都带出来，不许把"看不见"说成"没发生" */
+interface DirSnapshot {
+  ok: boolean
+  truncated: boolean
+  files: string[]
+}
+
+async function planSnapshot(dir: string): Promise<DirSnapshot> {
+  const r = await bridge.artifacts.ls(dir).catch(() => null)
+  return { ok: r?.ok === true, truncated: r?.truncated === true, files: (r?.files ?? []).map((f) => f.rel) }
+}
+
+/** 开工前与结束后两次清单折成门上要列出的差集（来源是真实目录，不是角色自述） */
+function planChanges(before: DirSnapshot, after: DirSnapshot): string[] {
+  const delta = dirDelta(before.files, after.files)
+  const out = [...delta.added.map((p) => `新增 ${p}`), ...delta.removed.map((p) => `消失 ${p}`)]
+  // 清单没取到不等于"没改动"：这时必须明说无法对照，否则一次 IPC 失败会被显示成
+  // 一句安慰人的"目录里没有新文件"
+  if (!before.ok || !after.ok) out.push('目录清单没取到，本轮无法对照（这不等于没改动）')
+  // 清单触顶被截断时明说列表不完整：这时"没有新增"可能只是没列出来
+  if (before.truncated || after.truncated) out.push('目录清单触到上限被截断，上面的列表不完整')
+  return out
+}
+
+/**
+ * 跑一轮**计划态**规划并把批准门挂上（或重挂）。start() 第一次用它，
+ * 「按意见重出计划」也用它——两处各写一遍就会出现"批准门有两种挂法"的漂移。
+ * `_started`（单执行循环的占用位）由调用方负责：start() 自己收尾，重出计划那条用完清掉。
+ */
+async function runPlanRound(
+  get: () => WorkflowState,
+  set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void,
+  opts: { feedback?: string; attachmentText?: string } = {}
+) {
+  const run = get().run
+  const cfg = get().config
+  if (!run) return
+  const setRun = (fn: (r: WorkflowRun) => WorkflowRun) => set((s: WorkflowState) => (s.run ? { run: fn(s.run) } : {}))
+  const isCancelled = () => get()._cancelled
+  // 产物目录沿用任务记录上那一个（旧记录没记时按当前配置解析一次并回填）
+  const outputDir = run.outputDir || (await bridge.artifacts.dir())
+  if (!run.outputDir) setRun((r) => ({ ...r, outputDir }))
+  const conventions = await dirContextBlock(outputDir)
+  const supplements = extractSupplements(get().run)
+  const ctx: RunContext = {
+    goal: run.goal,
+    round: run.round,
+    maxRounds: cfg.maxRounds,
+    outputDir,
+    ...(conventions ? { conventions } : {}),
+    ...(opts.attachmentText ? { attachmentText: opts.attachmentText } : {}),
+    ...(supplements.length ? { supplements } : {}),
+    ...(opts.feedback ? { reworkFeedback: opts.feedback } : {})
+  }
+  const before = await planSnapshot(outputDir)
+  setRun((r) => ({ ...r, status: 'running', stage: 'planning' }))
+  const out = await runStage('planner', run.round, cfg, ctx, setRun, isCancelled, get, { planMode: true })
+  // 失败 / Token 与预算上限都由 runStage 落到 run 上，这里不另写一套、也不粉饰成"已出计划"
+  if (isCancelled() || !out) return
+  const after = await planSnapshot(outputDir)
+  setRun((r) => ({
+    ...r,
+    planText: out.conclusion.trim(),
+    stage: 'awaiting_plan_approval',
+    status: 'waiting_user',
+    gate: { id: uid('gate'), round: r.round, passed: [], issues: [], kind: 'plan', cliChanges: planChanges(before, after) }
+  }))
+  get().saveRun()
+}
+
 async function runStage(
   role: WorkflowRole,
   round: number,
@@ -941,41 +1011,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       // ---------- 计划轮（planFirst，批次 F）----------
       // 只跑规划角色、这次调用的 grant 带 planMode：批准前不产生文件改动，交付物是 run.planText。
       // 跑完就停在这里等人批准；批准后由 confirmGate('deliver') 从**执行角色**续跑同一个 run——
-      // 不重放计划轮（重放等于重复烧额度、重复写文件）。
+      // 不重放计划轮（重放等于重复烧额度、重复写文件）。_started 由 start() 自己收尾。
       if (cfg.planFirst) {
-        const supplements = extractSupplements(get().run)
-        const planCtx: RunContext = {
-          goal,
-          round: 1,
-          maxRounds: cfg.maxRounds,
-          outputDir,
-          ...(conventions ? { conventions } : {}),
-          ...(attachmentText ? { attachmentText } : {}),
-          ...(supplements.length ? { supplements } : {})
-        }
-        // 目录对照（Task 11）：这道闸拦得住模型 Agent，拦不住 CLI 角色——它的写盘由自己的
-        // 子进程执行。所以开工前拍一次真实清单、结束后再拍一次，把差集如实挂在门上（来源是
-        // 目录本身，不是角色自述；措辞不许写成"一定没改文件"）。
-        const lsBefore = await bridge.artifacts.ls(outputDir).catch(() => null)
-        const planOut = await runStage('planner', 1, cfg, planCtx, setRun, isCancelled, get, { planMode: true })
-        // 失败 / Token 与预算上限都由 runStage 落到 run 上，这里不另写一套、也不粉饰成"已出计划"
-        if (isCancelled() || !planOut) return
-        const lsAfter = await bridge.artifacts.ls(outputDir).catch(() => null)
-        const delta = dirDelta(lsBefore?.files.map((f) => f.rel) ?? [], lsAfter?.files.map((f) => f.rel) ?? [])
-        const cliChanges = [...delta.added.map((p) => `新增 ${p}`), ...delta.removed.map((p) => `消失 ${p}`)]
-        // 清单没取到不等于"没改动"：这时必须明说"无法对照"，否则界面上会把一次 IPC 失败
-        // 显示成一句安慰人的"目录里没有新文件"
-        if (lsBefore?.ok !== true || lsAfter?.ok !== true) cliChanges.push('目录清单没取到，本轮无法对照（这不等于没改动）')
-        // 清单触顶被截断时明说"列表不完整"：这时"没有新增"可能只是没列出来，不许让人误读成"没改"
-        if (lsBefore?.truncated || lsAfter?.truncated) cliChanges.push('目录清单触到上限被截断，上面的列表不完整')
-        setRun((r) => ({
-          ...r,
-          planText: planOut.conclusion.trim(),
-          stage: 'awaiting_plan_approval',
-          status: 'waiting_user',
-          gate: { id: uid('gate'), round: 1, passed: [], issues: [], kind: 'plan', cliChanges }
-        }))
-        get().saveRun()
+        await runPlanRound(get, set, { attachmentText })
         return
       }
 
@@ -1155,10 +1193,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     // 那就是在未批准的计划上真写盘）。本轮没有"带反馈重跑计划轮"的入口，所以这里一律不放行，
     // 并把可走的路说清楚，不让人对着一个没反应的按钮猜。
     if (run.planFirst && !run.planApproved) {
-      useUi.getState().toast('计划还没批准，单角色重跑会绕过批准门。要么批准它继续，要么停止，要么新建任务重出计划。', 'warn')
+      useUi.getState().toast('计划还没批准，单角色重跑会绕过批准门。填意见「按意见重出计划」，或批准它继续，或停止任务。', 'warn')
       return
     }
-    set({ _cancelled: false, _started: true })
     set((s) => (s.run ? { run: { ...s.run, status: 'running', stage: role === 'planner' ? 'planning' : role === 'executor' ? 'executing' : 'reviewing' } } : {}))
     void resumeRework(get, set, { startRole: role, only: true })
   },
@@ -1188,7 +1225,6 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     // 只按卡片推断"该从谁接着跑"：已经产出过结论的角色不重放，避免重复扣额度与重复写文件
     const last = [...run.cards].reverse().find((c) => c.role === 'planner' || c.role === 'executor' || c.role === 'reviewer')
     if (!last) {
-      set({ _cancelled: false, _started: true })
       set((s) => (s.run ? { run: { ...s.run, status: 'running', stage: 'planning' } } : {}))
       void resumeRework(get, set, { startRole: 'planner' })
       return
@@ -1207,7 +1243,6 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       useUi.getState().toast('这一轮的审核已完成：请在确认门决定交付还是返工', 'info')
       return
     }
-    set({ _cancelled: false, _started: true })
     const startRole: WorkflowRole = last.role === 'planner' ? 'executor' : 'reviewer'
     set((s) => (s.run ? { run: { ...s.run, status: 'running', stage: startRole === 'executor' ? 'executing' : 'reviewing' } } : {}))
     void resumeRework(get, set, { startRole })
@@ -1226,8 +1261,25 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     // 这道分支也是边界：没批准（既不是 deliver 也不是 stop）就什么都不许跑，
     // 否则计划态"批准前不改动"这句话在门这里漏掉。
     if (run.gate.kind === 'plan') {
+      if (action === 'rework') {
+        // 「按意见重出计划」：再跑一轮**计划态**规划（新增一张规划卡，不改写上一版计划），
+        // 跑完仍停在批准门。这是计划不满意时唯一的续法——不能放执行角色进来。
+        useSettings.getState().addMemory('confirm', `计划返工意见：${feedback || '（未填写）'}`, false)
+        set((s) => ({
+          run: s.run ? { ...s.run, gate: undefined, notes: [...(s.run.notes ?? []), `按意见重出计划：${feedback || '（未填写）'}`] } : null
+        }))
+        // 占用位由这一段拿、这一段还：重出计划同样是一条在跑的链
+        set({ _cancelled: false, _started: true })
+        void runPlanRound(get, set, { feedback: feedback || undefined }).finally(() => set({ _started: false }))
+        return
+      }
       if (action !== 'deliver') {
         useUi.getState().toast('计划还没批准，任务不会开始执行。点「批准并继续」，或先停止任务。', 'warn')
+        return
+      }
+      // 没有正文就没有可批准的东西：放行的话执行角色是在"计划"这个词上跑，比不批准更糟
+      if (!run.planText?.trim()) {
+        useUi.getState().toast('这一版计划是空的，没有可批准的内容。填意见重出一版，或停止任务。', 'warn')
         return
       }
       useSettings.getState().addMemory('confirm', '用户批准了计划，任务从执行角色继续（同一 run，不重放计划轮）', false)
@@ -1350,6 +1402,20 @@ interface RoundOpts {
  * 把那张卡抹掉等于把那次消耗藏起来。
  */
 async function resumeRework(get: () => WorkflowState, set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void, opts: RoundOpts = {}) {
+  const { feedback, startRole = 'executor', only } = opts
+  // 续跑与 start() 共用同一把"单执行循环"占用位，且**由这一处统一置位与清位**：
+  // 原先三个调用点各自 set({_started:true}) 却没人清位——清不掉是"之后再也提交不了新任务"，
+  // 而不置位（返工与计划批准这两条路就没置）才是真危险：链正在写这个 run 的时候提交第二个任务，
+  // start() 里的 set({run}) 会把两条链正在写的同一个 run 顶掉。
+  set({ _cancelled: false, _started: true })
+  try {
+    await resumeChain(get, set, { feedback, startRole, only })
+  } finally {
+    set({ _started: false })
+  }
+}
+
+async function resumeChain(get: () => WorkflowState, set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void, opts: RoundOpts) {
   const { feedback, startRole = 'executor', only } = opts
   const state = get()
   const run = state.run
