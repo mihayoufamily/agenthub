@@ -5,8 +5,9 @@
 import { create } from 'zustand'
 import type {
   WorkflowRun, WorkflowConfig, WorkflowRoleConfig, RoleCard, Stage, ReviewGate,
-  Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole
+  Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole, Skill
 } from '@shared/types'
+import { unionSkillIds, partitionSkillsForInjection } from '@shared/skills-union'
 import { bridge } from '../lib/ipc'
 import { renderConventionsBlock } from '@shared/conventions'
 import { matchFileRef } from '@shared/acceptance'
@@ -316,14 +317,21 @@ function agentChatToCard(
   })
 }
 
-/** 角色级 Skill 绑定：把选中的 Skill 正文拼成该角色的提示词段落（禁用的自动跳过） */
-async function skillsBlockFor(ids?: string[]): Promise<string> {
+/**
+ * 角色级 + Agent 级 Skill 的拼接。`auto` 注入正文，`reference` 只给一行可引用清单；
+ * 停用的 Skill 即使被绑也不注入（`partitionSkillsForInjection` 那一条口径，两处共用）。
+ * `all` 由调用方传（一次 `bridge.skills.list()` 就够，别每层各拉一遍）。
+ */
+async function skillsBlockFor(ids?: string[], mode: 'auto' | 'reference' = 'auto', all?: Skill[]): Promise<string> {
   if (!ids?.length) return ''
   try {
-    const all = await bridge.skills.list()
-    const picked = all.filter((s) => ids.includes(s.id) && s.enabled !== false)
-    if (!picked.length) return ''
-    return `【以下 Skill 已绑定到本角色，请遵循其指令】\n\n${picked
+    const list = all ?? (await bridge.skills.list())
+    const { injected, listed } = partitionSkillsForInjection(list, ids, mode)
+    if (mode === 'reference') {
+      return listed.length ? `【以下 Skill 可被引用，本次未注入正文】\n${listed.map((s) => `- ${s.name}：${s.desc || '（无描述）'}`).join('\n')}` : ''
+    }
+    if (!injected.length) return ''
+    return `【以下 Skill 已绑定到本角色，请遵循其指令】\n\n${injected
       .map(
         (s) =>
           `### ${s.name}\n${s.content}` +
@@ -423,8 +431,17 @@ async function runStage(
       : agent.kind === 'cli'
         ? { kind: 'cli', dir: ctx.outputDir ?? '', hasTools: true }
         : { kind: 'model', dir: agent.tools ? (ctx.outputDir ?? '') : '', hasTools: !!agent.tools, allowCommands: agent.tools?.allowCommands, allowWeb: agent.tools?.allowWeb }
-  // 角色级 Skill：绑到哪个角色就只进哪个角色的提示词（不是全局注入）
-  const skillBlock = await skillsBlockFor(roleCfg.skillIds)
+  // Skill 绑定：角色级 + Agent 级是**并集去重**（用户明确否掉了优先级开关）。
+  // 角色级绑定视为 auto（本来就指望它注入正文）；Agent 级按它自己的 skillMode 走。
+  const allSkills = await bridge.skills.list().catch(() => [] as Skill[])
+  const mergedSkillIds = unionSkillIds(roleCfg.skillIds, agent?.skillIds)
+  const autoIds = mergedSkillIds.filter((id) => (roleCfg.skillIds ?? []).includes(id) || agent?.skillMode === 'auto')
+  const skillBlock = [
+    await skillsBlockFor(autoIds, 'auto', allSkills),
+    await skillsBlockFor(mergedSkillIds.filter((id) => !autoIds.includes(id)), 'reference', allSkills)
+  ]
+    .filter(Boolean)
+    .join('\n\n')
   // 历史记忆按本次目标检索：全量塞既贵又把模型带偏，无关的宁可不给
   const memoryBlock = memoryBlockFor(ctx.goal, useSettings.getState().memory)
   const promptCtx: RunContext = {

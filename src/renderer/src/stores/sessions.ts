@@ -8,6 +8,7 @@ import { estimateCost, estimateTokens, contextWindowOf } from '@shared/pricing'
 import { CONTEXT_BUDGET_RATIO, fitHistory, foldTranscript } from '@shared/context'
 import { renderConventionsBlock } from '@shared/conventions'
 import { memoryBlockFor } from '@shared/retrieval'
+import { unionSkillIds } from '@shared/skills-union'
 import { useAgents } from './agents'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -227,7 +228,16 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       // ① 该 Agent 的常驻提示词；② 工作目录里的项目约定原文；③ 本次引用的 Skill 正文；
       // ④ 已启用但未引用的 Skill 只给一行清单
       // —— 最后一层就是渐进式加载：让模型知道有什么可用，又不必每次把整包塞进上下文
-      const usedSkills = (skills ?? []).filter((s) => s.enabled !== false)
+      //
+      // Agent 级 skillIds 与本次手动引用是**并集**（无优先级开关）；只有 skillMode==='auto' 的
+      // 才进正文，其余落到第 ④ 层清单里。清单只拉一次，两处共用。
+      const allSkills = await bridge.skills.list().catch(() => [] as Skill[])
+      const agentAuto = agent.skillMode === 'auto' ? agent.skillIds ?? [] : []
+      const mergedSkillIds = unionSkillIds(agentAuto, (skills ?? []).map((s) => s.id))
+      const usedSkills = [
+        ...(skills ?? []).filter((s) => s.enabled !== false),
+        ...allSkills.filter((s) => agentAuto.includes(s.id) && s.enabled !== false && !(skills ?? []).some((x) => x.id === s.id))
+      ]
       const systemBlocks: string[] = []
       if (agent.systemPrompt?.trim()) systemBlocks.push(`【该执行者的常驻要求，请始终遵守】\n${agent.systemPrompt.trim()}`)
       // 项目约定按该 Agent 实际的工作目录取：CLI 用 workDir，模型 Agent 用工具沙箱根
@@ -259,8 +269,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         )
       }
       try {
-        const all = await bridge.skills.list()
-        const rest = all.filter((s) => s.enabled !== false && !usedSkills.some((u) => u.id === s.id))
+        const rest = allSkills.filter((s) => s.enabled !== false && !mergedSkillIds.includes(s.id))
         if (rest.length > 0 && rest.length <= 30) {
           systemBlocks.push(`【本机已启用的 Skill（本次未引用；需要时可要求使用其内容）】\n${rest.map((s) => `- ${s.name}：${s.desc || '（无描述）'}`).join('\n')}`)
         }

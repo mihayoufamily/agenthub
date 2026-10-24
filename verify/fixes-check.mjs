@@ -1010,8 +1010,14 @@ console.log('\n[Q] 编排能力：不重放已发生的调用、重跑只加卡�
   ok('单角色重跑走 only 链条，不碰确认门', wfSrc.includes('only ? [startRole]') && wfSrc.includes('不动确认门与交付'))
   ok('重跑是"新增一张卡片"而不是原地改写', wfSrc.includes('新增一张卡片，后续结论按最新一张算'))
   ok('正在执行时拦住重跑（否则两套循环同时写同一 run）', wfSrc.includes('任务正在执行，请先停止再重跑单个角色'))
-  ok('角色级技能只在绑定的那个角色里展开', wfSrc.includes('skillsBlockFor(roleCfg.skillIds)'))
-  ok('停用的 Skill 即便绑定了也不注入', wfSrc.includes("ids.includes(s.id) && s.enabled !== false"))
+  // 期望串跟着重构走（不是削弱）：1013 的承诺仍是"角色级只喂自己那一层"，1014 的承诺
+  // "停用的不注入"已抽进纯函数 `partitionSkillsForInjection`，那里有独立断言在钉。
+  ok('角色级技能只在绑定的那个角色里展开（角色级 ids 只进本角色的 auto 层）',
+    wfSrc.includes('unionSkillIds(roleCfg.skillIds, agent?.skillIds)') &&
+      wfSrc.includes('(roleCfg.skillIds ?? []).includes(id)'))
+  ok('停用的 Skill 即便绑定了也不注入（口径收进纯函数，两处共用一份）',
+    wfSrc.includes('partitionSkillsForInjection(') && (await import('../out/shared/skills-union.js')).partitionSkillsForInjection(
+      [{ id: 'a', name: 'A', desc: '', content: '', enabled: false }], ['a'], 'auto').injected.length === 0)
   ok('角色级技能绑定落盘（不然是重启后静默忘掉）', wfSrc.includes('plannerSkillIds: get().config.planner.skillIds'))
   ok('resolveRoles 重建角色时保留技能绑定', /skillIds: r\.skillIds/.test(wfSrc))
   // 提示词装配顺序：协议 → 项目约定 → 角色技能 → 常驻要求
@@ -2352,6 +2358,25 @@ console.log('\n[迁移] schemaVersion 3：Agent 级 Skill 字段补齐，且不�
   const st = readSrcSafe('src/main/store.ts').text
   ok('读盘链有独立的 v<3 步进（只在 v<2 里顺手带上会漏掉"已经是 v2"的配置，本机就是这种）',
     /if \(v < 3\) \{[\s\S]{0,160}migrateV2toV3/.test(st))
+}
+
+// 批次 D 接线：两条注入链必须共用同一份并集口径（各写一份去重迟早漂移出两套行为）
+console.log('\n[Skill] 接线：工作站与工作流两条链共用并集，注入顺序不变')
+{
+  const wf = readSrcSafe('src/renderer/src/stores/workflow.ts').text
+  const se = readSrcSafe('src/renderer/src/stores/sessions.ts').text
+  const rp = readSrcSafe('src/renderer/src/lib/rolePrompts.ts').text
+  ok('工作流侧走 unionSkillIds + partitionSkillsForInjection（不自己写 filter 去重）',
+    wf.includes('unionSkillIds(roleCfg.skillIds, agent?.skillIds)') && wf.includes('partitionSkillsForInjection('))
+  ok('工作流侧清单只拉一次给两层共用（各拉一遍会在两次之间看到不同的 Skill 集）',
+    wf.includes('const allSkills = await bridge.skills.list()') &&
+      wf.includes("skillsBlockFor(autoIds, 'auto', allSkills)") && wf.includes("'reference', allSkills)"))
+  ok('工作站侧接同一份并集，且 Agent 级只有 auto 才进正文',
+    se.includes('unionSkillIds(agentAuto,') && se.includes("agent.skillMode === 'auto'"))
+  ok('工作流拼接顺序仍是 协议→约定→记忆→角色技能→常驻（没为一个新字段重排）',
+    rp.indexOf('extras.push(ctx.conventions') < rp.indexOf('extras.push(ctx.memories') &&
+      rp.indexOf('extras.push(ctx.memories') < rp.indexOf('extras.push(ctx.skills') &&
+      rp.indexOf('extras.push(ctx.skills') < rp.indexOf('extras.push(`【该执行者的常驻要求'))
 }
 
 // 饼图的环数据（纯模块，跑真代码）：内圈按接入方、外圈按模型；未上报 usage 的只计次不折 token。
