@@ -25,7 +25,7 @@ const DEFAULT_DIR = join(process.env.USERPROFILE ?? '', 'Documents', 'AgentHub-a
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SHOTS = resolve(HERE, 'shots-cliwf')
 const SANDBOX = mkdtempSync(join(tmpdir(), 'ahub-cliwf-'))
-const GOAL = '用两句话说明什么是"工作流模式"，并给一条可验收标准。'
+const GOAL = '在工作目录里新建一个文件 cli-note.md，正文用两句话说明什么是"工作流模式"，并给一条可验收标准；除这个文件外不要改目录里的其它东西。'
 
 let pass = 0
 let fail = 0
@@ -114,12 +114,23 @@ const main = async () => {
     if (think?.err) throw new Error('CLI 进程启动失败：' + think.err)
     if (think) await shot(cdp, '01-cli-thinking-card')
 
-    // 需求 1/6：执行结论落成真实文件（CLI 写盘 by=tool 或 AgentHub 兜底 by=app）
+    // 需求 1/6：执行结论落成真实文件。卡片上的产物**只有 AgentHub 自己登记的那些（by=app 兜底）**：
+    // CLI 角色在目录里写的文件进不了卡片产物（那一步发生在子进程里，AgentHub 没有工具事件可记），
+    // 它只在交付时被目录对照如实列进"产物索引"（标"来源未记入工具清单"）。下面那段就是验这件事。
     const artAt = await waitJs(cdp, `(() => {
       const s = window.__ahub_debug.state()
       const c = s.run?.cardDetails?.find((x) => (x.artifacts ?? []).length > 0)
       return c ? { role: c.role, arts: c.artifacts, outDir: s.run?.outputDir } : null
     })()`, 300000)
+    // 红要能自己说出原因：等不到产物时把现场打出来。2026-10-24 这一条红了、detail 只有 "null"，
+    // 真因（任务停在计划批准门上，执行轮压根没跑）只能靠猜——现在它自己报 stage/gateKind/runPlanFirst。
+    if (!artAt) {
+      const stuck = await js(cdp, `(() => {
+        const r = window.__ahub_debug.state().run
+        return r ? { status: r.status, stage: r.stage, gateKind: r.gateKind ?? null, runPlanFirst: r.runPlanFirst, planTextLen: r.planTextLen, cards: r.cards, notes: (r.notes || []).slice(-3) } : null
+      })()`)
+      console.log('  [cliwf 诊断] 300s 内没有任何卡片带产物 · 现场 =', JSON.stringify(stuck))
+    }
     ok('真实 CLI 任务产出被登记为文件产物', !!artAt, JSON.stringify(artAt ?? null))
     if (artAt) {
       const p = (artAt.arts ?? []).map((a) => a.match(/\(([^)]+)\)\[/)?.[1]).filter(Boolean)[0]
@@ -144,6 +155,50 @@ const main = async () => {
     })()`)
     ok('界面过程区渲染出思考条目（DOM 可见，走 ThinkingText 分段）', !!thinkDom?.hasView && thinkDom?.visible, JSON.stringify(thinkDom))
     await shot(cdp, '03-cli-card-dom')
+
+    // ---- 交付如实交代目录：CLI 角色自己写的文件进不了卡片产物（那一步发生在子进程里，没有工具事件可记），
+    // 唯一可见通道是交付时的目录对照 → "产物索引"里那行「目录里存在（来源未记入工具清单）」。
+    // 这一段验的就是"盘上真有的文件，一个都没被悄悄漏掉"——按盘上实况判，不按 CLI 是否配合写文件判。
+    // 交付前先往产物目录里放一个"卡片上没登记过"的文件：这样"盘上真有的文件都被交代过"这条判据
+    // 不依赖 CLI 是否配合写文件（第三方写不写由下面那行观察报出来，不当门禁）。
+    const strayDir = String(artAt?.outDir || SANDBOX)
+    const STRAY = join(strayDir, 'stray-before-delivery.md')
+    try { writeFileSync(STRAY, '交付前就在目录里、卡片没登记的文件。\n', 'utf-8') } catch (e) { console.log('  [cliwf] 前置文件没放进去（这条判据退化为只靠 CLI 写盘）：' + String(e).slice(0, 80)) }
+    let fin = null
+    for (let i = 0; i < 5; i++) {
+      // 必须等"门真的挂出来了"或终态：waiting_review 是审核跑完的中间态，那一刻 gate 还是 null，
+      // 在它上面点批准是空操作（实测就这么把循环 4 次烧光、任务根本没交付，红的是测的写法）
+      fin = await waitJs(cdp, `(() => {
+        const r = window.__ahub_debug.state().run
+        if (!r) return null
+        const done = ['completed', 'failed', 'cancelled', 'timeout'].includes(r.status)
+        if (done) return { status: r.status, outDir: r.outputDir, cards: r.cards, gateKind: r.gateKind ?? null, gated: false }
+        if (r.gate) return { status: r.status, outDir: r.outputDir, cards: r.cards, gateKind: r.gateKind ?? null, gated: true }
+        return null
+      })()`, 240000)
+      if (!fin || !fin.gated) break
+      await js(cdp, 'window.__ahub_debug.passGate()')
+      await sleep(4000)
+    }
+    const effDir = String(fin?.outDir || SANDBOX)
+    const diskFiles = (existsSync(effDir) ? readdirSync(effDir, { withFileTypes: true }) : [])
+      .filter((e) => e.isFile() && !e.name.startsWith('.'))
+      .map((e) => e.name)
+    const arts = await js(cdp, `(() => (window.__ahub_debug.state().run?.cardDetails || []).flatMap((c) => c.artifacts || []))()`)
+    const idxPath = join(effDir, '产物索引.md')
+    const idx = existsSync(idxPath) ? readFileSync(idxPath, 'utf-8') : ''
+    const unexplained = diskFiles.filter((f) => !arts.some((a) => String(a).includes(f)) && !idx.includes('`' + f + '`'))
+    console.log('  [cliwf] 终态 =', JSON.stringify(fin), '· 目录文件 =', JSON.stringify(diskFiles),
+      '· CLI 真写了 cli-note.md =', diskFiles.includes('cli-note.md'), '· 索引条目 =', (idx.match(/^- /gm) || []).length,
+      '· 卡片登记的产物 =', JSON.stringify(arts).slice(0, 260))
+    ok('交付把产物目录里每个真实存在的文件都交代过（卡片登记过 或 产物索引如实列出），没有一个被悄悄漏掉',
+      fin?.status === 'completed' && diskFiles.length > 0 && unexplained.length === 0,
+      JSON.stringify({ status: fin?.status, diskFiles, unexplained }))
+    // 上一条会被"目录里本来就只有登记过的文件"混过去，这条按构造钉死：文件是套件自己放的，
+    // 卡片一定没登记过它，产品要么在索引里列出，要么红。
+    ok('交付按目录实况如实列出"卡片没登记过"的那个文件（不是只列 AgentHub 自己写的那几个）',
+      idx.includes('`stray-before-delivery.md`') || arts.some((a) => String(a).includes('stray-before-delivery.md')),
+      JSON.stringify({ inIndex: idx.includes('`stray-before-delivery.md`'), 索引条目: (idx.match(/^- /gm) || []).length, 卡片产物: arts.length }))
   } catch (e) {
     console.error('[cliwf] 失败：' + (e?.stack || e?.message || e))
     fail++

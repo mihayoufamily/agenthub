@@ -35,7 +35,7 @@ const args = Object.fromEntries(process.argv.slice(2).map((a) => {
 // 逻辑层两套各几秒、真机各几分钟，10 分钟是宽松上限；cli 层要真跑外部 CLI，给 20 分钟。
 const DEFAULT_SUITE_TIMEOUT_MS = 10 * 60 * 1000
 const SUITES = [
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 567, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、单执行循环占用位与计划轮上下文接线' },
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 569, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 59, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态、技能注入层序、上一任务上下文都真跑过）' },
   // ui=83：2026-10-24 v0.5.0 Task 1 修复轮 1 实测（结果：83 PASS / 0 FAIL）。
   // 82 → 83 多的是"显式定视口 960×640 下介绍卡完整落在视口内"那一条（Ruling T1-e 的落点）；
@@ -53,7 +53,7 @@ const SUITES = [
   // cli-thinking 不 spawn 应用（只 require 编译产物里的适配层 + 真跑 CLI），所以它不受单实例锁影响。
   // launchesApp 默认 true：新加的套件不声明也会走这道闸门，声明 false 才跳过——漏标只会多等，不会少等。
   { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', min: 8, launchesApp: false, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
-  { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', min: 9, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘' },
+  { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', min: 11, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘 + 交付把目录里真实存在的文件都交代过' },
   // `gate: false` —— 这套要三家外部服务同时可用（本机模型端点 + codex + CodeBuddy）。实测一轮里规划角色挑到的
   // 是本地 Qwen，服务没起就"任务失败：fetch failed"，红的是环境不是被测代码，所以只报不拦；
   // 断言数照打，下限仍留 null（跑通与否随环境变）。角色绑定本身已改成套件自绑（setRoles），不再依赖用户当前配置。

@@ -168,6 +168,21 @@ function toolResultToText(c: unknown): string {
 }
 
 /**
+ * 把 CLI 回报的绝对路径的盘符大小写贴回本次 cwd 的那一套。
+ * Windows 上 `c:\x` 与 `C:\x` 是同一个文件，但任何**按字符串前缀比**的下游都会把它们当成两个：
+ * 产物按 outputDir 筛、检查点/回滚清单按路径配对、界面上的"就在产物目录里"判定。
+ * 实测（2026-10-24 CodeBuddy 写临时沙箱）：AgentHub 传出去的 cwd 是 `C:\Users\…`，
+ * 它登记的产物路径是 `c:\Users\…\cli-note.md`，于是真机那条 `产物文件就在该目录内` 恒红。
+ * 只动盘符那两位；不同盘符（cwd 在 C、文件在 D）原样返回，那不是大小写问题。
+ */
+export function alignDriveCase(cwd: string, p: string): string {
+  const cd = /^([A-Za-z]:)/.exec(cwd)?.[1]
+  const pd = /^([A-Za-z]:)/.exec(p)?.[1]
+  if (!cd || !pd || cd === pd || cd.toLowerCase() !== pd.toLowerCase()) return p
+  return cd + p.slice(2)
+}
+
+/**
  * 把 CLI 报出的文件路径还原为可打开的绝对路径：相对路径按本次 spawn 的 cwd 解析，
  * 并且只在文件真实存在时才返回（CLI 自称写了但没落盘的情况不能登记为产物）。
  */
@@ -175,7 +190,7 @@ function realOutPath(cwd: string, raw: unknown): string | undefined {
   if (typeof raw !== 'string' || !raw.trim()) return undefined
   const p = resolvePath(cwd, raw)
   try {
-    return existsSync(p) ? p : undefined
+    return existsSync(p) ? alignDriveCase(cwd, p) : undefined
   } catch {
     return undefined
   }

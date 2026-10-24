@@ -2274,6 +2274,20 @@ console.log('\n[CLI] codex 显式要 workspace-write 沙箱（默认 read-only �
     Array.isArray(modern) && modern.length === 1 && modern[0].path === 'D:\\o\\a.c' && modern[0].kind === 'add' &&
       Array.isArray(legacy) && legacy.length === 1 && legacy[0].path === 'b.c' && legacy[0].kind === 'modify',
     `modern=${JSON.stringify(modern)} legacy=${JSON.stringify(legacy)}`)
+  // 盘符大小写：真机实测 CodeBuddy 回报 `c:\Temp\…\cli-note.md`，而 AgentHub 传出去的 cwd 是 `C:\Temp\…`。
+  // 两者指的是同一个文件，但"产物在不在 outputDir 里""检查点按路径配对"都是**按字符串前缀**比的，
+  // 于是真机那条断言恒红。期望值取自那一轮的原话路径，不是猜的。
+  const adc = typeof mod.alignDriveCase === 'function' ? mod.alignDriveCase : null
+  const winCwd = 'C:\\Users\\zhangdy\\AppData\\Local\\Temp\\ahub-cliwf-yYjeEl'
+  ok('CLI 回报的路径盘符是小写时贴回 cwd 的那一套（同一文件不能因为 c:/C: 被当成目录外）',
+    adc ? adc(winCwd, 'c:\\Users\\zhangdy\\AppData\\Local\\Temp\\ahub-cliwf-yYjeEl\\cli-note.md') === winCwd + '\\cli-note.md' : false,
+    `got=${adc ? adc(winCwd, 'c:\\Users\\zhangdy\\AppData\\Local\\Temp\\ahub-cliwf-yYjeEl\\cli-note.md') : '未导出'}`)
+  ok('不同盘符、已一致、没有盘符（UNC/相对）三种都原样不动（这不是大小写问题，不许顺手改）',
+    adc ? adc('C:\\a', 'd:\\a\\b.md') === 'd:\\a\\b.md' &&
+      adc('C:\\a', 'C:\\a\\b.md') === 'C:\\a\\b.md' &&
+      adc('\\\\srv\\share', '\\\\srv\\share\\b.md') === '\\\\srv\\share\\b.md' &&
+      adc('C:\\a', 'b.md') === 'b.md' : false,
+    `got=${adc ? JSON.stringify([adc('C:\\a', 'd:\\a\\b.md'), adc('C:\\a', 'C:\\a\\b.md'), adc('\\\\srv\\share', '\\\\srv\\share\\b.md'), adc('C:\\a', 'b.md')]) : '未导出'}`)
   // 思考摘要的形状解析（同机同参数实测：上游一次吐 1 段、一次吐 0 段，所以"真跑必看到"不能当门禁；
   // 但"它吐了我们就得并进思考区"是产品承诺，这条跑真代码钉住）
   const crp = typeof mod.codexReasoningParts === 'function' ? mod.codexReasoningParts : null

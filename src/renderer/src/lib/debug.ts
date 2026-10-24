@@ -71,7 +71,9 @@ export function installDebugHooks() {
         agent = r.agent
       }
       const mk = () => ({ agentId: agent!.id, agentName: agent!.name, model: agent!.model })
-      useWorkflow.getState().patchConfig({ planner: mk(), executor: mk(), reviewer: mk(), reviewMode: 'human', confirmEveryRound: true })
+      // planFirst 显式关掉：这条入口要的是"完整跑一条 CLI 执行链"，而计划态会把任务停在批准门上，
+      // 于是"产物真实落盘"那半永远等不到（2026-10-24 实测红在这里，红的是用户当时开着全局计划态）。
+      useWorkflow.getState().patchConfig({ planner: mk(), executor: mk(), reviewer: mk(), reviewMode: 'human', confirmEveryRound: true, planFirst: false })
       const wf = useWorkflow.getState()
       wf.setDraft(goal)
       void wf.start()
