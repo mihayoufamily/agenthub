@@ -1,5 +1,5 @@
 // CLI 的模型清单：能枚举时列出可点选项（点击回填到输入框），否则只给一句说明
-// 清单由主进程适配层提供（CodeBuddy 解析 --help、Codex 读 catalog），不可枚举的 CLI 如实说明
+// 清单由主进程适配层提供（CodeBuddy 解析 --help、Codex 只列它中转里的模型），不可枚举的 CLI 如实说明
 import { useEffect, useState } from 'react'
 import type { CliName } from '@shared/types'
 import { bridge } from '../lib/ipc'

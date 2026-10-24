@@ -803,7 +803,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return { ok: true }
   })
 
-  // 模型清单：可枚举的 CLI 返回列表（CodeBuddy 解析 --help，Codex 读 catalog），其余如实说明
+  // 模型清单：可枚举的 CLI 返回列表（CodeBuddy 解析 --help，Codex 只问它的中转端点 /models），其余如实说明
   ipcMain.handle('cli:models', (_e, name: string) => {
     if (!cli.isKnownCli(name)) return { ok: false, message: `未知 CLI：${name}` }
     return cli.listModels(name)

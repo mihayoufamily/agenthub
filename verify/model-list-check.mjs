@@ -27,6 +27,12 @@ try {
     check(`cli:models(${name}) 回的是结构化结果（ok 布尔 + models 数组或 message）`,
       typeof r?.ok === 'boolean' && (Array.isArray(r?.models) || typeof r?.message === 'string'),
       JSON.stringify(r)?.slice(0, 160))
+    if (name === 'codex') {
+      // 用户拍定：界面上只显示他中转里的模型。清单来源必须是端点本身，
+      // 不能再混本地 catalog 文件或 config.toml 的默认模型（那个默认值本机实测"清单里有、真调用被拒"）。
+      check('codex 的模型清单只来自它实际连的中转端点（不再有 catalog/config 兜底）',
+        r.ok === false || r.source === 'endpoint', JSON.stringify({ ok: r.ok, source: r.source })?.slice(0, 120))
+    }
   }
   cdp.socket.end()
 } finally {

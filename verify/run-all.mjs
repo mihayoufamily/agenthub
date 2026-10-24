@@ -43,7 +43,7 @@ const SUITES = [
   { name: 'cli-shot', tier: 'gui', script: 'cli-shot.mjs', min: 4, what: '本机 CLI 面板截图（5 个条目与实测状态）', gate: false },
   { name: 'wf-config', tier: 'gui', script: 'workflow-config-shot.mjs', min: 7, what: '工作流三角色配置条（跨厂商绑定）' },
   { name: 'model-picker', tier: 'gui', script: 'model-picker-shot.mjs', min: 3, what: 'CLI 模型清单进切换弹窗' },
-  { name: 'model-list', tier: 'gui', script: 'model-list-check.mjs', min: 3, what: 'CLI 模型清单真实 IPC 返回', gate: false },
+  { name: 'model-list', tier: 'gui', script: 'model-list-check.mjs', min: 4, what: 'CLI 模型清单真实 IPC 返回', gate: false },
   // cli 层要真跑 codex / CodeBuddy / arkcli（烧真实额度），本轮未实测 → 下限留空；跑过一轮后按实测 PASS 钉上
   { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', min: 8, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
   { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', min: null, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘' },

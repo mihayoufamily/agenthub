@@ -665,7 +665,7 @@ export interface CliModelList {
   ok: boolean
   models?: string[]
   message?: string
-  /** 清单来源，用于界面标注（help / catalog / config） */
+  /** 清单来源，用于界面标注（endpoint = 该 CLI 实际连的中转；help = 它自己的 --help） */
   source?: string
 }
 
@@ -703,27 +703,24 @@ function runCapture(exe: string, args: string[], env: Record<string, string> | u
   })
 }
 
-/** 读取 codex 当前配置（base_url / token / model / catalog 文件名） */
-function readCodexConfig(): { baseUrl?: string; token?: string; model?: string; catalogName: string } {
+/** 读取 codex 当前配置里"它实际连的是哪个端点、用什么 token"——模型清单只问那个端点 */
+function readCodexConfig(): { baseUrl?: string; token?: string } {
   const cfgPath = join(homedir(), '.codex', 'config.toml')
-  const out: { baseUrl?: string; token?: string; model?: string; catalogName: string } = {
-    catalogName: 'cc-switch-model-catalog.json'
-  }
+  const out: { baseUrl?: string; token?: string } = {}
   try {
     if (!existsSync(cfgPath)) return out
     const toml = readFileSync(cfgPath, 'utf-8')
-    out.model = toml.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1]
     out.baseUrl = toml.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1]
     out.token = toml.match(/^\s*experimental_bearer_token\s*=\s*"([^"]+)"/m)?.[1]
-    const c = toml.match(/^\s*model_catalog_json\s*=\s*"([^"]+)"/m)
-    if (c) out.catalogName = c[1]
-  } catch { /* 读不到就用默认值 */ }
+  } catch { /* 读不到就当没配，调用方据此如实报错 */ }
   return out
 }
 
 /**
- * Codex 的模型清单：**优先问 codex 实际连接的那个端点**（兼容 OpenAI 的 /models），
- * 因为中转站/代理的可用模型会变，本地 catalog 文件可能是旧的；问不到再退回 catalog 文件。
+ * Codex 的模型清单：**只问 codex 实际连接的那个端点**（兼容 OpenAI 的 `/models`）。
+ * 用户拍定（2026-10-24）：界面上只显示他中转里的模型。本地 catalog 文件与 `config.toml` 的
+ * 默认模型都**不再混进清单**——那两级兜底会把"清单里有、真调用却被拒"的模型（本机实测
+ * `gpt-5.5`）顶到最前面，看起来能选、选上就报错。拿不到就如实报"读不到 + 为什么"，让手填。
  */
 async function codexModelsFromEndpoint(): Promise<{ models: string[]; source: string } | null> {
   const cfg = readCodexConfig()
@@ -751,27 +748,6 @@ async function codexModelsFromEndpoint(): Promise<{ models: string[]; source: st
   }
 }
 
-/** Codex 的模型清单兜底：本地 catalog 文件的 slug + config.toml 里当前生效的 model */
-function codexModelsFromCatalog(): { models: string[]; source: string } | null {
-  const home = join(homedir(), '.codex')
-  const cfg = readCodexConfig()
-  const catalogPath = join(home, cfg.catalogName)
-  const models: string[] = []
-  try {
-    if (existsSync(catalogPath)) {
-      const raw = JSON.parse(readFileSync(catalogPath, 'utf-8')) as { models?: Record<string, unknown>[] }
-      for (const item of raw.models ?? []) {
-        const slug = typeof item.slug === 'string' ? item.slug : typeof item.id === 'string' ? item.id : null
-        if (slug) models.push(slug)
-      }
-    }
-  } catch { /* 解析失败忽略 */ }
-  // 当前生效的模型排在最前（可能不在 catalog 里，如换过 provider）
-  if (cfg.model && !models.includes(cfg.model)) models.unshift(cfg.model)
-  if (models.length === 0 && cfg.model) return { models: [cfg.model], source: 'config' }
-  return models.length ? { models, source: 'catalog' } : null
-}
-
 /** 读取某个 CLI 可枚举的模型清单（结果按进程缓存） */
 export async function listModels(name: CliName): Promise<CliModelList> {
   const cached = MODEL_CACHE.get(name)
@@ -779,11 +755,19 @@ export async function listModels(name: CliName): Promise<CliModelList> {
   let result: CliModelList = { ok: false, message: '该 CLI 不提供可枚举的模型清单，请手动填写模型 ID' }
   try {
     if (name === 'codex') {
-      // 先问端点（中转站/代理的真实清单），问不到再退回本地 catalog
+      // 只认中转端点：问不到就如实说明为什么问不到，不再退回本地 catalog / config.toml
       const fromEndpoint = await codexModelsFromEndpoint()
-      const r = fromEndpoint ?? codexModelsFromCatalog()
-      if (r) result = { ok: true, models: r.models, source: r.source }
-      else result = { ok: false, message: '未找到 ~/.codex 的模型信息，请手动填写模型 ID' }
+      if (fromEndpoint && fromEndpoint.models.length) {
+        result = { ok: true, models: fromEndpoint.models, source: fromEndpoint.source }
+      } else {
+        const cfg = readCodexConfig()
+        result = {
+          ok: false,
+          message: cfg.baseUrl
+            ? `你的中转端点 ${cfg.baseUrl} 没返回模型清单（不支持 /models、鉴权失败或超时都算），可手填模型 ID`
+            : 'codex 的 config.toml 没配 base_url，读不到你的中转模型清单，可手填模型 ID'
+        }
+      }
     } else if (name === 'codebuddy') {
       const target = await SPECS.codebuddy.resolveTarget()
       if (target) {
