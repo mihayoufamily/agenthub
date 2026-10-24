@@ -608,6 +608,19 @@ try {
   ok('徽章 pointer-events:none：命中测试穿过它落到被压住的元素上，不吃顶栏点击',
     !occ.missing && occ.pointerEvents === 'none' && occ.hitIsBadge === false && Array.isArray(occ.eaten) && occ.eaten.length === 0,
     `pointer-events=${occ.pointerEvents} 徽章中心命中的是徽章本身=${occ.hitIsBadge} 被徽章压住又点不到的元素=${JSON.stringify(occ.eaten)}（顶栏可点元素共 ${occ.clickableTotal} 个，其中与徽章 rect 相交 ${occ.underBadge?.length ?? 0} 个：${JSON.stringify(occ.underBadge)}）`)
+  // 复审/收尾实测：这条断言原先**在横幅还开着的时候**点顶栏 chip，而横幅本身就在顶部居中、
+  // 会合法地盖住那一片（它是临时浮层，不是徽章的锅）。实测命中到的是 `ub-text`（横幅文字），
+  // 于是这条会因为"测的东西不对"而红。挪到横幅清掉之后再点（见下面"横幅清除后"那组之后）。
+  await js(cdp3, 'window.__ahub_debug.setUpdateBanner(null)')
+  await sleep(300)
+  const bannerOff = await js(cdp3, `(() => {
+    const badge = document.querySelector('[data-compat-badge]')
+    return { banner: !!document.querySelector('.update-banner'), top: badge ? +badge.getBoundingClientRect().top.toFixed(1) : null }
+  })()`)
+  ok('横幅清除后徽章回到原位（下移是跟着横幅走的，不是把徽章永久挪到 68px 那里留一块空白）',
+    bannerOff.banner === false && bannerOff.top !== null && bannerOff.top < 40, JSON.stringify(bannerOff))
+  // 「徽章不吃点击」要在**没有横幅**的时候点：横幅是临时浮层，顶部居中、会合法盖住那一片，
+  // 把它算进"谁接走了点击"里会测到 `ub-text` 而不是徽章（收尾实测就是这么红的）。
   const chipHit = await js(cdp3, `(() => {
     const el = document.querySelector('.wb-topbar .model-chip') || document.querySelector('.wb-topbar button') || document.querySelector('.cfg-chip')
     if (!el) return { missing: true }
@@ -620,16 +633,8 @@ try {
       topCls: top ? (typeof top.className === 'string' ? top.className : top.tagName).slice(0, 40) : null
     }
   })()`)
-  ok('已知顶栏 chip 的中心命中它自己（徽章没有把这一片的点击接走）',
+  ok('已知顶栏 chip 的中心命中它自己（横幅清掉之后）——徽章没有把这一片的点击接走',
     !chipHit.missing && chipHit.isSelf === true, JSON.stringify(chipHit))
-  await js(cdp3, 'window.__ahub_debug.setUpdateBanner(null)')
-  await sleep(300)
-  const bannerOff = await js(cdp3, `(() => {
-    const badge = document.querySelector('[data-compat-badge]')
-    return { banner: !!document.querySelector('.update-banner'), top: badge ? +badge.getBoundingClientRect().top.toFixed(1) : null }
-  })()`)
-  ok('横幅清除后徽章回到原位（下移是跟着横幅走的，不是把徽章永久挪到 68px 那里留一块空白）',
-    bannerOff.banner === false && bannerOff.top !== null && bannerOff.top < 40, JSON.stringify(bannerOff))
 
   const onWf12 = await gotoWorkflow(cdp3)
   const badgeInWf = onWf12 ? await waitJs(cdp3, "document.querySelectorAll('[data-compat-badge]').length === 1", 12000) : false
