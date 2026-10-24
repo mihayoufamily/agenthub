@@ -54,6 +54,15 @@ export function cliSupportsThinking(name: CliName): boolean {
   return name === 'codex' || name === 'claude'
 }
 
+/**
+ * 供逻辑层断言用：把某个 CLI 的 spawn 参数算出来（**不 spawn、不碰环境**）。
+ * 存在的理由：`SPECS` 是模块私有的，"codex 有没有带 --sandbox"这种事只能靠源码 grep 去猜，
+ * 而 grep 会被注释满足（本项目已踩过）。这里给一个纯函数的缝，断言直接跑真代码。
+ */
+export function cliArgsFor(name: CliName, prompt: string, system: string | undefined, opts: CliChatOptions = {}): string[] {
+  return SPECS[name].buildArgs(prompt, system, opts)
+}
+
 /** 一个可启动目标：真正的可执行文件 + 固定前置参数 + 需要的环境变量 */
 export interface CliTarget {
   /** 真正被 spawn 的可执行文件（.exe） */
@@ -412,7 +421,11 @@ const SPECS: Record<CliName, CliSpec> = {
     buildArgs(prompt, system, opts) {
       // system 无独立 flag：以指令前缀并入 prompt
       const full = system ? `【系统指令】${system}\n\n【任务】${prompt}` : prompt
-      const args = ['exec', '--json', '--skip-git-repo-check', full.slice(0, MAX_PROMPT_CHARS)]
+      // --sandbox workspace-write：codex 的默认沙箱是 **read-only**，exec 模式下它连我们设给它的
+      // cwd（= 产物目录）都写不了，模型会自己报告"当前文件系统权限为只读，无法创建文件"（用户实测踩到）。
+      // AgentHub 的承诺本来就是"沙箱根切到产物目录、只换目录不提升访问级别"，所以显式给
+      // workspace-write：可写范围就是 cwd（+临时目录），不是全盘；网络仍按 codex 的默认关闭。
+      const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write', full.slice(0, MAX_PROMPT_CHARS)]
       if (opts.model) args.push('-m', opts.model)
       // 思考强度：codex 官方用 model_reasoning_effort 配置项（-c 覆盖）
       if (opts.thinkingLevel && opts.thinkingLevel !== 'off') {

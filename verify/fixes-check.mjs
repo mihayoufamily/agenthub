@@ -2218,6 +2218,22 @@ console.log('\n[Z3] 脱敏与渲染口径统一（工具卡 / MCP 信任弹窗 a
     `isMain 闸门=${/if \(!isMain\) return/.test(mainZ3.text)}；retry 编码=${/const retry = encodeURIComponent\(url\)/.test(mainZ3.text)}`)
 }
 
+// ---------- CLI 适配器：codex 的沙箱必须显式给 ----------
+// 用户实测：工作流里 codex 报"当前文件系统权限为只读，无法创建 hello.c"——根因是 `codex exec` 的
+// **默认沙箱是 read-only**，而我们以前没传 `--sandbox`。这条断言跑**真代码**（cliArgsFor 纯函数），
+// 不是 grep 源码：删掉参数就会红，注释也满足不了它。
+console.log('\n[CLI] codex 显式要 workspace-write 沙箱（默认 read-only 会让它在产物目录写不了文件）')
+{
+  let cliArgsFor = null
+  try { cliArgsFor = (await import('../out/main/adapters/cli.js')).cliArgsFor } catch { /* 未导出时下面 FAIL */ }
+  const args = typeof cliArgsFor === 'function' ? cliArgsFor('codex', 'do it', '', {}) : []
+  const i = Array.isArray(args) ? args.indexOf('--sandbox') : -1
+  ok('codex exec 带 --sandbox workspace-write（写范围=cwd 即产物目录，不是全盘）',
+    i >= 0 && args[i + 1] === 'workspace-write', `args=${JSON.stringify(args)?.slice(0, 200)}`)
+  ok('codex 仍带 --skip-git-repo-check（产物目录通常不是 git 仓库），prompt 在位',
+    args.includes('--skip-git-repo-check') && args.includes('do it'), `args=${JSON.stringify(args)?.slice(0, 200)}`)
+}
+
 // ---------- Z4. ESLint：注入面那 5 条 error 规则的"机器还开着"（修复波 A · 项 4）----------
 // 那 5 条 error 规则是 Task 8 存在的全部意义，而这台机器原先能被**一行注释**关掉
 // （评审实测：`// eslint-disable-next-line no-eval` + `eval('1')` → 0 error）。
