@@ -100,10 +100,27 @@ export function waitHttp(port, timeoutMs) {
   })
 }
 
+// 渲染进程在导航/重载中间会销毁执行上下文，此时 evaluate 的 Promise 被回收，
+// CDP 抛 "Promise was collected"。这不是产品缺陷也不是断言失败，重试即可
+// （ui-shot 曾偶发撞上：7 次跑里 2 次，且每次都会把整套件截断、把后面两轮带歪）。
+const TRANSIENT_EVAL = /Promise was collected|Execution context was destroyed|Cannot find context with specified id|Target closed|Session closed/i
+
 export async function js(cdp, expr) {
-  const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true })
-  if (r.exceptionDetails) throw new Error('page error: ' + JSON.stringify(r.exceptionDetails).slice(0, 300))
-  return r.result?.value
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true })
+      if (r.exceptionDetails) {
+        const text = JSON.stringify(r.exceptionDetails)
+        if (attempt < 5 && TRANSIENT_EVAL.test(text)) { await sleep(300); continue }
+        throw new Error('page error: ' + text.slice(0, 300))
+      }
+      return r.result?.value
+    } catch (e) {
+      const msg = String(e?.message ?? e)
+      if (attempt < 5 && TRANSIENT_EVAL.test(msg)) { await sleep(300); continue }
+      throw e
+    }
+  }
 }
 
 export async function waitJs(cdp, expr, timeoutMs = 20000) {

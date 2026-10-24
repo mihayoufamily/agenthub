@@ -460,11 +460,14 @@ function createWindow() {
     console.log(`[main] did-fail-load ${code} ${desc}`)
     if (!isMain) return
     console.error(`[main] 加载失败 code=${code} desc=${desc}`)
-    const retry = encodeURIComponent(url)
     // desc 来自 Chromium 的失败描述，内容不由我们控制，而这个 data: 页面是加载进**特权窗口**的：
     // 未转义插值等于把一段外部文本当 HTML 解析。url 那半边本来就编码了（encodeURIComponent +
     // 按钮里 decodeURIComponent），desc 没有——这是本分支唯一一处往特权页面做的未转义插值。
     const safeDesc = escapeHtmlText(desc)
+    // retry 虽然 encodeURIComponent 过，但它**不转义单引号**，而这里是把值塞进 onclick 的
+    // JS 字符串字面量里：失败 URL 里只要有一个 '，字面量就被截断、后面变成代码。
+    // 单引号按 %27 编掉，decodeURIComponent 会原样还原（pathname 里 %27 与 ' 等价）。
+    const retry = encodeURIComponent(url).replace(/'/g, '%27')
     const html = `<!doctype html><html><body style="margin:0;background:#0b0b0c;color:#f7f2e8;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
       <div style="font-size:18px">界面加载失败</div><div style="opacity:.6;font-size:13px">${safeDesc}</div>
       <button onclick="location.href=decodeURIComponent('${retry}')" style="padding:10px 24px;border:0;border-radius:8px;background:#b45309;color:#fff;font-size:14px;cursor:pointer">重试</button>

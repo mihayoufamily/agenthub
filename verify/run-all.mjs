@@ -28,8 +28,11 @@ const args = Object.fromEntries(process.argv.slice(2).map((a) => {
  *   本轮基线来源：2026-10-24 收尾 C1 全量实测，逐套件数字见
  *   .superpowers/sdd/2026-10-23-v0.4.0-safety-and-ci/wave-c1-numbers.md
  */
+// 每套件的**硬超时**：以前完全不设，一个挂住的套件会把整轮验证吊死（复审点出的面）。
+// 逻辑层两套各几秒、真机各几分钟，10 分钟是宽松上限；cli 层要真跑外部 CLI，给 20 分钟。
+const DEFAULT_SUITE_TIMEOUT_MS = 10 * 60 * 1000
 const SUITES = [
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 483, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）' },
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 489, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 52, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态）' },
   { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 79, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出' },
   { name: 'approval', tier: 'gui', script: 'approval-shot.mjs', min: 94, what: '命令审批真机：没批准不执行、拒绝/本次/始终、危险形态仍要问、历史进设置' },
@@ -39,9 +42,9 @@ const SUITES = [
   { name: 'model-picker', tier: 'gui', script: 'model-picker-shot.mjs', min: 3, what: 'CLI 模型清单进切换弹窗' },
   { name: 'model-list', tier: 'gui', script: 'model-list-check.mjs', min: 3, what: 'CLI 模型清单真实 IPC 返回', gate: false },
   // cli 层要真跑 codex / CodeBuddy / arkcli（烧真实额度），本轮未实测 → 下限留空；跑过一轮后按实测 PASS 钉上
-  { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', min: null, what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
-  { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', min: null, what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘' },
-  { name: 'cross-vendor', tier: 'cli', script: 'cross-vendor-run.mjs', min: null, what: '跨厂商三角色真跑一轮（规划→执行→审核 + 人工门）' }
+  { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', min: null, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
+  { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', min: null, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘' },
+  { name: 'cross-vendor', tier: 'cli', script: 'cross-vendor-run.mjs', min: null, timeoutMs: 20 * 60 * 1000, what: '跨厂商三角色真跑一轮（规划→执行→审核 + 人工门）' }
 ]
 
 const wanted = args.only
@@ -102,10 +105,12 @@ for (const suite of selected) {
     }
   }
   const t0 = Date.now()
+  const budget = suite.timeoutMs ?? DEFAULT_SUITE_TIMEOUT_MS
   const r = spawnSync(process.execPath, [resolve(HERE, suite.script)], {
     cwd: resolve(HERE, '..'),
     encoding: 'utf-8',
-    maxBuffer: 32 * 1024 * 1024
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: budget
   })
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
   const m = out.match(PASS_RE)
@@ -115,6 +120,8 @@ for (const suite of selected) {
   const crashed = exit !== 0 && (fail === null || fail === 0)
   // 每一条不通过都要留下能直接读懂的理由；"红了但不知道为什么红"最后总会把人引向削弱断言。
   const reasons = []
+  // 超时单独点出来：spawnSync 超时后 exit 是 null、输出可能为空，不写清楚会被读成"崩了"。
+  if (r.error?.code === 'ETIMEDOUT') reasons.push(`套件超过 ${Math.round(budget / 60000)} 分钟的硬超时被中止（不是断言红；若它起了应用，残留进程由下一个套件前的 waitAppGone 拦）`)
   if (crashed) reasons.push(`退出码 ${exit}${r.signal ? ` / 信号 ${r.signal}` : ''}，但输出里没有失败断言计数（崩了或被超时杀掉，不是断言红）`)
   if ((fail ?? 0) > 0) reasons.push(`${fail} 条断言失败`)
   // 收尾 C1 · 项 1b：退出码 0 却没打印 `结果：N PASS / M FAIL` 的套件，以前会被读成"通过"，

@@ -611,6 +611,32 @@ console.log('\n[L] 自定义单价（覆盖内置表）+ 预算硬闸的账本�
     [{ pattern: 'x', input: 0.4, output: 1.2 }, true, '正常单价通过']
   ]
   for (const [o, want, name] of bad) ok(`单价校验：${name}`, pr.validatePriceOverride(o).ok === want, JSON.stringify(pr.validatePriceOverride(o)))
+  // 复审 Out-of-Scope：prices:set 原来是同一类静默丢（`.filter(pattern 非空).slice(0, 100)`）
+  ok('单价落盘闸门：空模式被点名拒收，不是静默丢掉',
+    (() => {
+      const f = ov.partitionPriceOverrides
+      if (typeof f !== 'function') return false
+      const p = f([{ pattern: '  ', input: 1, output: 1 }, { pattern: 'kimi', input: 1, output: 2, asOf: '2026-10-24' }])
+      return p?.kept?.length === 1 && p.kept[0].pattern === 'kimi' && p.kept[0].input === 1 &&
+        p?.rejected?.length === 1 && /空模式/.test(String(p.rejected[0].message))
+    })(), JSON.stringify(ov.partitionPriceOverrides?.([{ pattern: ' ' }, { pattern: 'kimi', input: 1, output: 2 }]))?.slice(0, 200))
+  ok('单价落盘闸门不再按条数截断（120 条整表保留，第 101 条不再消失）',
+    (() => {
+      const f = ov.partitionPriceOverrides
+      if (typeof f !== 'function') return false
+      const many = Array.from({ length: 120 }, (_, i) => ({ pattern: `m${i}`, input: 1, output: 2, asOf: '' }))
+      const p = f(many)
+      return p?.kept?.length === 120 && p?.rejected?.length === 0
+    })())
+  ok('单价落盘闸门对非数组与脏元素不抛错（脏元素逐条点名）',
+    (() => {
+      const f = ov.partitionPriceOverrides
+      if (typeof f !== 'function') return false
+      const p1 = f({ a: 1 })
+      const p2 = f([null, 'x', 3, { pattern: 'ok', input: 1, output: 2 }])
+      return p1?.kept?.length === 0 && p1?.rejected?.length === 0 &&
+        p2?.kept?.length === 1 && p2?.rejected?.length === 3
+    })())
 }
 {
   const root = mkdtempSync(join(tmpdir(), 'ahub-budget-'))
@@ -727,23 +753,45 @@ console.log('\n[M] Hooks：pre 可否决 / post 只观察 / 参数只走环境�
         }
         return true
       })())
-    ok(`条数上限只挡合法条目增长，且被挡下的点名回界面（不再静默丢第 ${hk.HOOK_RULES_MAX + 1} 条）`,
+    // 复审 finding 3 的残口：条数上限**不再在落盘时截断**（那仍然是替用户删数据，只是顺带说了一声），
+    // 只活在界面"新增"那一关。所以这里断言的契约变了：整表保留，一条都不丢。
+    ok(`条数上限不再在落盘时截断：超过 ${hk.HOOK_RULES_MAX} 条的合法表整表保留、rejected 为空`,
       (() => {
         const MAX = hk.HOOK_RULES_MAX
         if (!Number.isInteger(MAX) || MAX < 1) return false
         const many = Array.from({ length: MAX + 2 }, (_, i) => ({ ...other, id: `h${i}` }))
         const p = hk.partitionHookRules?.(many)
-        return p?.kept?.length === MAX && p?.rejected?.length === 2 &&
-          p.rejected.map((r) => r.id).join(',') === `h${MAX},h${MAX + 1}` &&
-          p.rejected.every((r) => String(r.message).includes(String(MAX)))
+        return p?.kept?.length === MAX + 2 && p?.rejected?.length === 0 &&
+          p.kept.map((r) => r.id).slice(-2).join(',') === `h${MAX},h${MAX + 1}`
       })(), `HOOK_RULES_MAX=${hk.HOOK_RULES_MAX} kept=${hk.partitionHookRules?.(Array.from({ length: (hk.HOOK_RULES_MAX ?? 0) + 2 }, (_, i) => ({ ...other, id: 'h' + i })))?.kept?.length} rejected=${JSON.stringify(hk.partitionHookRules?.(Array.from({ length: (hk.HOOK_RULES_MAX ?? 0) + 2 }, (_, i) => ({ ...other, id: 'h' + i })))?.rejected ?? null)?.slice(0, 160)}`)
-    ok('校验不通过的条目不计入上限（否则一条超长旧规则会顺带把表尾的合法规则挤出去）',
+    // 补偿保证：上限挪到界面那一关就必须真的在——否则等于把上限删了。
+    ok('上限由界面「新增」那一关守着：到上限禁用添加按钮并说明（hooks 与 mcp 两处都要有）',
+      (() => {
+        const s = readFileSync(new URL('../src/renderer/src/features/SettingsPage.tsx', import.meta.url), 'utf-8')
+        return /disabled=\{rules\.length >= HOOK_RULES_MAX\}/.test(s) &&
+          /disabled=\{list\.length >= MCP_SERVERS_MAX\}/.test(s) &&
+          /data-hook-cap/.test(s) && /data-mcp-cap/.test(s)
+      })(), 'SettingsPage 里两处 disabled={…>=…MAX} 与两条上限提示是否都在')
+    ok('校验不通过的超长旧规则与合法规则同时保留（上限不在落盘侧，所以不再有"挤掉表尾"这回事）',
       (() => {
         const MAX = hk.HOOK_RULES_MAX
         const many = Array.from({ length: MAX }, (_, i) => ({ ...other, id: `h${i}` }))
         const p = hk.partitionHookRules?.([...many, JSON.parse(JSON.stringify(overLong))])
         return p?.kept?.length === MAX + 1 && p?.rejected?.length === 1 && p.rejected[0]?.id === 'hook_legacy_long'
       })(), `kept=${hk.partitionHookRules?.([...Array.from({ length: hk.HOOK_RULES_MAX ?? 0 }, (_, i) => ({ ...other, id: 'h' + i })), JSON.parse(JSON.stringify(overLong))])?.kept?.length}`)
+    // 复审 Out-of-Scope：hooks:list 原样返回整表，手改 config.json 塞个 null 会让设置页 rules.map 当场炸
+    ok('hooks:list 的读路径滤掉非对象（脏元素不再让设置页解引用炸掉）',
+      (() => {
+        if (typeof hk.sanitizeHookList !== 'function') return false
+        const out = hk.sanitizeHookList([null, 'x', 7, other, { id: 'h2', event: 'pre', command: 'node x' }])
+        return Array.isArray(out) && out.length === 2 && out[0]?.id === other.id && out[1]?.id === 'h2'
+      })(), JSON.stringify(hk.sanitizeHookList?.([null, 'x', 7, other]))?.slice(0, 140))
+    ok('hooks:list 对非数组（被手改成对象）返回空表而不是抛错',
+      (() => {
+        const f = hk.sanitizeHookList
+        if (typeof f !== 'function') return false
+        return f({ a: 1 }).length === 0 && f(undefined).length === 0 && f('x').length === 0
+      })())
     ok('hooks:set 走的是这道 shared 闸门并把 rejected 回给界面（不再在 handler 里各写一份过滤）',
       ipcSrcM.error === null &&
         /ipcMain\.handle\(\s*'hooks:set'[\s\S]{0,320}?partitionHookRules\(list\)[\s\S]{0,240}?return \{ ok: true, list: kept, rejected \}/.test(ipcSrcM.text) &&
@@ -1456,11 +1504,12 @@ child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ c
       Number.isInteger(MAX) && MAX >= 1, String(MAX))
     const many = Array.from({ length: (MAX ?? 0) + 2 }, (_, i) => srv(`m${i}`))
     const pm = typeof ml.partitionMcpServers === 'function' ? ml.partitionMcpServers(many) : null
-    ok(`第 ${MAX + 1}、${MAX + 2} 条不再静默丢：rejected 点名了它们的 id 与上限`,
-      Array.isArray(pm?.kept) && pm.kept.length === MAX &&
-        Array.isArray(pm?.rejected) && pm.rejected.length === 2 &&
-        pm.rejected.map((r) => r.id).join(',') === `m${MAX},m${MAX + 1}` &&
-        pm.rejected.every((r) => String(r.message).includes(String(MAX))),
+    // 与 hooks 同一契约（复审 finding 3）：条数不在落盘侧截断，否则"表尾那些 server"连同它们的
+    // 信任授权会被 mcp:set 顺带删掉。上限只活在界面的「添加并探测」那一关。
+    ok(`第 ${MAX + 1}、${MAX + 2} 条不再被删：超过 ${MAX} 条的合法表整表保留、rejected 为空`,
+      Array.isArray(pm?.kept) && pm.kept.length === (MAX ?? 0) + 2 &&
+        Array.isArray(pm?.rejected) && pm.rejected.length === 0 &&
+        pm.kept.map((s) => s.id).slice(-2).join(',') === `m${MAX},m${MAX + 1}`,
       `partitionMcpServers=${typeof ml.partitionMcpServers} kept=${pm?.kept?.length} rejected=${JSON.stringify(pm?.rejected ?? null)?.slice(0, 200)}`)
     ok('形状不合格的记录被点名拒收，用的是界面上既有的那句措辞（不新编）',
       (() => {
@@ -1650,7 +1699,10 @@ console.log('\n[Y] navDecision')
         if (c === ',' && d === 0) parts.push('')
         else parts[parts.length - 1] += c
       }
-      out.push({ argc: parts.filter((p) => p.trim().length > 0).length, text: argText.replace(/\s+/g, ' ').trim().slice(0, 70) })
+      // 第三个实参的原文：复审指出"文本在场"还不够——显式传 undefined / null 也算在场，
+      // 而 navDecision 对 null 的语义是"无锚"（走更弱的那条回退）。所以要把字面量排除掉。
+      const third = (parts[2] ?? '').trim()
+      out.push({ argc: parts.filter((p) => p.trim().length > 0).length, third, text: argText.replace(/\s+/g, ' ').trim().slice(0, 70) })
     }
     return out
   }
@@ -1677,9 +1729,12 @@ console.log('\n[Y] navDecision')
   ok('扫描器自己有牙：src/** 扫到了源文件，且 index.ts 的三个 handler（新窗口/导航/重定向）都在里面（否则下面那条不变量是空转永真）',
     navFiles.length >= 30 && navHits.filter((c) => c.file === 'src/main/index.ts').length === 3,
     `扫了 ${navFiles.length} 个 .ts/.tsx；index.ts 命中 ${navHits.filter((c) => c.file === 'src/main/index.ts').length} 处（应为 3）`)
-  ok('不变量：src/** 里每一处 navDecision( 调用都带第三个实参（生产三处恒传真实根；无锚弱回退因此从 src/ 不可达）',
-    navHits.length >= 3 && navHits.every((c) => c.argc === 3),
-    `${navHits.length} 处调用：${JSON.stringify(navHits.map((c) => `${c.file} argc=${c.argc} ${c.text}`))}`)
+  // 复审（修复波后）指出：只看"第三个实参文本在场"的话，显式写 `undefined` / `null` 也能过，
+  // 而那正是"无锚"——弱回退依旧可达。这里把字面量一并排除。
+  const weakNav = navHits.filter((c) => c.argc !== 3 || /^(undefined|null)$/.test(c.third))
+  ok('不变量：src/** 里每一处 navDecision( 调用都带**真锚**（第三个实参在场，且不是字面 undefined/null）——生产三处恒传真实根，无锚弱回退因此从 src/ 不可达',
+    navHits.length >= 3 && weakNav.length === 0,
+    `${navHits.length} 处调用；不合格 ${JSON.stringify(weakNav.map((c) => `${c.file} argc=${c.argc} third=${c.third} ${c.text}`))}；全部=${JSON.stringify(navHits.map((c) => `${c.file} argc=${c.argc} third=${c.third}`))}`)
 }
 
 // ---------- Z. 沙箱降级三态：决策与徽章措辞都是纯函数（Task 6）----------
