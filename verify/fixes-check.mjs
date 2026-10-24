@@ -2341,8 +2341,12 @@ console.log('\n[饼图] 账本折成环数据（内圈 harness / 外圈 model）
   ok('扇区路径是环不是饼：闭合、带内半径、外弧内弧各两段弧',
     p.startsWith('M') && p.endsWith('Z') && p.includes('56 56') && p.split('A').length - 1 === 4, p.slice(0, 90))
   ok('接近整圆时仍拆成多段弧（单段弧起终点重合，浏览器画不出来）',
-    rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).split('A').length - 1 === 4 &&
-      rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).includes(' 1 1 '), rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).slice(0, 90))
+    rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).split('A').length - 1 === 4, rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).slice(0, 90))
+  // large-arc 标志必须恒 0：拆两段后每段只跨 span/2 ≤ π。评审实测：按整扇区角度置 1 时，
+  // 占比过半的扇区会被解析到镜像圆上（画成外翻破面），而 50/50 恰好看不出来。
+  const dom = rg.donutPath(100, 100, 80, 56, -Math.PI / 2, -Math.PI / 2 + 0.6 * Math.PI * 2)
+  ok('占比过半的主导扇区不带 large-arc=1（每段弧只跨半扇区，标志恒 0；置 1 会画到镜像圆上）',
+    !/A[\d.]+ [\d.]+ 0 1/.test(dom) && (dom.match(/A/g) || []).length === 4, dom.slice(0, 120))
 }
 
 // 进入工作站的动画：根因是"每次重挂载都重播"（Workbench 无条件渲染大字层），不是观感。

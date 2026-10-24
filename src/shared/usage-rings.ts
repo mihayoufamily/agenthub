@@ -60,11 +60,15 @@ export function buildRings(rows: LedgerUsageRow[]): Rings {
  * 环形扇区的 SVG 路径（零依赖手写，不引图表库）。
  * 外弧顺时针、内弧逆时针，各自拆成两段：`span` 接近整圆时起终点几乎重合，
  * 单段弧会被浏览器按"零角度"画不出来。
+ *
+ * large-arc 标志**恒为 0**：拆两段之后每段只跨 `span/2 ≤ π`，而标志问的是"这一段弧是不是大于半圆"。
+ * 之前按整扇区的 `span > π` 来置 1，占比过半的主导扇区会被解析到镜像圆上（画成外翻的破面）——
+ * 50/50 时 span 恰好等于 π 才看不出来。
  */
 export function donutPath(cx: number, cy: number, rOuter: number, rInner: number, a0: number, a1: number): string {
   const span = Math.min(Math.max(a1 - a0, 0), Math.PI * 2 - 1e-6)
   const p = (r: number, a: number): string => `${(cx + r * Math.cos(a)).toFixed(3)} ${(cy + r * Math.sin(a)).toFixed(3)}`
-  const large = span > Math.PI ? 1 : 0
+  const large = 0
   const mid = a0 + span / 2
   const end = a0 + span
   const outer = `A${rOuter} ${rOuter} 0 ${large} 1 ${p(rOuter, mid)} A${rOuter} ${rOuter} 0 ${large} 1 ${p(rOuter, end)}`

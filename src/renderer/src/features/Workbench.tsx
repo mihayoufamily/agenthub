@@ -55,7 +55,11 @@ export function Workbench() {
   const showEmpty = agents.length === 0
   const entryCause = useUi((st) => st.modeEntryCause)
   const setEntryCause = useUi((st) => st.setModeEntryCause)
-  const playing = shouldPlayEntry(entryCause)
+  // 尊重"减少动态效果"：判定式与 Splash 一致（reducedMotion 或 animations===false 两个条件或运算）。
+  // 不能只靠 tokens.css 那条全局压时长——那等于把合规性寄托在"大字层的基础样式恰好是透明的"上，
+  // 谁哪天给它加一个可见的底样式，开关就静默失效。
+  const prefs = useSettings((s) => s.prefs)
+  const playing = shouldPlayEntry(entryCause) && !(prefs?.reducedMotion || prefs?.animations === false)
   useEffect(() => {
     if (!playing) return
     // 播完清空 cause：下一次纯重挂载（切任务/切会话/重启恢复）就不会再播

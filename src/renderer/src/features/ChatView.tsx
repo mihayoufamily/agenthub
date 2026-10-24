@@ -274,13 +274,15 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 
 /** 对话栏底部条：模型选择 + 上下文用量 + 本会话消耗费用（用户要求这些信息离输入框最近） */
 /**
- * 对话栏底部的迷你占比环（22px，按接入方分色）。
+ * 对话栏底部的迷你占比环（按接入方分色）。
  * 没有可见调用时退回原来的柱状图标——空环会被读成"比例为 0"，那是另一种误导。
+ * `data-mini-rows` 是给真机断言用的：否则"有数据但环没画"和"本来就没数据"两种情况
+ * 在 DOM 上长得一模一样，断言就成了永真式（评审实测：整个 Task 5 回退后套件仍 91/0）。
  */
 function DonutMini({ rows }: { rows: LedgerUsageRow[] }) {
   if (!rows.length) return <Icon name="chart" size={15} />
   return (
-    <span data-mini-ring="1" style={{ display: 'inline-flex', verticalAlign: 'middle', lineHeight: 0 }}>
+    <span data-mini-ring="1" data-mini-rows={rows.length} style={{ display: 'inline-flex', verticalAlign: 'middle', lineHeight: 0 }}>
       <DonutRings rows={rows} mode="mini" size={15} />
     </span>
   )
@@ -316,7 +318,9 @@ function ContextUsageBar({
       .list(100000)
       .then((all) => {
         if (!alive) return
-        setLedgerRows(rollup((all ?? []).filter((e) => !e.agentId || e.agentId === agentId)))
+        // 过滤谓词必须与 UsagePanel 完全一致（同一个按钮点开的就是那个面板）：一边收留无 agentId
+        // 的账本行、一边不收，环的 tooltip 与弹窗合计就会对不上数。
+        setLedgerRows(rollup((all ?? []).filter((e) => e.agentId === agentId)))
       })
       .catch(() => {
         /* 账本读不到就退回柱状图标：底部条不该因为统计挂了而报错 */

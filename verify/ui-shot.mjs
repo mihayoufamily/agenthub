@@ -418,16 +418,19 @@ const main = async () => {
       const btn = document.querySelector('.ctx-bar .usage-open')
       if (!btn) return { found: false }
       const bar = document.querySelector('.ctx-bar')
+      const wrap = btn.querySelector('[data-mini-ring]')
       return {
         found: true,
+        rows: wrap ? Number(wrap.getAttribute('data-mini-rows')) : 0,
         hasRing: !!btn.querySelector('[data-mini-ring] svg'),
-        fallbackIcon: !!btn.querySelector('svg') && !btn.querySelector('[data-mini-ring]'),
         h: Math.round(bar.getBoundingClientRect().height),
         label: btn.getAttribute('aria-label') || ''
       }
     })()`)
-    ok('对话栏底部图标位置已是单环迷你图（或无可见调用时如实退回原图标）',
-      mini.found && (mini.hasRing || mini.fallbackIcon), JSON.stringify(mini))
+    // 判据不能写成 `hasRing || fallbackIcon`：旧图标也是 svg，那样整个 Task 5 回退掉套件照样绿
+    // （评审实测 91/0）。有可见调用就必须见环，只有真没数据才允许退回图标。
+    ok('对话栏底部：有账本可见调用时必须是单环迷你图（无数据才允许退回原图标）',
+      mini.found && (mini.rows === 0 ? true : mini.hasRing === true), JSON.stringify(mini))
     // 底部条的像素高度**只报不判**：34px 这个阈值是我自己拍的、没在改动前量过，拿它当判据等于让产品去够一个
     // 没根据的数。真要比得先在同一构建上量"换图前/换图后"两次——那属于观感核，spec 本来就把 C2/C3 的观感
     // 列在"需人工核"里。位置不变与点击行为不变由上面两条真断言钉住。
