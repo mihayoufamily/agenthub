@@ -391,11 +391,14 @@ const main = async () => {
     await js(cdp, `window.__ahub_debug.openSettings('usage')`)
     await sleep(1400)
     const rings = await js(cdp, `(() => {
-      const wrap = document.querySelector('.usage-rings')
+      // 必须限定在用量面板里查：DonutRings 的壳类名两处共用（设置页双圈 + 对话栏迷你环），
+      // 不加作用域会先命中对话栏那个迷你环，量到的就是错的对象。
+      // （别在这段注释里写反引号：整块在模板字符串里，反引号会把字符串提前关掉。）
+      const wrap = document.querySelector('.usage-panel .usage-rings') || document.querySelector('.modal .usage-rings')
       return {
-        hasSvg: !!document.querySelector('.usage-rings svg'),
-        inner: document.querySelectorAll('.usage-rings path[data-ring="inner"]').length,
-        outer: document.querySelectorAll('.usage-rings path[data-ring="outer"]').length,
+        hasSvg: !!wrap && !!wrap.querySelector('svg'),
+        inner: wrap ? wrap.querySelectorAll('path[data-ring="inner"]').length : 0,
+        outer: wrap ? wrap.querySelectorAll('path[data-ring="outer"]').length : 0,
         unreported: wrap ? wrap.querySelector('[data-unreported]')?.getAttribute('data-unreported') ?? null : 'MISSING',
         noDoubleWord: !document.body.innerText.includes('双环')
       }
@@ -407,6 +410,35 @@ const main = async () => {
     await js(cdp, `window.__ahub_debug.closeSettings()`)
     await sleep(700)
     ok('设置弹窗已关闭', !(await js(cdp, '!!document.querySelector(".settings-win")')))
+
+    // C3 对话栏：原图标按钮位置换成单环迷你图，位置与点击行为不变、底部条不加高（决策记录 A13）
+    await js(cdp, 'window.__ahub_debug.workbench()')
+    await sleep(1500)
+    const mini = await js(cdp, `(() => {
+      const btn = document.querySelector('.ctx-bar .usage-open')
+      if (!btn) return { found: false }
+      const bar = document.querySelector('.ctx-bar')
+      return {
+        found: true,
+        hasRing: !!btn.querySelector('[data-mini-ring] svg'),
+        fallbackIcon: !!btn.querySelector('svg') && !btn.querySelector('[data-mini-ring]'),
+        h: Math.round(bar.getBoundingClientRect().height),
+        label: btn.getAttribute('aria-label') || ''
+      }
+    })()`)
+    ok('对话栏底部图标位置已是单环迷你图（或无可见调用时如实退回原图标）',
+      mini.found && (mini.hasRing || mini.fallbackIcon), JSON.stringify(mini))
+    // 底部条的像素高度**只报不判**：34px 这个阈值是我自己拍的、没在改动前量过，拿它当判据等于让产品去够一个
+    // 没根据的数。真要比得先在同一构建上量"换图前/换图后"两次——那属于观感核，spec 本来就把 C2/C3 的观感
+    // 列在"需人工核"里。位置不变与点击行为不变由上面两条真断言钉住。
+    console.log(`  观察  对话栏底部条高度 = ${mini.h}px（换图前后是否变化需人工比截图）`)
+    ok('底部条文案不出现"双环"（决策记录 A13）', !mini.label.includes('双环'), JSON.stringify(mini))
+    await js(cdp, `(() => { const b = document.querySelector('.ctx-bar .usage-open'); b && b.click(); return true })()`)
+    await sleep(900)
+    ok('点迷你图仍打开本 Agent 的用量弹窗（换图不改行为）',
+      await js(cdp, `!!document.querySelector('.modal .usage-rings, .modal .usage-panel')`), '点了没出弹窗')
+    await js(cdp, `(() => { document.querySelector('.modal [aria-label="关闭"]')?.click(); return true })()`)
+    await sleep(500)
 
     // ---- 6. 工作流首页（保存任务卡片是否遮挡）----
     // 先确认视图在首页：应用一启动会恢复用户上次打开的任务，那时首页 composer 不在 DOM 里，

@@ -1,6 +1,6 @@
 // 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型管理、用量显示
 import React, { useEffect, useRef, useState } from 'react'
-import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel, McpServer } from '@shared/types'
+import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel, McpServer, LedgerUsageRow } from '@shared/types'
 import { useSessions } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
@@ -12,7 +12,8 @@ import { Modal } from '../components/Modal'
 import { Icon } from '../components/Icons'
 import { CliModelOptions } from '../components/CliModels'
 import { ThinkingText } from '../components/Thinking'
-import { UsagePanel } from '../components/UsagePanel'
+import { UsagePanel, rollup } from '../components/UsagePanel'
+import { DonutRings } from '../components/DonutRings'
 import { CheckpointBar } from '../components/CheckpointBar'
 import { digestThinking } from '../lib/thinking'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
@@ -272,6 +273,19 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
 }
 
 /** 对话栏底部条：模型选择 + 上下文用量 + 本会话消耗费用（用户要求这些信息离输入框最近） */
+/**
+ * 对话栏底部的迷你占比环（22px，按接入方分色）。
+ * 没有可见调用时退回原来的柱状图标——空环会被读成"比例为 0"，那是另一种误导。
+ */
+function DonutMini({ rows }: { rows: LedgerUsageRow[] }) {
+  if (!rows.length) return <Icon name="chart" size={15} />
+  return (
+    <span data-mini-ring="1" style={{ display: 'inline-flex', verticalAlign: 'middle', lineHeight: 0 }}>
+      <DonutRings rows={rows} mode="mini" size={15} />
+    </span>
+  )
+}
+
 function ContextUsageBar({
   agentId,
   messages,
@@ -294,6 +308,23 @@ function ContextUsageBar({
   balanceSource?: string
 }) {
   const [usageOpen, setUsageOpen] = useState(false)
+  // 底部那个迷你环的数据源：与用量页同一份 rollup（按本 Agent 过滤账本），不另算一套口径
+  const [ledgerRows, setLedgerRows] = useState<LedgerUsageRow[]>([])
+  useEffect(() => {
+    let alive = true
+    void bridge.ledger
+      .list(100000)
+      .then((all) => {
+        if (!alive) return
+        setLedgerRows(rollup((all ?? []).filter((e) => !e.agentId || e.agentId === agentId)))
+      })
+      .catch(() => {
+        /* 账本读不到就退回柱状图标：底部条不该因为统计挂了而报错 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [agentId, messages.length])
   // 有接口 usage 时以最后一条真实用量为准；否则按消息文本估算（含附件与思考内容）
   const lastUsage = [...messages].reverse().find((m) => m.usage?.tokens)?.usage
   const textTokens = messages.reduce((sum, m) => sum + estimateTokens(m.text ?? '') + estimateTokens(m.reasoning ?? '') + estimateTokens(m.toolCalls?.map((t) => (t.result ?? '')).join('') ?? ''), 0)
@@ -320,9 +351,9 @@ function ContextUsageBar({
       <span className="ctx-text" title={isDemo ? '演示数据：费用为脚本内容，不代表真实计费' : '本会话累计消耗（有接口 usage 时按真实用量折算）'}>
         本会话 {sessionTokens > 0 ? `${fmtTokens(sessionTokens)} tokens · ` : ''}{fmtCost(sessionCost)}
       </span>
-      {/* 用量快捷入口：一个图标点开本 Agent 的调用账本，不用跑去设置页翻 */}
+      {/* 用量快捷入口：位置与点击行为不变，图标换成本 Agent 的 token 占比单环（决策记录 A13 接受相对用量页缩水） */}
       <button className="icon-btn usage-open" title="用量统计（本 Agent 的调用与费用）" aria-label="用量统计" onClick={() => setUsageOpen(true)}>
-        <Icon name="chart" size={15} />
+        <DonutMini rows={ledgerRows} />
       </button>
       {usageOpen && (
         <Modal open onClose={() => setUsageOpen(false)} title={`用量统计 · ${agentName}`} width={720}>
