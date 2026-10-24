@@ -387,7 +387,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return openai.listModels(cfg, key)
   })
 
-  ipcMain.handle('model:chat', async (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string }) => {
+  ipcMain.handle('model:chat', async (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string; planMode?: boolean }) => {
     const key = getStore().getCredential(cfg.keyId)
     if (!key) {
       const win = getWin()
@@ -409,6 +409,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
         grant = { ...grant, dir: out }
       }
     }
+    // 计划态（批次 F）：渲染层传 true 时把这道闸合进 grant。它只能**加限制**——
+    // access / 命令 / 联网这些权限仍以存储配置为唯一来源，这里一个都不放开。
+    if (opts?.planMode === true && grant) grant = { ...grant, planMode: true }
     const agentName = opts?.agentId ? stored.agents.find((a) => a.id === opts.agentId)?.name : undefined
     const tap = ledgerTap({
       channel: 'model',
@@ -422,7 +425,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     // 改动检查点：一次工作流任务共用 run.id（返工/续跑都回到任务开始前的状态），
     // 工作站对话按 reqId 单独成一个检查点。目录取主进程侧的 grant.dir，不信渲染层传的路径。
     let checkpoint: string | undefined
-    if (grant) {
+    // 计划态不建检查点（spec 批次 F 表格那行：不改文件就不该有回滚基线）；
+    // 批准之后执行角色那一轮照常建，基线仍落在"真正动手之前"。
+    if (grant && !grant.planMode) {
       const cpId = String(opts?.checkpointId ?? reqId).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64)
       if (cpId) {
         await checkpoints.start(cpId, grant.dir)

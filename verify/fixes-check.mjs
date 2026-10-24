@@ -2528,6 +2528,102 @@ console.log('\n[Z4] ESLint：noInlineConfig 关不掉注入面那 5 条 error �
     `exit=${probeVerify.status} 输出=${probeVerify.out.slice(0, 400)}`)
 }
 
+console.log('\n[批次 F · 计划态] 批准前不产生文件改动（模型 Agent 的工具层真拦；写类连 schema 都不给）')
+{
+  // 模块可能还不存在（先写断言的那一步）：读不到就点名报红，不让套件崩在 import 上
+  let pm = null
+  try {
+    pm = await import('../out/shared/plan-mode.js')
+  } catch (e) {
+    ok('out/shared/plan-mode.js 存在（计划态纯函数模块）', false, String(e && e.message))
+  }
+  const tools = await import('../out/main/tools.js')
+  const planRoot = mkdtempSync(join(tmpdir(), 'ahub-plan-'))
+  writeFileSync(join(planRoot, 'keep.md'), '# 原内容\n')
+  const planGrant = { dir: planRoot, access: 'sandbox' }
+
+  if (pm) {
+    ok('写类工具名单就是那五个（write/replace/delete/move/run_command），不多不少',
+      JSON.stringify([...pm.WRITE_TOOLS].sort()) ===
+        JSON.stringify(['delete_file', 'move', 'replace_in_file', 'run_command', 'write_file']),
+      JSON.stringify(pm.WRITE_TOOLS))
+    ok('只读类（read/list/search/glob）在计划态照常放行——计划要读东西才出得来',
+      ['read_file', 'list_dir', 'search_files', 'glob_files'].every((t) => pm.planModeVerdict(t, true).allowed === true),
+      JSON.stringify(['read_file', 'list_dir', 'search_files', 'glob_files'].map((t) => pm.planModeVerdict(t, true).allowed)))
+    ok('planMode 缺省或非 true 时这道闸完全放行（脏值不启闸，老行为不变）',
+      pm.planModeVerdict('write_file', undefined).allowed === true &&
+        pm.planModeVerdict('write_file', 'yes').allowed === true &&
+        pm.planModeVerdict('write_file', false).allowed === true,
+      JSON.stringify([pm.planModeVerdict('write_file', undefined).allowed, pm.planModeVerdict('write_file', 'yes').allowed, pm.planModeVerdict('write_file', false).allowed]))
+    ok('未知工具名不因计划态被误拦也不因计划态被放行（仍交给既有"未知工具"分支）',
+      pm.planModeVerdict('', true).allowed === true && pm.planModeVerdict('nope', true).allowed === true,
+      JSON.stringify([pm.planModeVerdict('', true).allowed, pm.planModeVerdict('nope', true).allowed]))
+
+    // 行为断言：五个写类逐个真过 execTool，判据不看返回文本，看**盘上到底动没动**
+    const writeCases = [
+      ['write_file', JSON.stringify({ path: 'new.txt', content: '计划态想写我' })],
+      ['replace_in_file', JSON.stringify({ path: 'keep.md', find: '原内容', replace: '被改了' })],
+      ['delete_file', JSON.stringify({ path: 'keep.md' })],
+      ['move', JSON.stringify({ from: 'keep.md', to: 'moved.md' })],
+      // 命令里要落一个哨兵文件：拦住了它就不该出现（比"输出里有拒绝二字"硬得多）
+      ['run_command', JSON.stringify({ command: 'echo hit > sentinel-plan.txt' })]
+    ]
+    const refused = []
+    for (const [tool, argsJson] of writeCases) {
+      const r = await tools.execTool({ ...planGrant, planMode: true }, tool, argsJson)
+      refused.push({ tool, ok: r.ok, output: String(r.output ?? '').slice(0, 120) })
+    }
+    ok('计划态下 execTool 把这五个写类工具全部拒绝（一处拦，不是每个 case 各写一遍）',
+      refused.every((r) => r.ok === false),
+      JSON.stringify(refused))
+    ok('拒绝理由写给模型看的是"计划态未放开写权限"，不是一句含糊的"不允许"',
+      refused.every((r) => /计划态未放开写权限/.test(r.output)),
+      JSON.stringify(refused.map((r) => r.output.slice(0, 40))))
+    ok('拒绝之后盘上真的没动（新文件没出现、原文件没被改没被删没被移走、命令的哨兵文件不存在）',
+      !existsSync(join(planRoot, 'new.txt')) &&
+        readFileSync(join(planRoot, 'keep.md'), 'utf-8') === '# 原内容\n' &&
+        !existsSync(join(planRoot, 'moved.md')) &&
+        !existsSync(join(planRoot, 'sentinel-plan.txt')),
+      (() => { try { return readdirSync(planRoot).join(',') } catch (e) { return `列不出来：${e && e.message}` } })())
+    ok('同一道闸下只读工具真能读到内容（不是把所有工具一起关掉）',
+      (await tools.execTool({ ...planGrant, planMode: true }, 'read_file', JSON.stringify({ path: 'keep.md' }))).output.includes('原内容'),
+      JSON.stringify(await tools.execTool({ ...planGrant, planMode: true }, 'read_file', JSON.stringify({ path: 'keep.md' }))))
+    ok('不带 planMode 时这两个写类照常能写（计划态没把正常工具一起废掉）',
+      (await tools.execTool(planGrant, 'write_file', JSON.stringify({ path: 'w.txt', content: 'ok' }))).ok === true &&
+        existsSync(join(planRoot, 'w.txt')),
+      JSON.stringify(await tools.execTool(planGrant, 'write_file', JSON.stringify({ path: 'w2.txt', content: 'ok' }))))
+
+    // schema 层：模型看不到 = 不会去调（光靠执行期拒绝会让它反复试）
+    const namesOf = (defs) => defs.map((d) => d && d.function && d.function.name).filter(Boolean)
+    const all = namesOf(tools.toolDefs(true, true))
+    const plan = namesOf(tools.toolDefs(true, true, true))
+    ok('计划态下发给模型的 schema 里一个写类工具都没有（五个全摘，含 allowCommands 开着时的 run_command）',
+      all.length > 0 && !plan.some((n) => pm.WRITE_TOOLS.includes(n)),
+      `不带计划态=${all.join(',')}；计划态=${plan.join(',')}`)
+    ok('计划态的 schema 仍留着只读与联网工具（read/list/search/glob/web_fetch/web_search）',
+      ['read_file', 'list_dir', 'search_files', 'glob_files', 'web_fetch', 'web_search'].every((n) => plan.includes(n)),
+      plan.join(','))
+    ok('planMode 缺省时 schema 与改动前逐条同序（第三参是可选的，老调用点一行不用改）',
+      JSON.stringify(tools.toolDefs(true, true)) === JSON.stringify(tools.toolDefs(true, true, undefined)),
+      `缺省=${namesOf(tools.toolDefs(true, true)).join(',')}；显式 undefined=${namesOf(tools.toolDefs(true, true, undefined)).join(',')}`)
+
+    // 结构性：拦的那一处要在 dispatch 的 switch 之前（行为断言管"五个都拦住"，这条管"别散到每个 case 里"）
+    const dispSrc = readSrcSafe('src/main/tools.ts')
+    const dispFrom = dispSrc.text.indexOf('async function dispatch(')
+    const dispSwitch = dispSrc.text.indexOf('switch (tool)', dispFrom)
+    ok('这一处闸写在 dispatch 的 switch (tool) 之前（漏一个 case 就是静默放行）',
+      dispSrc.error === null && dispFrom >= 0 && dispSwitch > dispFrom &&
+        dispSrc.text.slice(dispFrom, dispSwitch).includes('planModeVerdict('),
+      `dispatch 起点=${dispFrom} switch=${dispSwitch} 之间含 planModeVerdict=${dispFrom >= 0 && dispSwitch > dispFrom ? dispSrc.text.slice(dispFrom, dispSwitch).includes('planModeVerdict(') : false}`)
+    // spec 批次 F 表格明写"checkpoint 不建（不改文件）"：这一条只在源码里钉（model:chat 起不来在纯 node 里）
+    const ipcPlan = readSrcSafe('src/main/ipc.ts')
+    ok('计划态不建改动检查点（spec 批次 F 表格那行：不改文件就不该有回滚基线）',
+      ipcPlan.error === null && /if \(grant && !grant\.planMode\) \{/.test(ipcPlan.text),
+      ipcPlan.error ?? 'model:chat 里 checkpoint 的创建条件没带 !grant.planMode')
+  }
+  rmSync(planRoot, { recursive: true, force: true })
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

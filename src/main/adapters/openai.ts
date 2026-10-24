@@ -315,7 +315,7 @@ export function chatStream(
   const ctrl = new AbortController()
   activeStreams.set(reqId, ctrl)
   // 内置工具（有沙箱授权才有）+ MCP 工具合并成一张函数表；一个都没有就不带 tools 字段
-  const toolList = [...(grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb) : []), ...(mcp?.defs ?? [])]
+  const toolList = [...(grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb, grant.planMode) : []), ...(mcp?.defs ?? [])]
   const tools = toolList.length ? toolList : undefined
 
   void (async () => {

@@ -106,7 +106,7 @@ const api = {
     list: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:list', cfg) as Promise<{ ok: boolean; models?: string[]; message?: string }>,
     /** 余额查询（DeepSeek 官方 /user/balance；其他接口 ok=false） */
     balance: (cfg: CustomModelConfig) => ipcRenderer.invoke('model:balance', cfg) as Promise<{ ok: boolean; message?: string; balance?: number; currency?: string }>,
-    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string; images?: { name: string; dataUrl: string; path: string }[] }[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string }) =>
+    chat: (cfg: CustomModelConfig, reqId: string, messages: { role: string; content: string; reasoning?: string; images?: { name: string; dataUrl: string; path: string }[] }[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string; planMode?: boolean }) =>
       ipcRenderer.invoke('model:chat', cfg, reqId, messages, opts) as Promise<{ ok: boolean; checkpoint?: string }>,
     cancel: (reqId: string) => ipcRenderer.invoke('model:cancel', reqId),
     /** 订阅流式事件（main -> renderer；tool 事件为工具调用执行记录） */

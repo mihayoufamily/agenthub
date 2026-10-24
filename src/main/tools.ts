@@ -8,6 +8,7 @@ import { lookup as dnsLookup } from 'node:dns/promises'
 import type { ToolGrant } from '../shared/types'
 import type { ApprovalDecision, FileChange, HookRun } from '../shared/types'
 import { checkCommand } from '../shared/approvals'
+import { isWriteTool, planModeVerdict } from '../shared/plan-mode'
 import { relativeOf, beforeChange as cpBefore, record as cpRecord, diffOfFile, diffLines } from './checkpoints'
 import { runShell, MAX_OUTPUT } from './shell'
 import { runHooks } from './hooks'
@@ -202,8 +203,14 @@ async function webGet(
   return { ok: true, contentType: r.headers.get('content-type') ?? '', text, truncated }
 }
 
+/** 取一条工具定义的函数名（OpenAI function calling 是嵌套形状：{ type, function: { name } }） */
+function defName(def: unknown): string {
+  const fn = (def as { function?: { name?: unknown } } | undefined)?.function
+  return typeof fn?.name === 'string' ? fn.name : ''
+}
+
 /** OpenAI function calling 工具定义（发给模型的 schema；命令执行与联网仅授权后可见） */
-export function toolDefs(allowCommands: boolean, allowWeb: boolean): unknown[] {
+export function toolDefs(allowCommands: boolean, allowWeb: boolean, planMode?: boolean): unknown[] {
   const defs: unknown[] = [
     {
       type: 'function',
@@ -359,6 +366,8 @@ export function toolDefs(allowCommands: boolean, allowWeb: boolean): unknown[] {
       }
     )
   }
+  // 计划态连"能调什么"的清单里都不留写类工具：只靠执行期拒绝，模型会反复试同一堵墙
+  if (planMode === true) return defs.filter((d) => !isWriteTool(defName(d)))
   return defs
 }
 
@@ -519,6 +528,10 @@ async function dispatch(
     return { ok: false, output: `参数不是合法 JSON：${argsJson.slice(0, 200)}` }
   }
   if (signal?.aborted) return { ok: false, output: '已取消：工具执行被用户停止' }
+  // 计划态闸门：一处拦，不在每个 case 里各写一遍（漏一个 case 就是静默放行）。
+  // 放在 dispatch 而不是 execTool 开头：用户的 Hook 仍能看见这次"被计划态拒掉"的尝试，审计不缺一段。
+  const planGate = planModeVerdict(tool, grant.planMode)
+  if (!planGate.allowed) return { ok: false, output: `拒绝：${planGate.reason}` }
   try {
     switch (tool) {
       case 'read_file': {

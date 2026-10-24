@@ -63,6 +63,13 @@ export interface ToolGrant {
   commandPolicy?: 'ask' | 'auto'
   /** 写前预览：覆盖已有文件前先给出行级 diff 让人确认（默认关，工具循环里逐次弹窗很吵） */
   previewWrites?: boolean
+  /**
+   * 计划态：true 时五个写类工具（write_file/replace_in_file/delete_file/move/run_command）
+   * 一律拒绝，并且连发给模型的 schema 都不给它们；只读与联网照常。
+   * 只对**模型 Agent 的工具层**成立——CLI 角色的写盘由它自己的子进程执行，这里拦不到，
+   * 界面措辞按 spec 批次 F 写，不写"一定没改文件"。
+   */
+  planMode?: boolean
   /** 该 Agent 勾选启用的 MCP server id（不勾 = 这个 Agent 看不到任何 MCP 工具） */
   mcpServerIds?: string[]
 }
