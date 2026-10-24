@@ -312,7 +312,7 @@ const main = async () => {
       const v = document.querySelector('.thinking-view')
       if (!v) return null
       const btn = v.querySelector('.link-btn')
-      return { shown: v.querySelector('.tv-body').textContent, btn: btn ? btn.textContent.trim() : null }
+      return { shown: v.querySelector('.tv-body')?.textContent ?? '', btn: btn ? btn.textContent.trim() : null }
     })()`)
     ok('长思考默认折叠过场段、保留高信号段', !!th && /因此需要先 glob/.test(th.shown) && !/让我先看看目录里有什么/.test(th.shown), String(th && th.shown).slice(0, 90))
     ok('提供"展开其余 N 段思考"入口', !!th && /展开其余 \d+ 段思考/.test(th.btn ?? ''), String(th && th.btn))
@@ -577,9 +577,12 @@ const main = async () => {
     // 根因不是观感：大字层原先没有状态位，`Workbench` 每次重挂载都重播，那才是"挡事"的地方。
     // 两次点击必须分两次求值：React 18 不会在同一个任务里提交第一次的 pendingMode 更新，
     // 同一次求值里的第二个 click 看到的仍是"未选中"，只会选中不会进入（Task 1 评审已指出这个测量机制坑）。
-    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]').click(); return true })()`)
+    // 两处 click 一律用 ?.：属性被改名/删掉时这里必须"点了个空"然后让下面那条断言报红，
+    // 而不是抛 TypeError 把套件崩在中途——崩了只跑到 45/91，红是红了，但后面所有断言的报告都没了
+    // （批次 C 评审的 Minor；上一窗那条"93/1 但红的是哪条没记下来"就是这么丢的）。
+    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]')?.click(); return true })()`)
     await sleep(400)
-    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]').click(); return true })()`)
+    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]')?.click(); return true })()`)
     const entryPlayed = await js(cdp, `!!document.querySelector('[data-entry="1"]')`)
     ok('切进工作站时播进入动画（大字层带 data-entry 在场）', entryPlayed === true, String(entryPlayed))
     await sleep(1000) // 等 cause 被清掉（ENTRY_TOTAL_MS 780ms + 余量），否则下一条测的是残留

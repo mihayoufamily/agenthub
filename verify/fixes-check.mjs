@@ -2653,5 +2653,34 @@ console.log('\n[批次 F · 计划态] CLI 角色的改动只能事后列出（�
 }
 
 rmSync(tmp, { recursive: true, force: true })
+
+console.log('\n[批次 C/D 评审留账] 这几条钉住已修的 Minor，不许悄悄退回去')
+{
+  const up = readSrcSafe('src/renderer/src/components/UsagePanel.tsx')
+  ok('占比环的门控读的是全量 rows，不是筛后的 shown（筛空时环整块消失＝把"我筛了"伪装成"没数据"）',
+    up.error === null && /rows && rows\.length > 0 && <DonutRings rows=\{rows\}/.test(up.text),
+    up.error ?? '没找到按 rows 门控的那一行')
+  ok('点扇区的筛选按 harness|model 组合键走（模型名里带 | 时不再筛成一张空表）',
+    up.error === null && /const keyOfRow = \(r: LedgerUsageRow\) => `\$\{r\.harness\}\|\$\{r\.model\}`/.test(up.text) &&
+      /rows\.filter\(\(r\) => keyOfRow\(r\) === ringFilter\)/.test(up.text),
+    up.error ?? '组合键定义或筛选谓词不在')
+  ok('切日期段会清掉扇区筛选（不留"筛到了上一个时间段"这种半筛选态）',
+    up.error === null && /setDays\(r\.key\); setRingFilter\(''\)/.test(up.text), '分段按钮没同时清筛选')
+  // 真机套件的取数姿势：拿到 querySelector 的结果就直接点下去，一旦属性被改名，套件会抛在 ok() 之外，
+  // 红是红了，但后面所有断言的报告一起丢（上一轮"93/1 却说不清红在哪条"就是这么来的）。
+  // 规则本身用拼接式正则：写成字面式的话这条断言会命中它自己的名字与注释。
+  const BARE_CLICK_RE = new RegExp('querySelector\\([^)]*\\)\\.(' + ['click', 'focus', 'blur', 'dispatchEvent'].join('|') + ')\\(')
+  const verifyDir = join(fileURLToPath(new URL('..', import.meta.url)), 'verify')
+  const bareClick = []
+  for (const f of readdirSync(verifyDir).filter((x) => x.endsWith('.mjs'))) {
+    const src = readSrcSafe(`verify/${f}`)
+    if (src.error) continue
+    const hits = src.text.match(new RegExp(BARE_CLICK_RE.source, 'g'))
+    if (hits) bareClick.push(`${f}:${hits.length}`)
+  }
+  ok('verify/** 里不许有"拿到 querySelector 结果就直接点下去"的写法（缺元素时要报红，不是把套件崩在中途丢报告）',
+    bareClick.length === 0, `命中 ${bareClick.join(' ') || '0 处'}`)
+}
+
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

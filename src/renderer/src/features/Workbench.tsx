@@ -17,7 +17,6 @@ export function Workbench() {
   const selectedId = useAgents((s) => s.selectedId)
   const select = useAgents((s) => s.select)
   const shiftWheelOn = useSettings((s) => s.prefs?.shiftWheelSwitch ?? true)
-  const setSwitchHud = useUi((s) => s.setSwitchHud)
   const openSettings = useUi((s) => s.openSettings)
 
   // 无选中时默认选第一个（顺序由用户管理，不因选中自动置顶）
@@ -50,7 +49,7 @@ export function Workbench() {
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [shiftWheelOn, select, setSwitchHud])
+  }, [shiftWheelOn, select])
 
   const showEmpty = agents.length === 0
   const entryCause = useUi((st) => st.modeEntryCause)

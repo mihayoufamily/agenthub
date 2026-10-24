@@ -34,9 +34,14 @@ export function UsagePanel({ agentId, compact }: { agentId?: string; compact?: b
   const [rows, setRows] = useState<LedgerUsageRow[] | null>(null)
   const [recent, setRecent] = useState<LedgerEntry[]>([])
   const [busy, setBusy] = useState(false)
-  // 点外圈扇区 = 筛下方表（spec C3）；空串 = 不筛
-  const [modelFilter, setModelFilter] = useState('')
-  const shown = rows === null ? null : modelFilter ? rows.filter((r) => r.model === modelFilter) : rows
+  // 点外圈扇区 = 筛下方表（spec C3）；空串 = 不筛。
+  // 存的是**外圈那把组合键**（harness|model）而不是模型名：模型名里可以带 '|'，
+  // 早先 k.split('|').pop() 的切法遇到这种模型会筛成一张空表（而且看着像"没数据"）。
+  const [ringFilter, setRingFilter] = useState('')
+  const keyOfRow = (r: LedgerUsageRow) => `${r.harness}|${r.model}`
+  const shown = rows === null ? null : ringFilter ? rows.filter((r) => keyOfRow(r) === ringFilter) : rows
+  // 提示条要说人话（模型名），但判据按组合键走；取不到就退回显示键本身，不编一个名字
+  const filterLabel = (rows ?? []).find((r) => keyOfRow(r) === ringFilter)?.model ?? ringFilter
 
   const reload = async () => {
     setBusy(true)
@@ -64,7 +69,7 @@ export function UsagePanel({ agentId, compact }: { agentId?: string; compact?: b
       <div className="usage-head">
         <div className="seg" role="tablist" aria-label="统计范围">
           {RANGES.map((r) => (
-            <button key={r.key} role="tab" aria-selected={days === r.key} className={cls('seg-btn', days === r.key && 'on')} onClick={() => setDays(r.key)}>
+            <button key={r.key} role="tab" aria-selected={days === r.key} className={cls('seg-btn', days === r.key && 'on')} onClick={() => { setDays(r.key); setRingFilter('') }}>
               {r.label}
             </button>
           ))}
@@ -92,10 +97,13 @@ export function UsagePanel({ agentId, compact }: { agentId?: string; compact?: b
       </div>
 
       {busy && rows === null && <Spinner />}
-      {shown && shown.length > 0 && <DonutRings rows={rows ?? []} mode="double" onPickSlice={(k) => setModelFilter(k.split('|').pop() ?? '')} />}
-      {modelFilter && (
+      {/* 环的门控看**全量 rows**，不看筛后的 shown：环画的是这段时间的全貌。
+          原先写成 shown.length>0，换一个日期段把下方表筛空时整块环会消失，
+          等于让"我筛了这一格"伪装成"这段时间没数据"。 */}
+      {rows && rows.length > 0 && <DonutRings rows={rows} mode="double" onPickSlice={(k) => setRingFilter(k)} />}
+      {ringFilter && (
         <div style={{ fontSize: 12, color: 'var(--text-3)', margin: '4px 0 8px' }}>
-          正在只看模型「{modelFilter}」。<a className="link-btn" onClick={() => setModelFilter('')}>显示全部</a>
+          正在只看模型「{filterLabel}」。<a className="link-btn" onClick={() => setRingFilter('')}>显示全部</a>
         </div>
       )}
       {rows && rows.length === 0 && <div className="usage-empty">这段时间还没有真实调用记录。发一条消息或跑一次工作流后回来看。</div>}

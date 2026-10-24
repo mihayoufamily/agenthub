@@ -35,7 +35,7 @@ const args = Object.fromEntries(process.argv.slice(2).map((a) => {
 // 逻辑层两套各几秒、真机各几分钟，10 分钟是宽松上限；cli 层要真跑外部 CLI，给 20 分钟。
 const DEFAULT_SUITE_TIMEOUT_MS = 10 * 60 * 1000
 const SUITES = [
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 548, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门与目录对照' },
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 552, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门与目录对照 + 批次 C/D 留账的 Minor 守护' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 52, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态）' },
   // ui=83：2026-10-24 v0.5.0 Task 1 修复轮 1 实测（结果：83 PASS / 0 FAIL）。
   // 82 → 83 多的是"显式定视口 960×640 下介绍卡完整落在视口内"那一条（Ruling T1-e 的落点）；
