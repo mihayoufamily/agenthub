@@ -57,7 +57,10 @@ function listTsFiles(dirRel) {
 // 由调用方走 ok() 报成一条 FAIL —— 与上面 listTsFiles 同一口径。
 function readSrcSafe(rel) {
   try {
-    return { text: readFileSync(new URL(`../${rel}`, import.meta.url), 'utf-8'), error: null }
+    // 行尾归一：CI 的 windows-latest 检出默认 CRLF（Git for Windows 的 core.autocrlf），
+    // 而本机工作区是 LF。按 `\n` 收尾的正则（如"取 const html = `…` 模板"那条）在 CI 上会取不到，
+    // 于是断言红在一个与产品无关的行尾上。源码 grep 一律在 LF 视图上做。
+    return { text: readFileSync(new URL(`../${rel}`, import.meta.url), 'utf-8').replace(/\r\n/g, '\n'), error: null }
   } catch (e) {
     return { text: '', error: `读不到 ${rel}：${e && e.message}` }
   }
