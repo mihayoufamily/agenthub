@@ -140,8 +140,12 @@ jobs:
       - run: npm ci
 
       # dist = npm run build && electron-builder --win（build 里含 typecheck，所以不用再单跑一遍 build）
+      # --publish never 是必需的：electron-builder 一认出 CI 就自己去发 GitHub Release
+      #   （实测日志第二行就是 "artifacts will be published if draft release exists reason=CI detected"），
+      #   而这条 job 的顶层权限是 contents:read、也没有 GH_TOKEN，于是它在**安装包已经建好之后**
+      #   报 `GitHub Personal Access Token is not set` 把整条 job 拖红。发布这条路归 portable 那个 job 管。
       - name: 打安装包（electron-builder：NSIS + asar）
-        run: npm run dist
+        run: npm run dist -- --publish never
 
       - name: 验安装包与 asar
         shell: pwsh
