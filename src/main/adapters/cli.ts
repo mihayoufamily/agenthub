@@ -452,8 +452,10 @@ const SPECS: Record<CliName, CliSpec> = {
       // apply_patch 的落点在中文路径/非 git 目录下容易与预期错位（实测：应用里那次它"交付"了文件，
       // 盘上一个都没有，而手工同参数同目录同模型能写出来）。
       if (opts.workDir && opts.workDir.trim()) args.push('-C', opts.workDir.trim())
-      // 模型与思考强度同样必须排在 prompt 之前（codex 的签名是 `exec [OPTIONS] [PROMPT]`）：
-      // 此前 `-m`/`-c` 追加在位置参数之后，实测 `-m` 侥幸生效、`-c model_reasoning_effort` 却没换来思考条目。
+      // 模型与思考强度也排在 prompt 之前（codex 的签名是 `exec [OPTIONS] [PROMPT]`）。
+      // **实测记在这儿，别当成根因**：本机把 `-m`/`-c` 追加在位置参数之后时它们**同样生效**（单变量复测过：
+      // 旧顺序 + effort=high 仍出思考条目）。那次"思考 0 段"的根因是强度被写成 low，不是顺序。
+      // 改成"prompt 恒为最后一个"是不给参数解析留赌注，不是修一条已观察到的坏行为。
       if (opts.model) args.push('-m', opts.model)
       // 思考强度：codex 官方用 model_reasoning_effort 配置项（-c 覆盖）
       if (opts.thinkingLevel && opts.thinkingLevel !== 'off') {
