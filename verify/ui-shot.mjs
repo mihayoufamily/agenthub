@@ -387,6 +387,25 @@ const main = async () => {
     ok('设置页存在余额/用量入口', balance.hasBalance || balance.hasUsage, JSON.stringify(balance))
     await js(cdp, `(() => { document.querySelector('button[aria-label="关闭设置"]')?.click(); return true })()`)
     await sleep(800)
+    // C3：用量统计页的环（内圈按接入方、外圈按模型）+ 未上报按次数单列 + 文案不出现"双环"
+    await js(cdp, `window.__ahub_debug.openSettings('usage')`)
+    await sleep(1400)
+    const rings = await js(cdp, `(() => {
+      const wrap = document.querySelector('.usage-rings')
+      return {
+        hasSvg: !!document.querySelector('.usage-rings svg'),
+        inner: document.querySelectorAll('.usage-rings path[data-ring="inner"]').length,
+        outer: document.querySelectorAll('.usage-rings path[data-ring="outer"]').length,
+        unreported: wrap ? wrap.querySelector('[data-unreported]')?.getAttribute('data-unreported') ?? null : 'MISSING',
+        noDoubleWord: !document.body.innerText.includes('双环')
+      }
+    })()`)
+    ok('用量统计页画出占比环，内圈按接入方、外圈按模型（两侧都有扇区）',
+      rings.hasSvg && rings.inner >= 1 && rings.outer >= 1, JSON.stringify(rings))
+    ok('未上报 usage 的调用按次数单列一格（不折算成 token）', rings.unreported !== 'MISSING' && rings.unreported !== null, JSON.stringify(rings))
+    ok('界面文案不出现"双环"（决策记录 A13：对话栏接受尺寸缩水，不拿它当卖点）', rings.noDoubleWord === true, JSON.stringify(rings))
+    await js(cdp, `window.__ahub_debug.closeSettings()`)
+    await sleep(700)
     ok('设置弹窗已关闭', !(await js(cdp, '!!document.querySelector(".settings-win")')))
 
     // ---- 6. 工作流首页（保存任务卡片是否遮挡）----
