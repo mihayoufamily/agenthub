@@ -289,6 +289,8 @@ export function installDebugHooks() {
             // 门的种类与计划正文：计划批准门与审核门都是 waiting_user + gate=true，
             // 布尔值分不出这两种，断言"挂出来的是计划门"就必须读这个
             gateKind: useWorkflow.getState().run!.gate?.kind ?? null,
+            // 这条任务是不是按 planFirst 起的（批准门旁路的判定就看它，排查时也要能直接读）
+            runPlanFirst: useWorkflow.getState().run!.planFirst ?? false,
             planTextLen: (useWorkflow.getState().run!.planText ?? '').length,
             stage: useWorkflow.getState().run!.stage,
             round: useWorkflow.getState().run!.round,

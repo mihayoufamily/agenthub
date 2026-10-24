@@ -4,7 +4,7 @@
 // 收尾等实例退净后按字节还原（修复波 B · 项 1b；此前只删本次新增的 Mock Agent 与任务记录，
 // 角色绑定 workflowDefaults 不回滚，见文件内注释），审批历史不进这个套件。
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -104,7 +104,9 @@ const layoutAudit = () => js(cdp, `(() => {
     if (r.right > vw + 1) out.push({ kind: 'viewport-overflow', cls, right: Math.round(r.right), vw })
     const cs = getComputedStyle(el)
     if (el.scrollWidth > el.clientWidth + 2 && cs.overflowX === 'visible' && el.clientWidth > 40) {
-      out.push({ kind: 'scroll-overflow', cls, scrollWidth: el.scrollWidth, clientWidth: el.clientWidth })
+      // 报身份时带上 tag 与 outerHTML 片段：SVG 的 className 不是字符串，
+      // 只报 cls 会显示成空串，红的时候根本认不出是哪个元素（实测绕了一圈才查出来）
+      out.push({ kind: 'scroll-overflow', cls, tag: el.tagName, sw: el.scrollWidth, cw: el.clientWidth, snip: (el.outerHTML || '').slice(0, 70) })
     }
   }
   return { vw, vh: document.documentElement.clientHeight, issues: out.slice(0, 12), total: out.length }
@@ -648,6 +650,13 @@ const main = async () => {
     // 注意 main 里 BrowserWindow 的 minWidth: 960 是**外框**宽，Windows 上内容区实测 956；
     // Emulation 定的是内容区，取 960×720 即"外框最小宽度"这一档（比实测内容区还宽 4px，是宽松侧）。
     await setViewport(960, 720)
+    // 量之前先把指针移开并等浮层自己关掉：角色 chip 的浮层是 hover 开的，
+    // 它挂在 `position:relative` 的容器里会把那个容器的 scrollWidth 撑大（实测 300 > 265），
+    // 于是"首页横向溢出"这条会随"上一个步骤有没有恰好悬浮过角色 chip"而忽红忽绿。
+    // 移开指针走真鼠标事件（React 的 mouseleave 不认裸派发），再确认没有浮层在场才量。
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 6, y: 6, button: 'none' })
+    await sleep(900)
+    const openPops = await js(cdp, `(() => [...document.querySelectorAll('.cfg-chip.open, .role-pop, .wf-detail')].length)()`)
     const wfMinAudit = await layoutAudit()
     const wfMinBox = await js(cdp, `(() => {
       const s = document.querySelector('.screen.workflow')
@@ -659,6 +668,9 @@ const main = async () => {
       }
     })()`)
     ok('应用自身最小宽度（显式定视口 960×720）下工作流首页无横向溢出',
+      // 前提之一：量之前没有浮层在场（openPops === 0）。有浮层开着时这个数测的不是布局，
+      // 而是"上一个步骤恰好悬浮过哪个 chip"——同一条断言会因此忽红忽绿。
+      openPops === 0 &&
       // composer != null 是**前提**而不是装饰：上一轮实测到，若用户配置里留着未跑完的工作流任务，
       // 应用启动会把它恢复成任务视图（.wf-topbar），首页的 .wf-composer-wrap 根本不在 DOM 里，
       // 那时 layoutAudit 拿不到溢出、这条就"绿得没测到任何东西"。所以先要求被测对象在场。
@@ -1157,6 +1169,64 @@ const main = async () => {
       JSON.stringify({ preSingle, switchFound, beginClicked, singleGate }))
     ok('这一次之后全局配置仍是关的（单次勾选不许污染以后每一次提交）',
       !!singleGate && singleGate.configPlanFirst === false, JSON.stringify(singleGate))
+    await js(cdp, 'window.__ahub_debug.stopTask()')
+    await sleep(2000)
+    // ---- 7e. 计划态连用户 Hook 都不跑（写进真实配置、走真 IPC 与真 execTool，不烧真实额度）----
+    // 判据一律按 **mock 收到的请求**算，不读角色卡片内容：卡片是一个 run 里跨轮累积的，
+    // 上一版按"这一轮有没有工具条目"判定，实测把上一轮的卡片读成了这一轮的（假红，红的还是测）。
+    // "工具真的执行过"的硬证据是：**下一条请求里带回了 role=tool 的结果**——
+    // 模型拿到结果，说明那次工具调用真的跑完了；pre Hook 是在它之前跑的，探针该不该在就一目了然。
+    const HOOK_PROBE = join(SANDBOX, 'hook-probe.txt')
+    const hookRule = { id: 'ahub-verify-hook', event: 'pre', match: '', command: `echo hit > "${HOOK_PROBE}"`, enabled: true, timeoutMs: 8000 }
+    const hooksBefore = await js(cdp, 'window.agenthub.hooks.list()')
+    const hookSet = await js(cdp, `window.agenthub.hooks.set(${JSON.stringify([hookRule])})`)
+    ok('测试前置：Hook 已写进真实配置且没被校验拒收（拒收就没得测了）',
+      hookSet?.ok === true && (hookSet?.rejected ?? []).length === 0 && (hookSet?.list ?? []).length === 1,
+      JSON.stringify({ ok: hookSet?.ok, rejected: hookSet?.rejected, n: (hookSet || {}).list?.length }))
+    const waitBodies = async (fromIdx, ms = 120000) => {
+      const t0 = Date.now()
+      for (;;) {
+        const bodies = seen.bodies.slice(fromIdx)
+        if (bodies.some((b) => (b.messages || []).some((m) => m.role === 'tool'))) return bodies
+        if (Date.now() - t0 > ms) return bodies
+        await sleep(400)
+      }
+    }
+
+    // ① 计划轮：真调了工具、schema 里没有写类工具，但 Hook 一条都不该跑
+    try { unlinkSync(HOOK_PROBE) } catch { /* 不存在正好 */ }
+    const reqBeforePlan = seen.requests.length
+    await js(cdp, `window.__ahub_debug.startPlanTask(${JSON.stringify(baseUrl)}, ${JSON.stringify(SANDBOX)}, '计划态验 Hook：先看目录再给计划')`)
+    const planGate2 = await waitJs(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      return r && r.gateKind === 'plan' && r.status === 'waiting_user' ? { roles: (r.cardDetails || []).map((c) => c.role) } : null
+    })()`, 180000)
+    const planRoundBodies = await waitBodies(reqBeforePlan)
+    const planNames = [...new Set(planRoundBodies.flatMap((b) => (b.tools || []).map((t) => t.function && t.function.name).filter(Boolean)))]
+    const planToolResults = planRoundBodies.flatMap((b) => (b.messages || []).filter((m) => m.role === 'tool').map((m) => String(m.content).slice(0, 100)))
+    ok('计划轮确实执行过工具调用（mock 收到过 tool 结果回传；没工具调用时"Hook 没跑"是废话）',
+      planToolResults.length > 0, JSON.stringify({ reqs: planRoundBodies.length, planToolResults }))
+    ok('计划轮的 schema 里没有写类工具（planMode 确实落到了这次调用的 grant 上，不是只写在渲染层）',
+      planNames.length > 0 && !['write_file', 'replace_in_file', 'delete_file', 'move', 'run_command'].some((n) => planNames.includes(n)),
+      JSON.stringify(planNames))
+    ok('计划态这一轮用户 Hook 没跑（探针文件没出现）',
+      existsSync(HOOK_PROBE) === false, JSON.stringify({ probe: existsSync(HOOK_PROBE), roles: planGate2 && planGate2.roles }))
+
+    // ② 对照：批准之后，**同一个 run、同一个 Agent、同一条 Hook** → 执行角色的工具调用要把探针写出来
+    try { unlinkSync(HOOK_PROBE) } catch { /* 不存在正好 */ }
+    const reqBeforeExec = seen.requests.length
+    await js(cdp, 'window.__ahub_debug.passGate()')
+    const execBodies = await waitBodies(reqBeforeExec)
+    const execToolResults = execBodies.flatMap((b) => (b.messages || []).filter((m) => m.role === 'tool').map((m) => String(m.content).slice(0, 100)))
+    const execProbe = existsSync(HOOK_PROBE)
+    ok('批准后 Hook 恢复执行（同一条 Hook 在非计划态那一轮真的跑了——这一条是上一条的对照，缺它上一条就是空转绿）',
+      execToolResults.length > 0 && execProbe === true,
+      JSON.stringify({ reqs: execBodies.length, execToolResults, probe: execProbe, 目录: readdirSync(SANDBOX) }))
+
+    // 还原 Hook 列表（config.json 的按字节快照是第二层保险，这里不依赖它）
+    await js(cdp, `window.agenthub.hooks.set(${JSON.stringify(Array.isArray(hooksBefore) ? hooksBefore : [])})`)
+    await sleep(800)
+    try { unlinkSync(HOOK_PROBE) } catch { /* 已经没了 */ }
     await js(cdp, 'window.__ahub_debug.stopTask()')
     await sleep(2000)
     await js(cdp, `window.__ahub_debug.setWorkflowOutputDir(${JSON.stringify(prevOutDir ?? '')})`)
