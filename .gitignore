@@ -22,3 +22,6 @@ verify/*.zip
 # CI 里 verify 的落盘输出（失败时上传为 artifact，本地跑也不会进 git）
 verify.log
 verify-logs/
+
+# release.yml 的 zip 步骤把便携包落在工作区根目录（不在 release/ 里），本地跑同一条命令时别把它带进 git
+AgentHub-v*-win-x64-portable.zip
