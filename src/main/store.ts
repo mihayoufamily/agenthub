@@ -1,7 +1,7 @@
 import { app, safeStorage } from 'electron'
 import { migrateV1toV2, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
 import { join } from 'node:path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'node:fs'
 import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
 
 /** 迁移链要处理的原始配置形状：可能有未知键，也可能缺字段，一切以"保留"为先 */
@@ -56,7 +56,9 @@ export class Store {
   log(line: string) {
     try {
       const p = join(this.dirs.logs, 'main.log')
-      writeFileSync(p, `[${new Date().toISOString()}] ${line}\n`, { flag: 'a' })
+      // 上限 2MB，超了从头写起：主进程 console 也镜像到这里（见 index.ts），不设上限会无限长。
+      try { if (statSync(p).size > 2 * 1024 * 1024) writeFileSync(p, '') } catch { /* 文件还不存在 */ }
+      writeFileSync(p, `[${new Date().toISOString()}] ${String(line).slice(0, 2000)}\n`, { flag: 'a' })
     } catch { /* 日志失败不阻塞 */ }
   }
 

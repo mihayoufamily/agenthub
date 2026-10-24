@@ -527,6 +527,21 @@ function startApp() {
 
   app.whenReady().then(() => {
     store = new Store()
+    // 真机上主进程的 stdout 是看不见的（打包后没有控制台），而排查"CLI 到底在哪个目录、带了哪些参数"
+    // 这件事已经卡过两次。把 console 同时镜像进 logs/main.log（store.log 自带 2MB 上限、失败不阻塞）。
+    {
+      const tee = (level: 'log' | 'error') => {
+        const orig = console[level].bind(console)
+        console[level] = (...args: unknown[]) => {
+          orig(...args)
+          try {
+            store?.log(`${level === 'error' ? '[error] ' : ''}${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`)
+          } catch { /* 日志失败不阻塞 */ }
+        }
+      }
+      tee('log')
+      tee('error')
+    }
     // 主进程侧的单价口径要先就位，账本补算费用与预算闸才用得上你填的价
     configurePriceOverrides(store.getConfig().priceOverrides ?? [])
     const ud = app.getPath('userData')
