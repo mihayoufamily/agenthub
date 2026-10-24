@@ -94,6 +94,15 @@ console.log('\n[B2] spec 验证计划 D：技能注入的差异要真的落在�
     !plain.system.includes('SENTINEL-AUTO') && !plain.system.includes('SENTINEL-REF'), String(plain.system.length))
   ok('常驻要求仍然在（技能层没把它挤掉）',
     withAuto.system.includes('SENTINEL-PROMPT') && plain.system.includes('SENTINEL-PROMPT'), '装配后常驻层丢失')
+  // carryOver（「以此为目标开新任务」带过来的上一任务结论）以前从没在装配这一步被跑过：
+  // 计划轮少传这一项就是这一轮修掉的 bug，这条是它的正向证据——不是"源码里有这个字段"，是装配真把它写进提示词
+  const withCarry = buildRoleMessages('planner', { ...ctx, carryOver: '上一任务最终执行结论：SENTINEL-CARRY-OVER' })
+  console.log(`  [B2 实测] carryOver 落点 system=${withCarry.system.includes('SENTINEL-CARRY-OVER')} user=${withCarry.user.includes('SENTINEL-CARRY-OVER')}`)
+  ok('上一任务上下文真的进得了提示词（装配层面跑过，不是只看字段存在）',
+    withCarry.system.includes('SENTINEL-CARRY-OVER') || withCarry.user.includes('SENTINEL-CARRY-OVER'),
+    `system=${withCarry.system.length} user=${withCarry.user.length}`)
+  ok('没带上一任务上下文时不虚造这一段',
+    !plain.system.includes('上一任务上下文') && !plain.user.includes('上一任务上下文'), '空 carryOver 却出现了上下文标题')
   // 层序按 spec 钉死（协议 → 项目约定 → 历史记忆 → 角色技能 → 常驻要求）。
   // 期望值来自上面那行实测（技能=290、常驻=336），不是推的：这一条断言的是"技能层在常驻层之前"。
   ok('注入层序不变：角色技能排在常驻要求之前（spec 的五层顺序，装配这一步实测过）',

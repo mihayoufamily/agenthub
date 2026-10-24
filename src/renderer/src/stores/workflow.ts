@@ -380,7 +380,7 @@ function planChanges(before: DirSnapshot, after: DirSnapshot): string[] {
 async function runPlanRound(
   get: () => WorkflowState,
   set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void,
-  opts: { feedback?: string; attachmentText?: string } = {}
+  opts: { feedback?: string; attachmentText?: string; carryOver?: string } = {}
 ) {
   const run = get().run
   const cfg = get().config
@@ -399,6 +399,9 @@ async function runPlanRound(
     outputDir,
     ...(conventions ? { conventions } : {}),
     ...(opts.attachmentText ? { attachmentText: opts.attachmentText } : {}),
+    // 「以此为目标开新任务」带过来的上一任务结论：正常三角色链一直有这一项，
+    // 计划轮少了它就会在**不知道上一版做了什么**的情况下写第一版计划
+    ...(opts.carryOver ? { carryOver: opts.carryOver } : {}),
     ...(supplements.length ? { supplements } : {}),
     ...(opts.feedback ? { reworkFeedback: opts.feedback } : {})
   }
@@ -1013,7 +1016,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       // 跑完就停在这里等人批准；批准后由 confirmGate('deliver') 从**执行角色**续跑同一个 run——
       // 不重放计划轮（重放等于重复烧额度、重复写文件）。_started 由 start() 自己收尾。
       if (cfg.planFirst) {
-        await runPlanRound(get, set, { attachmentText })
+        await runPlanRound(get, set, { attachmentText, carryOver: carryOver ?? undefined })
         return
       }
 

@@ -117,6 +117,11 @@ export function installDebugHooks() {
       return { prev, now: useWorkflow.getState().run?.id ?? '' }
     },
     stopTask: () => useWorkflow.getState().stop('user'),
+    /** 「以此为目标开新任务」（修订入口）：真机断言用它带出 _carryOver，验计划轮真的看得到上一任务结论 */
+    continueModify: () => {
+      useWorkflow.getState().continueModify()
+      return { draft: useWorkflow.getState().draft.slice(0, 24), runCleared: useWorkflow.getState().run === null }
+    },
     /** 中断续跑 / 单角色重跑（编排能力验证用） */
     resumeInterrupted: () => {
       void useWorkflow.getState().resumeInterrupted()

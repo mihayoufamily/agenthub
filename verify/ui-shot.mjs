@@ -925,6 +925,9 @@ const main = async () => {
     const st = await js(cdp, 'window.__ahub_debug.state()')
     if (st.run && st.run.status !== 'completed') await js(cdp, 'window.__ahub_debug.stopTask()')
     await sleep(2000)
+    // 留着 7b 那条任务的 id：下面要用它走一遍「以此为目标开新任务」，
+    // 那样才会把上一任务的执行/审核结论放进 _carryOver（计划轮必须看得到这个）
+    const carryRunId = st.run?.id ?? null
 
     // ---- 7c. 批次 F：任务级计划态（开工先出计划 → 批准 → 同一个 run 续跑）----
     // 先验用户入口：计划态开关必须在执行设置里可见、可点、真写进配置。
@@ -955,6 +958,16 @@ const main = async () => {
       swAfter.planFirst === true && swBack === false, JSON.stringify({ swAfter, swBack }))
     // 走 mock 服务，不烧真实额度。产物目录仍是上面 7/7b 用的 ART，
     // 这样 Task 11 的目录对照与这几条断言看的是同一个目录。
+    // 先用「以此为目标开新任务」把上一任务的结论带出来：计划轮必须看得到它，
+    // 否则"继续修改 + 计划态"会在一无所知的情况下写第一版计划（本轮修掉的漏项）。
+    // 顺序要紧：上面的 ensureWfHome 会走 newTask()，而它无条件清掉 _carryOver，
+    // 所以必须**先回看 7b 那条任务**再触发 continueModify，不能被那次切视图抹掉。
+    if (carryRunId) {
+      await js(cdp, `window.__ahub_debug.openWfTask(${JSON.stringify(carryRunId)})`)
+      await sleep(700)
+    }
+    const carried = await js(cdp, 'window.__ahub_debug.continueModify()')
+    console.log(`  [7c] continueModify → draft=${JSON.stringify(carried?.draft)} runCleared=${carried?.runCleared} 上一任务=${carryRunId ? '有' : '无'}`)
     const reqBefore7c = seen.requests.length
     await js(cdp, `window.__ahub_debug.startPlanTask(${JSON.stringify(baseUrl)}, ${JSON.stringify(SANDBOX)}, '计划态验证：先给出要做什么的计划')`)
     const planGate = await waitJs(cdp, `(() => {
@@ -983,6 +996,10 @@ const main = async () => {
     ok('计划轮的 schema 仍带着只读工具（拦写不拦读，规划才看得清现场）',
       planToolNames.includes('read_file') && planToolNames.includes('glob_files'),
       [...new Set(planToolNames)].join(','))
+    // 上一任务上下文得真的出现在计划轮那次调用里（源码里有字段不算数，看发出去的请求体）
+    ok('计划轮看得到上一任务的结论（「以此为目标开新任务」带过来的上下文真的进了这一轮请求）',
+      JSON.stringify(planBodies).includes('上一任务上下文'),
+      JSON.stringify(planBodies).slice(0, 200))
     // 界面这一半：门必须看得见、正文要落在视口内（"在 DOM 里"不等于"看得见"是本仓的老规矩）
     await js(cdp, 'window.__ahub_debug.workflow()')
     await sleep(400)
@@ -992,11 +1009,16 @@ const main = async () => {
       const vw = document.documentElement.clientWidth
       const vh = document.documentElement.clientHeight
       const inView = (el) => { if (!el) return null; const b = el.getBoundingClientRect(); return b.width > 2 && b.height > 2 && b.top >= 0 && b.left >= 0 && b.right <= vw + 1 && b.bottom <= vh + 1 }
-      return { card: !!card, cardVisible: inView(card), textVisible: inView(txt), text: txt ? txt.textContent.slice(0, 40) : '', approve: [...document.querySelectorAll('.gate-plan button')].some((b) => /批准并继续/.test(b.textContent)) }
+      const btns = [...document.querySelectorAll('.gate-plan button')]
+      return { card: !!card, cardVisible: inView(card), textVisible: inView(txt), text: txt ? txt.textContent.slice(0, 40) : '', approve: btns.some((b) => /批准并继续/.test(b.textContent)), approveEnabled: btns.some((b) => /批准并继续/.test(b.textContent) && !b.disabled), costSaid: btns.some((b) => /按意见重出计划/.test(b.textContent) && /再消耗一次|再花一次|消耗一次调用/.test(b.textContent)), replan: btns.some((b) => /按意见重出计划/.test(b.textContent)) }
     })()`)
     ok('计划批准门在界面上看得见（卡片与正文完整落在视口内，不只是挂在 DOM 上）',
       planDom.card === true && planDom.cardVisible === true && planDom.textVisible === true, JSON.stringify(planDom))
     ok('门上有「批准并继续」这个动作（人不点就不会执行）', planDom.approve === true, JSON.stringify(planDom))
+    ok('有正文时「批准并继续」可用（禁用判据只看正文是否为空，不拦正常情况）',
+      planDom.approveEnabled === true, JSON.stringify(planDom))
+    ok('「按意见重出计划」把代价写在按钮上（要再消耗一次调用，不能只给一个好听的动词）',
+      planDom.replan === true && planDom.costSaid === true, JSON.stringify(planDom))
     // Task 11：CLI 角色的改动只能事后列出。这里判的是"话说得对不对"——
     // 承诺范围必须收在这个任务真实的产物目录上，且绝不出现"一定没改文件"那种拦不到的话。
     const cliNote = await js(cdp, `(() => { const el = document.querySelector('[data-cli-changes]'); return el ? el.textContent : '' })()`)

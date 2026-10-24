@@ -2773,6 +2773,15 @@ console.log('\n[批次 C/D 评审留账] 这几条钉住已修的 Minor，不许
     rrStart >= 0 && /set\(\{ _cancelled: false, _started: true \}\)/.test(rrBody) &&
       /finally \{[\s\S]{0,80}_started: false/.test(rrBody),
     `起点=${rrStart} 终点=${rrEnd} 体内取到 ${rrBody.length} 字；置位=${/_started: true/.test(rrBody)} 清位=${/_started: false/.test(rrBody)} finally=${/finally \{/.test(rrBody)}`)
+  // 计划轮必须带得上"上一任务上下文"（_carryOver）：正常三角色链一直有这一项，
+  // 计划轮少了它，「以此为目标开新任务」+ 计划态就会在**不知道上一版做了什么**的情况下写第一版计划。
+  const rprStart = wfSrc.text.indexOf('async function runPlanRound(')
+  const rprEnd = wfSrc.text.indexOf('\n}\n', rprStart)
+  const rprBody = rprStart >= 0 && rprEnd > rprStart ? wfSrc.text.slice(rprStart, rprEnd) : ''
+  ok('计划轮带得上上一任务上下文：runPlanRound 有 carryOver 入参并塞进 ctx，start() 也真传了',
+    rprStart >= 0 && /carryOver: opts\.carryOver/.test(rprBody) &&
+      /runPlanRound\(get, set, \{ attachmentText, carryOver/.test(wfSrc.text),
+    `函数体取到 ${rprBody.length} 字；入参=${/carryOver: opts\.carryOver/.test(rprBody)} 调用点=${/attachmentText, carryOver/.test(wfSrc.text)}`)
   // 计划态开关必须"落盘 + 启动读回"两头都在：patchConfig 是显式白名单、App.tsx 水合也是逐字段列举，
   // 少任何一头，表现都是"重启后悄悄忘掉我开了计划态"——而它改的是整个任务的执行方式。
   const patchStart = wfSrc.text.indexOf('patchConfig: (p) =>')

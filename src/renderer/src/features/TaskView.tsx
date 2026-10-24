@@ -525,7 +525,9 @@ function PlanGateCard({ run }: { run: WorkflowRun }) {
         <Button variant="primary" disabled={!text.trim()} onClick={() => void confirmGate('deliver')}>
           <Icon name="check" size={13} /> 批准并继续
         </Button>
-        <Button variant="secondary" onClick={() => void confirmGate('rework', feedback)}>按意见重出计划</Button>
+        <Button variant="secondary" onClick={() => void confirmGate('rework', feedback)} title="会再跑一轮规划，照实消耗一次真实调用">
+          按意见重出计划（再消耗一次调用）
+        </Button>
         <Button variant="secondary" onClick={() => void copyPlan()}>复制正文</Button>
         <Button variant="secondary" disabled={!text.trim()} onClick={() => void savePlan()}>
           {savedPath ? '已存为产物' : '存为产物'}
