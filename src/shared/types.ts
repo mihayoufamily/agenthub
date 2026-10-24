@@ -21,6 +21,13 @@ export interface AgentConfig {
    * 与 Skill 的区别是"这是我对这个执行者的长期要求"，不是可复用的方法包。
    */
   systemPrompt?: string
+  /**
+   * 该 Agent 绑定的 Skill（Agent 级，与角色级、会话级是**并集去重**，没有优先级开关）。
+   * `skillMode === 'auto'` 时每次真实调用自动注入正文；`'reference'`（缺省）只进可引用清单。
+   */
+  skillIds?: string[]
+  /** Agent 级 Skill 的注入方式；缺省或脏值都按 'reference' 处理（老配置行为完全不变） */
+  skillMode?: 'auto' | 'reference'
   /** 自定义模型配置（kind === 'model' 时有效），apiKey 从不落此处 */
   modelConfig?: CustomModelConfig
   /** 本机 CLI 配置（kind === 'cli' 时有效）；凭据由 CLI 自身管理，AgentHub 不保存任何密钥 */

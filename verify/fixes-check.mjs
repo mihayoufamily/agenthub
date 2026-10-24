@@ -2314,6 +2314,46 @@ console.log('\n[交付目录] 未登记文件只如实列出，不代删')
     `note=${note.slice(0, 120)}`)
 }
 
+// 批次 D：Agent 级 Skill 绑定的合并口径与 schemaVersion 3 迁移（纯模块，跑真代码）
+console.log('\n[Skill] Agent 级绑定：三层并集去重与 auto/reference 分区')
+{
+  const su = await import('../out/shared/skills-union.js')
+  const all = [
+    { id: 'a', name: 'A', desc: '', body: 'AAA', enabled: true },
+    { id: 'b', name: 'B', desc: '', body: 'BBB', enabled: false },
+    { id: 'c', name: 'C', desc: '', body: 'CCC' }
+  ]
+  ok('三层（Agent / 会话 / 角色）并集去重且保序',
+    JSON.stringify(su.unionSkillIds(['a', 'b'], ['b', 'c'], ['a'])) === JSON.stringify(['a', 'b', 'c']))
+  ok('脏层被丢掉而不是抛异常（undefined / 非数组 / 元素非字符串）',
+    JSON.stringify(su.unionSkillIds(undefined, ['a', null, 3], 'nope')) === JSON.stringify(['a']))
+  const auto = su.partitionSkillsForInjection(all, ['a', 'b', 'c'], 'auto')
+  ok('auto：启用的进正文注入区，停用的即使被绑也不注入（沿用现规则）',
+    auto.injected.map((s) => s.id).join(',') === 'a,c' && auto.listed.length === 0,
+    JSON.stringify(auto.injected.map((s) => s.id)))
+  const ref = su.partitionSkillsForInjection(all, ['a', 'b', 'c'], 'reference')
+  ok('reference：一条都不注入，只进可引用清单',
+    ref.injected.length === 0 && ref.listed.map((s) => s.id).join(',') === 'a,c')
+  ok('mode 缺省或脏值按 reference 处理（老配置行为与加字段前完全一致）',
+    su.partitionSkillsForInjection(all, ['a'], undefined).injected.length === 0 &&
+      su.partitionSkillsForInjection(all, ['a'], 'nonsense').injected.length === 0)
+}
+console.log('\n[迁移] schemaVersion 3：Agent 级 Skill 字段补齐，且不销毁任何键')
+{
+  const cm = await import('../out/shared/config-migration.js')
+  ok('SCHEMA_HEAD 抬到 3', cm.SCHEMA_HEAD === 3, `got=${cm.SCHEMA_HEAD}`)
+  const out = cm.migrateV2toV3({ schemaVersion: 2, agents: [{ id: 'x', name: 'X', kind: 'cli', desc: '', model: 'm', status: 'available', cliConfig: { cli: 'codex' } }] })
+  ok('只补 skillMode 缺省值，不凭空造 skillIds（造出来等于替用户绑了东西）',
+    out.agents[0].skillMode === 'reference' && out.agents[0].skillIds === undefined, JSON.stringify(out.agents[0]))
+  const kept = cm.migrateV2toV3({ schemaVersion: 2, agents: [{ id: 'y', name: 'Y', kind: 'model', desc: '', model: 'm', status: 'available', skillIds: ['s1'], skillMode: 'auto' }], hooks: [{ id: 'h1' }], priceOverrides: [{ pattern: 'x' }] })
+  ok('已带的 skillIds/skillMode 原样保留，未知键（hooks/priceOverrides）一个不丢',
+    JSON.stringify(kept.agents[0].skillIds) === JSON.stringify(['s1']) && kept.agents[0].skillMode === 'auto' &&
+      kept.hooks.length === 1 && kept.priceOverrides.length === 1, JSON.stringify(kept).slice(0, 140))
+  const st = readSrcSafe('src/main/store.ts').text
+  ok('读盘链有独立的 v<3 步进（只在 v<2 里顺手带上会漏掉"已经是 v2"的配置，本机就是这种）',
+    /if \(v < 3\) \{[\s\S]{0,160}migrateV2toV3/.test(st))
+}
+
 // 饼图的环数据（纯模块，跑真代码）：内圈按接入方、外圈按模型；未上报 usage 的只计次不折 token。
 console.log('\n[饼图] 账本折成环数据（内圈 harness / 外圈 model）')
 {

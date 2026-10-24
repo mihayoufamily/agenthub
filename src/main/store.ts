@@ -1,5 +1,5 @@
 import { app, safeStorage } from 'electron'
-import { migrateV1toV2, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
+import { migrateV1toV2, migrateV2toV3, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'node:fs'
 import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
@@ -65,7 +65,7 @@ export class Store {
   // ---------- 配置（带版本迁移） ----------
   getConfig(): AppConfig {
     let raw: RawCfg = this.readJson<RawCfg>(this.dirs.config, {} as RawCfg)
-    // 迁移链：v0(空/旧结构) -> v1 -> v2。规则在 shared/config-migration.ts，这里只读写盘
+    // 迁移链：v0(空/旧结构) -> v1 -> v2 -> v3。规则在 shared/config-migration.ts，这里只读写盘
     const v = (raw as { schemaVersion?: number }).schemaVersion ?? 0
     let changed = false
     if (v < 1) {
@@ -74,6 +74,12 @@ export class Store {
     }
     if (v < 2) {
       raw = migrateV1toV2(raw as McpConfigShape) as RawCfg
+      raw.schemaVersion = SCHEMA_HEAD
+      changed = true
+    }
+    if (v < 3) {
+      // 每一级都要单独过：只在 v<2 里顺手带上会把"已经是 v2 的配置"漏掉（本机就是这种）
+      raw = migrateV2toV3(raw as unknown as Record<string, unknown>) as unknown as RawCfg
       raw.schemaVersion = SCHEMA_HEAD
       changed = true
     }

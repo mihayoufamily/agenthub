@@ -2,7 +2,7 @@
 import type { McpServer } from './types'
 
 /** 当前配置格式头版本：`store.ts` 的迁移链与 importConfig 都以此为准，不再各写各的数字 */
-export const SCHEMA_HEAD = 2
+export const SCHEMA_HEAD = 3
 
 /** v1 -> v2 只关心这三项；其余字段原样透传，不做全量 AppConfig 断言 */
 export interface McpConfigShape {
@@ -33,7 +33,7 @@ export function migrateV1toV2(raw: McpConfigShape): McpConfigShape {
       if (!s || typeof s !== 'object') return s
       const bin = typeof s.launch?.bin === 'string' ? s.launch.bin.trim() : ''
       return bin
-        ? { ...s, legacyInvalid: false, formatVersion: SCHEMA_HEAD as 2 }
+        ? { ...s, legacyInvalid: false, formatVersion: 2 as const }
         : { ...s, legacyInvalid: true, enabled: false }
     })
   }
@@ -50,8 +50,23 @@ export function migrateV1toV2(raw: McpConfigShape): McpConfigShape {
  * mcpServers / presets / hooks / priceOverrides / skills。这里只做透传式合并，一个键都不丢。
  * 结构补齐（prefs、agents、workflowDefaults 的默认值）由调用方先跑 v0->v1 再进来。
  */
+/**
+ * v2 → v3：Agent 级 Skill 绑定（`skillIds` / `skillMode`）。
+ * 只给 `skillMode` 补一个与"加字段之前"完全等价的缺省值（reference），**不凭空造 skillIds**——
+ * 造出来等于替用户绑了东西。老记录没有这两个字段时行为不变。
+ */
+export function migrateV2toV3(cfg: Record<string, unknown>): Record<string, unknown> {
+  const agents = Array.isArray(cfg.agents) ? (cfg.agents as Record<string, unknown>[]) : null
+  if (!agents) return { ...cfg, schemaVersion: 3 }
+  return {
+    ...cfg,
+    schemaVersion: 3,
+    agents: agents.map((a) => (a && typeof a === 'object' ? { ...a, skillMode: a.skillMode === 'auto' ? 'auto' : 'reference' } : a))
+  }
+}
+
 export function normalizeImported<T extends Record<string, unknown>>(incoming: T): T {
   const merged: T = { ...incoming }
   const stepped = migrateV1toV2(merged as unknown as McpConfigShape)
-  return { ...merged, ...stepped, schemaVersion: SCHEMA_HEAD } as T
+  return migrateV2toV3({ ...merged, ...stepped, schemaVersion: SCHEMA_HEAD }) as T
 }
