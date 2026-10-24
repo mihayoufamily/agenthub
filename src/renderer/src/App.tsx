@@ -70,7 +70,7 @@ export function App() {
       if (hit('modeSwitch')) {
         if (ui.settingsOpen || (ui.screen !== 'workbench' && ui.screen !== 'workflow')) return
         e.preventDefault()
-        requestModeSwitch(ui.screen === 'workbench' ? 'workflow' : 'workbench')
+        requestModeSwitch(ui.screen === 'workbench' ? 'workflow' : 'workbench', 'hotkey')
         return
       }
       if (hit('openSettings')) {

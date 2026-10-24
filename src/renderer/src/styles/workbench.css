@@ -34,10 +34,12 @@
   opacity: 0;
   pointer-events: none;
   /* 快速过场：约 0.9 秒完全消失，短暂停留不遮挡内容 */
-  animation: mode-title-in 250ms var(--ease) 80ms both, mode-title-out 250ms var(--ease) 650ms both;
+  /* C2 新时间线：淡入 → 停留 → 缩小上移落位，全程一次 ~750ms（原来 900ms，且每次重挂载重播才是"挡事"的根因） */
+  animation: mode-title-in 250ms var(--ease) 0ms both, mode-title-settle 260ms var(--ease) 490ms both;
 }
 @keyframes mode-title-in { from { opacity: 0; transform: translateY(-50%) translateY(8px); } to { opacity: 1; transform: translateY(-50%); } }
 @keyframes mode-title-out { to { opacity: 0; transform: translateY(-50%) translateY(-10px); } }
+@keyframes mode-title-settle { from { opacity: 1; transform: translateY(-50%) scale(1); } to { opacity: 0; transform: translateY(-160%) scale(0.42); } }
 
 /* ---- 侧栏 ---- */
 .sidebar {

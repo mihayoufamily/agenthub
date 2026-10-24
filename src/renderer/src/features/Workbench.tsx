@@ -5,6 +5,7 @@ import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
 import { ChatView } from './ChatView'
 import { Shell } from './Shell'
+import { shouldPlayEntry, ENTRY_TOTAL_MS } from '../lib/modeTransition'
 import { LogoMark } from '../components/Logo'
 import { EmptyState, Button } from '../components/primitives'
 import { Icon } from '../components/Icons'
@@ -46,21 +47,26 @@ export function Workbench() {
       if (next < 0 || next >= list.length) return // 边界停止，不循环
       select(list[next].id)
       useAgents.getState().clearUnread(list[next].id)
-      setSwitchHud(`已切换：${list[next].name}`)
-      setTimeout(() => {
-        if (useUi.getState().switchHud === `已切换：${list[next].name}`) setSwitchHud(null)
-      }, 1100)
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
   }, [shiftWheelOn, select, setSwitchHud])
 
   const showEmpty = agents.length === 0
+  const entryCause = useUi((st) => st.modeEntryCause)
+  const setEntryCause = useUi((st) => st.setModeEntryCause)
+  const playing = shouldPlayEntry(entryCause)
+  useEffect(() => {
+    if (!playing) return
+    // 播完清空 cause：下一次纯重挂载（切任务/切会话/重启恢复）就不会再播
+    const t = setTimeout(() => setEntryCause(null), ENTRY_TOTAL_MS)
+    return () => clearTimeout(t)
+  }, [playing, setEntryCause])
 
   return (
     <Shell>
       {/* 模式进入大字：短暂停留后收束（CSS 动画自动完成） */}
-      <div className="wb-mode-title">工作站模式</div>
+      {playing && <div className="wb-mode-title" data-entry="1">工作站模式</div>}
 
       {showEmpty ? (
         <div className="wb-main">

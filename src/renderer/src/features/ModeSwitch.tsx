@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react'
 import type { WorkMode } from '@shared/types'
 import { useUi } from '../stores/ui'
+import type { EntryCause } from '../lib/modeTransition'
 import { useSettings } from '../stores/settings'
 import { useWorkflow } from '../stores/workflow'
 import { Modal } from '../components/Modal'
@@ -11,17 +12,17 @@ import { Button } from '../components/primitives'
 const ACTIVE = ['preparing', 'running', 'waiting_review']
 
 /** 请求切换模式（带运行中任务红色警告） */
-export function requestModeSwitch(target: WorkMode) {
+export function requestModeSwitch(target: WorkMode, cause: EntryCause = 'sidebar-switch') {
   const run = useWorkflow.getState().run
   if (run && ACTIVE.includes(run.status)) {
     useUi.getState().setSwitchHud(`__switch_warn:${target}`)
   } else {
-    enterMode(target)
+    enterMode(target, cause)
   }
 }
 
 /** 实际进入目标模式（草稿与历史自然保留） */
-export function enterMode(target: WorkMode) {
+export function enterMode(target: WorkMode, cause: EntryCause = 'enter-mode') {
   const ui = useUi.getState()
   const homeDraft = ui.homeDraft
   if (target === 'workflow') {
@@ -36,6 +37,7 @@ export function enterMode(target: WorkMode) {
   } else {
     // 工作台：首页草稿作为"待处理需求"横幅由 Workbench 呈现（不自动发送）
     useSettings.getState().patchPrefs({ lastMode: 'workbench' })
+    useUi.getState().setModeEntryCause(cause) // 只有真切模式才写 cause：重挂载不播
     ui.setScreen('workbench')
   }
 }

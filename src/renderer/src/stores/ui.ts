@@ -24,6 +24,8 @@ interface UiState {
   settingsSection: string | null
   toasts: ToastItem[]
   switchHud: string | null
+  /** 本次进入工作站是哪类触发动作引起的（enter-mode/hotkey/sidebar-switch）；null = 纯重挂载，不播进入动画 */
+  modeEntryCause: string | null
   /** 共享外壳里的 Agent 相关弹窗（添加 / 管理顺序 / 交接）：两种模式同一处入口 */
   agentModal: 'add' | 'order' | 'handoff' | null
   bootError: string | null
@@ -40,6 +42,7 @@ interface UiState {
   toast: (text: string, kind?: ToastItem['kind']) => void
   dismissToast: (id: string) => void
   setSwitchHud: (t: string | null) => void
+  setModeEntryCause: (c: string | null) => void
   setAgentModal: (m: UiState['agentModal']) => void
   setBootError: (e: string | null) => void
   setUpdateBanner: (b: { version: string; url: string } | null) => void
@@ -55,6 +58,7 @@ export const useUi = create<UiState>()((set) => ({
   settingsSection: null,
   toasts: [],
   switchHud: null,
+  modeEntryCause: null,
   agentModal: null,
   bootError: null,
   updateBanner: null,
@@ -74,6 +78,7 @@ export const useUi = create<UiState>()((set) => ({
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   setSwitchHud: (t) => set({ switchHud: t }),
+  setModeEntryCause: (c) => set({ modeEntryCause: c }),
   setAgentModal: (m) => set({ agentModal: m }),
   setBootError: (e) => set({ bootError: e }),
   setUpdateBanner: (b) => set({ updateBanner: b })

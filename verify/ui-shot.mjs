@@ -477,6 +477,24 @@ const main = async () => {
       JSON.stringify({ ...selected, ...twoClick }))
     await js(cdp, 'window.__ahub_debug.brand()')
     await sleep(700)
+
+    // C2：进入工作站的动画只在**真切模式**时播一次；重启恢复/切任务/切会话这类纯重挂载不播。
+    // 根因不是观感：大字层原先没有状态位，`Workbench` 每次重挂载都重播，那才是"挡事"的地方。
+    // 两次点击必须分两次求值：React 18 不会在同一个任务里提交第一次的 pendingMode 更新，
+    // 同一次求值里的第二个 click 看到的仍是"未选中"，只会选中不会进入（Task 1 评审已指出这个测量机制坑）。
+    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]').click(); return true })()`)
+    await sleep(400)
+    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]').click(); return true })()`)
+    const entryPlayed = await js(cdp, `!!document.querySelector('[data-entry="1"]')`)
+    ok('切进工作站时播进入动画（大字层带 data-entry 在场）', entryPlayed === true, String(entryPlayed))
+    await sleep(1000) // 等 cause 被清掉（ENTRY_TOTAL_MS 780ms + 余量），否则下一条测的是残留
+    const entryAfterRemount = await js(cdp, `(() => {
+      window.__ahub_debug.workbench(); window.__ahub_debug.workbench()
+      return !!document.querySelector('[data-entry="1"]')
+    })()`)
+    ok('纯重挂载不再播（cause 已清空：切会话/切任务/重启恢复不会再被大字挡一次）', entryAfterRemount === false, String(entryAfterRemount))
+    await js(cdp, 'window.__ahub_debug.brand()')
+    await sleep(600)
     // 修复轮 1 · Important-3（Ruling T1-e）：上一轮新增的 .mi-note（why 那句）把介绍卡撑到 228px，
     // 在应用自己的最小高度（src/main/index.ts:283 minHeight:640）下底部被裁 21px。
     // 上面那条悬浮/聚焦判的是**用户持久化窗口**这一档，本机窗口多大就量多大，绿红随环境漂；

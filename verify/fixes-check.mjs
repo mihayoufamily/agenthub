@@ -2314,6 +2314,61 @@ console.log('\n[交付目录] 未登记文件只如实列出，不代删')
     `note=${note.slice(0, 120)}`)
 }
 
+// 饼图的环数据（纯模块，跑真代码）：内圈按接入方、外圈按模型；未上报 usage 的只计次不折 token。
+console.log('\n[饼图] 账本折成环数据（内圈 harness / 外圈 model）')
+{
+  const rg = await import('../out/shared/usage-rings.js')
+  const rows = [
+    { harness: 'codex', model: 'gpt-6-luna', calls: 3, ok: 3, failed: 0, tokens: 300, prompt: 200, completion: 100, cost: 0.3, noUsage: 0, ms: 10 },
+    { harness: 'codex', model: 'gpt-5.6-sol', calls: 1, ok: 1, failed: 0, tokens: 100, prompt: 60, completion: 40, cost: 0.1, noUsage: 0, ms: 5 },
+    { harness: 'deepseek', model: 'deepseek-flash', calls: 2, ok: 2, failed: 0, tokens: 200, prompt: 150, completion: 50, cost: 0.2, noUsage: 0, ms: 8 },
+    { harness: 'codebuddy', model: '（未上报模型名）', calls: 4, ok: 4, failed: 0, tokens: 0, prompt: 0, completion: 0, cost: 0, noUsage: 4, ms: 9 }
+  ]
+  const r = rg.buildRings(rows)
+  ok('内圈按接入方合并、外圈按接入方+模型拆分（双圈口径）',
+    r.inner.length === 3 && r.outer.length === 4 && r.inner.find((s) => s.key === 'codex').tokens === 400,
+    JSON.stringify({ inner: r.inner.map((s) => s.key), outer: r.outer.length }))
+  ok('share 按各自圈内归一（同圈求和为 1），零 token 的扇区不参与归一',
+    Math.abs(r.inner.reduce((a, s) => a + s.share, 0) - 1) < 1e-9 &&
+      r.outer.find((s) => s.tokens === 0)?.share === 0 &&
+      Math.abs(r.outer.filter((s) => s.tokens > 0).reduce((a, s) => a + s.share, 0) - 1) < 1e-9,
+    `innerSum=${r.inner.reduce((a, s) => a + s.share, 0)} zeroShare=${r.outer.find((s) => s.tokens === 0)?.share}`)
+  ok('未上报 usage 的调用单列次数、不折算成 token（分母只是账本可见调用）',
+    r.unreportedCalls === 4 && r.totalTokens === 600, JSON.stringify({ u: r.unreportedCalls, t: r.totalTokens }))
+  ok('空表不抛异常（返回空环、totalTokens 0，不做除零）',
+    (() => { const e = rg.buildRings([]); return e.inner.length === 0 && e.outer.length === 0 && e.totalTokens === 0 && e.unreportedCalls === 0 })())
+  const p = rg.donutPath(100, 100, 80, 56, 0, Math.PI)
+  ok('扇区路径是环不是饼：闭合、带内半径、外弧内弧各两段弧',
+    p.startsWith('M') && p.endsWith('Z') && p.includes('56 56') && p.split('A').length - 1 === 4, p.slice(0, 90))
+  ok('接近整圆时仍拆成多段弧（单段弧起终点重合，浏览器画不出来）',
+    rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).split('A').length - 1 === 4 &&
+      rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).includes(' 1 1 '), rg.donutPath(50, 50, 40, 20, 0, Math.PI * 1.999).slice(0, 90))
+}
+
+// 进入工作站的动画：根因是"每次重挂载都重播"（Workbench 无条件渲染大字层），不是观感。
+// 所以钉两件事：只有白名单里的触发动作才播，且三条切换路径各自带自己的 cause（不是全写同一个串）。
+console.log('\n[动画] 进入工作站的大字层由状态位驱动（重挂载不再重播）')
+{
+  const mt = readSrcSafe('src/renderer/src/lib/modeTransition.ts').text
+  ok('modeTransition 导出白名单三种触发原因，shouldPlayEntry 只认白名单（纯重挂载拿不到 cause 就不播）',
+    mt.includes("export const ENTRY_CAUSES = ['enter-mode', 'hotkey', 'sidebar-switch']") &&
+      mt.includes('.includes(cause)'), mt.slice(0, 70))
+  const ms = readSrcSafe('src/renderer/src/features/ModeSwitch.tsx').text
+  ok('enterMode / requestModeSwitch 都收 cause，并把 cause 往下传（不是各自硬写）',
+    ms.includes("enterMode(target: WorkMode, cause: EntryCause = 'enter-mode')") &&
+      ms.includes("requestModeSwitch(target: WorkMode, cause: EntryCause = 'sidebar-switch')") &&
+      ms.includes('enterMode(target, cause)'))
+  ok('Ctrl+M 那条路标成 hotkey（白名单三值是真的，不是装饰）',
+    /requestModeSwitch\([^\n]*'hotkey'\)/.test(readSrcSafe('src/renderer/src/App.tsx').text))
+  const wb = readSrcSafe('src/renderer/src/features/Workbench.tsx').text
+  ok('大字层不再无条件渲染（改由 shouldPlayEntry 判定，且播完清 cause）',
+    wb.includes('shouldPlayEntry(entryCause)') && wb.includes('{playing && <div className="wb-mode-title"') &&
+      wb.includes('setEntryCause(null)') &&
+      !/^\s*<div className="wb-mode-title">工作站模式<\/div>$/m.test(wb), wb.slice(0, 60))
+  ok('shift+滚轮切 Agent 的纯文本 HUD 死代码已删（只有 ModeSwitch 读 switchHud，且只认 __switch_ 前缀）',
+    !wb.includes('已切换：'))
+}
+
 // ---------- Z4. ESLint：注入面那 5 条 error 规则的"机器还开着"（修复波 A · 项 4）----------
 // 那 5 条 error 规则是 Task 8 存在的全部意义，而这台机器原先能被**一行注释**关掉
 // （评审实测：`// eslint-disable-next-line no-eval` + `eval('1')` → 0 error）。
