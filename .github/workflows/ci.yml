@@ -36,7 +36,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: verify-log
-          path: verify.log
+          # 汇总日志 + 每个套件的原始输出（run-all 回显会截断，文件不会）
+          path: |
+            verify.log
+            verify-logs/
           if-no-files-found: warn
       # 运行时依赖只有 react/react-dom/zustand；出高危就拦，dev 依赖噪音不拦
       - run: npm audit --omit=dev --audit-level=high

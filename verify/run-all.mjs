@@ -8,11 +8,14 @@
  * 退出码：任一必过项 FAIL 即非 0。
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+// 每个套件的原始输出落一份（回显会截断，文件不会）：本地排查与 CI artifact 都靠它
+const LOGDIR = resolve(HERE, '..', 'verify-logs')
+
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)=(.*)$/)
   return m ? [m[1], m[2]] : [a.replace(/^--/, ''), true]
@@ -113,6 +116,10 @@ for (const suite of selected) {
     timeout: budget
   })
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
+  try {
+    mkdirSync(LOGDIR, { recursive: true })
+    writeFileSync(join(LOGDIR, `${suite.name}.log`), out, 'utf-8')
+  } catch { /* 落盘失败不影响判定 */ }
   const m = out.match(PASS_RE)
   const pass = m ? Number(m[1]) : null
   const fail = m ? Number(m[2]) : null
@@ -139,8 +146,17 @@ for (const suite of selected) {
   console.log(`\n[${tag}] ${suite.name}  ${pass ?? '-'} PASS / ${fail ?? '-'} FAIL  ${Math.round((Date.now() - t0) / 1000)}s  exit=${exit ?? `signal:${r.signal}`}  min=${suite.min ?? '-'}  —— ${suite.what}`)
   if (bad) {
     for (const reason of reasons) console.log('    原因：' + reason)
-    const lines = out.split('\n').filter((l) => /FAIL|失败|Error:/.test(l)).slice(0, 12)
-    for (const l of lines) console.log('    ' + l.trim())
+    // 回显顺序有讲究（CI 上实测踩过）：以前只 filter /FAIL|失败|Error:/ 再 slice(0,12)，
+    // 而套件里有一堆 **PASS 行本身含"失败"二字**（"post 失败不撤销…""没配命令时如实失败"…），
+    // 于是真正的 FAIL 行被挤出窗口——"红了但看不出是哪条"，排查只能靠猜。
+    // 现在：真正的 FAIL 行**全给**（最多 20 条），上下文另算，绝不挤掉 FAIL。
+    const all = out.split('\n')
+    const failLines = all.filter((l) => /^\s*FAIL\s/.test(l))
+    for (const l of failLines.slice(0, 20)) console.log('    ' + l.trim())
+    if (failLines.length > 20) console.log(`    …另有 ${failLines.length - 20} 条 FAIL 未回显（完整输出见 verify-logs/${suite.name}.log）`)
+    const ctx = all.filter((l) => !/^\s*FAIL\s/.test(l) && /失败|Error:/.test(l)).slice(0, 6)
+    if (ctx.length) console.log('    —— 相关上下文 ——')
+    for (const l of ctx) console.log('    ' + l.trim())
   }
   results.push({ name: suite.name, pass, fail, exit, min: suite.min ?? null, reasons, bad, gated: suite.gate !== false })
 }

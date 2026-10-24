@@ -21,3 +21,4 @@ verify/*.zip
 
 # CI 里 verify 的落盘输出（失败时上传为 artifact，本地跑也不会进 git）
 verify.log
+verify-logs/
