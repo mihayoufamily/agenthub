@@ -13,7 +13,7 @@ import { bridge } from '../lib/ipc'
 import { matchFileRef } from '@shared/acceptance'
 import { pickUnregistered, unregisteredNote } from '@shared/delivery-dir'
 import { STATUS_TEXT } from './WfChips'
-import { fmtElapsed, cls } from '../lib/utils'
+import { fmtElapsed, cls, safeName } from '../lib/utils'
 
 /** 打开本机文件（shell.openPath；失败时如实提示，不静默 no-op） */
 async function openLocalPath(p: string) {
@@ -469,7 +469,7 @@ function PlanGateCard({ run }: { run: WorkflowRun }) {
   const [savedPath, setSavedPath] = useState<string | null>(null)
   const text = run.planText ?? ''
   const savePlan = async () => {
-    const name = `计划-${run.goal.slice(0, 40).replace(/[\\/:*?"<>|]/g, '_')}.md`
+    const name = `计划-${safeName(run.goal)}.md`
     const r = await bridge.artifacts.write(name, `# 计划：${run.goal}\n\n${text}\n`, run.id)
     if (r.ok && r.path) {
       setSavedPath(r.path)
@@ -500,6 +500,18 @@ function PlanGateCard({ run }: { run: WorkflowRun }) {
       <pre className="gate-plan-text gate-review" data-plan-text="1">
         {text || '（规划角色没有返回正文）'}
       </pre>
+      {/* CLI 角色的写盘 AgentHub 拦不到，只能在计划轮结束后把目录差集如实列出。
+          注意判据的边界：看到的只有这个产物目录，所以"没有新文件"绝不写成"没改文件"。 */}
+      <div className="gate-plan-note" data-cli-changes="1">
+        {(() => {
+          const changes = run.gate?.cliChanges ?? []
+          const where = run.outputDir || '产物目录'
+          if (changes.length === 0) {
+            return `计划轮结束后：${where} 里没有新文件、也没有文件消失。这只说明这一处没变——CLI 角色在它自己的目录里做了什么，AgentHub 看不到。`
+          }
+          return `计划轮结束后，${where} 里的对照结果：${changes.slice(0, 8).join('；')}${changes.length > 8 ? `；另有 ${changes.length - 8} 条` : ''}。CLI 角色的写盘与命令由它自己的 CLI 执行，AgentHub 拦不到，只能事后列给你看。`
+        })()}
+      </div>
       <div className="gate-actions">
         <Button variant="primary" onClick={() => void confirmGate('deliver')}>
           <Icon name="check" size={13} /> 批准并继续

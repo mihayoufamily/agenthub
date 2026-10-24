@@ -2624,6 +2624,34 @@ console.log('\n[批次 F · 计划态] 批准前不产生文件改动（模型 A
   rmSync(planRoot, { recursive: true, force: true })
 }
 
+console.log('\n[批次 F · 计划态] CLI 角色的改动只能事后列出（拦不到，所以如实说，不假装拦住）')
+{
+  let dd = null
+  try {
+    dd = await import('../out/shared/dir-delta.js')
+  } catch (e) {
+    ok('out/shared/dir-delta.js 存在（目录对照纯函数）', false, String(e && e.message))
+  }
+  if (dd) {
+    const one = dd.dirDelta(['a.md', 'b.c'], ['a.md', 'b.c', 'd.tmp'])
+    ok('新增与消失分别算、顺序稳定（界面要能逐条对得上）',
+      JSON.stringify(one) === JSON.stringify({ added: ['d.tmp'], removed: [] }), JSON.stringify(one))
+    ok('斜杠与大小写差异不算改动（Windows 真盘上同一文件两种写法，虚报等于吓人）',
+      dd.dirDelta(['sub/A.TXT'], ['sub/a.txt']).added.length === 0 &&
+        dd.dirDelta(['sub/A.TXT'], ['sub\\a.txt']).removed.length === 0,
+      JSON.stringify([dd.dirDelta(['sub/A.TXT'], ['sub/a.txt']), dd.dirDelta(['sub/A.TXT'], ['sub\\a.txt'])]))
+    ok('脏入参不抛：非数组按空表处理（清单来自 IPC，宁可报空也不许把确认门掀了）',
+      (() => { const r = dd.dirDelta(null, ['x']); return r.added.join(',') === 'x' && dd.dirDelta(['x'], undefined).removed.join(',') === 'x' })(),
+      JSON.stringify([dd.dirDelta(null, ['x']), dd.dirDelta(['x'], undefined)]))
+    ok('目录里少了东西也如实报（说"没改文件"之前先看盘上到底改了什么）',
+      dd.dirDelta(['a', 'b'], ['a']).removed.join(',') === 'b',
+      JSON.stringify(dd.dirDelta(['a', 'b'], ['a'])))
+    ok('同侧重复不算消失（集合口径，不是逐条配对）',
+      JSON.stringify(dd.dirDelta(['a', 'a'], ['a'])) === JSON.stringify({ added: [], removed: [] }),
+      JSON.stringify(dd.dirDelta(['a', 'a'], ['a'])))
+  }
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

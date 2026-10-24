@@ -337,6 +337,12 @@ export interface ReviewGate {
    * 老记录没有这个字段，按 'review' 渲染（不迁移、不猜）。
    */
   kind?: 'review' | 'plan'
+  /**
+   * 计划轮结束后产物目录的真实改动（「新增 x」「消失 y」逐条）。
+   * 这是给 CLI 角色那半边用的：它的写盘 AgentHub 拦不到，只能事后如实列出来；
+   * 清单来自目录对照，不是角色自述。目录清单触顶截断时会额外标一条。
+   */
+  cliChanges?: string[]
 }
 
 export interface WorkflowRun {

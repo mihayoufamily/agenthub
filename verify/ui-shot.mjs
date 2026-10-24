@@ -944,6 +944,13 @@ const main = async () => {
     ok('计划批准门在界面上看得见（卡片与正文完整落在视口内，不只是挂在 DOM 上）',
       planDom.card === true && planDom.cardVisible === true && planDom.textVisible === true, JSON.stringify(planDom))
     ok('门上有「批准并继续」这个动作（人不点就不会执行）', planDom.approve === true, JSON.stringify(planDom))
+    // Task 11：CLI 角色的改动只能事后列出。这里判的是"话说得对不对"——
+    // 承诺范围必须收在这个任务真实的产物目录上，且绝不出现"一定没改文件"那种拦不到的话。
+    const cliNote = await js(cdp, `(() => { const el = document.querySelector('[data-cli-changes]'); return el ? el.textContent : '' })()`)
+    ok('计划门挂了目录对照结果，且把范围写死在这个任务真实的产物目录上（不是泛指"没改文件"）',
+      cliNote.length > 0 && cliNote.includes(ART), JSON.stringify(cliNote.slice(0, 160)))
+    ok('对照措辞里没有超出能力的承诺（"一定没改/绝对没改/保证没写"一类，CLI 那侧拦不到就不许说）',
+      !/一定没改|绝对没改|保证没改|保证没写|没有改动文件/.test(cliNote), JSON.stringify(cliNote.slice(0, 160)))
     // 批准：同一个 run 从执行角色续跑，不新建任务、不重放计划轮
     const runIdBefore = planGate ? planGate.runId : null
     await js(cdp, 'window.__ahub_debug.passGate()')

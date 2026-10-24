@@ -8,6 +8,7 @@ import type {
   Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole, Skill
 } from '@shared/types'
 import { unionSkillIds, partitionSkillsForInjection } from '@shared/skills-union'
+import { dirDelta } from '@shared/dir-delta'
 import { bridge } from '../lib/ipc'
 import { renderConventionsBlock } from '@shared/conventions'
 import { matchFileRef } from '@shared/acceptance'
@@ -947,15 +948,27 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
           ...(attachmentText ? { attachmentText } : {}),
           ...(supplements.length ? { supplements } : {})
         }
+        // 目录对照（Task 11）：这道闸拦得住模型 Agent，拦不住 CLI 角色——它的写盘由自己的
+        // 子进程执行。所以开工前拍一次真实清单、结束后再拍一次，把差集如实挂在门上（来源是
+        // 目录本身，不是角色自述；措辞不许写成"一定没改文件"）。
+        const lsBefore = await bridge.artifacts.ls(outputDir).catch(() => null)
         const planOut = await runStage('planner', 1, cfg, planCtx, setRun, isCancelled, get, { planMode: true })
         // 失败 / Token 与预算上限都由 runStage 落到 run 上，这里不另写一套、也不粉饰成"已出计划"
         if (isCancelled() || !planOut) return
+        const lsAfter = await bridge.artifacts.ls(outputDir).catch(() => null)
+        const delta = dirDelta(lsBefore?.files.map((f) => f.rel) ?? [], lsAfter?.files.map((f) => f.rel) ?? [])
+        const cliChanges = [...delta.added.map((p) => `新增 ${p}`), ...delta.removed.map((p) => `消失 ${p}`)]
+        // 清单没取到不等于"没改动"：这时必须明说"无法对照"，否则界面上会把一次 IPC 失败
+        // 显示成一句安慰人的"目录里没有新文件"
+        if (lsBefore?.ok !== true || lsAfter?.ok !== true) cliChanges.push('目录清单没取到，本轮无法对照（这不等于没改动）')
+        // 清单触顶被截断时明说"列表不完整"：这时"没有新增"可能只是没列出来，不许让人误读成"没改"
+        if (lsBefore?.truncated || lsAfter?.truncated) cliChanges.push('目录清单触到上限被截断，上面的列表不完整')
         setRun((r) => ({
           ...r,
           planText: planOut.conclusion.trim(),
           stage: 'awaiting_plan_approval',
           status: 'waiting_user',
-          gate: { id: uid('gate'), round: 1, passed: [], issues: [], kind: 'plan' }
+          gate: { id: uid('gate'), round: 1, passed: [], issues: [], kind: 'plan', cliChanges }
         }))
         get().saveRun()
         return
