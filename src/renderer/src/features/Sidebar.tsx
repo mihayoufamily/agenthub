@@ -164,9 +164,14 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
       {menuFor && menuPos && (
         <div
           className={cls('wf-detail', 'agent-menu')}
-          style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, width: MENU_W, zIndex: 70 }}
+          // maxHeight/overflow 是给 MENU_H 那个估算值兜底的：卡片高度会随绑定的 Skill 数量长
+          // （0–120px），估算偏小时翻转判定不够，没有这两条就会被视口裁掉一截。
+          style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, width: MENU_W, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto', zIndex: 70 }}
         >
           <AgentManageCard
+            // 卡片里是 defaultValue 的非受控 textarea：不换 key 时从 A 切到 B 会复用同一个实例，
+            // A 的草稿留在框里显示成 B 的内容，下一次 blur 就把它写进 B 那条记录里。
+            key={menuFor}
             agentId={menuFor}
             onRename={() => {
               setRenaming(menuFor)

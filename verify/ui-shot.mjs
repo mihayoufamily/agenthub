@@ -340,6 +340,30 @@ const main = async () => {
     // ---- 2b. 切到有公开单价的模型：验证费用显示（deepseek-chat 在单价表内）----
     ok('打开模型管理', await js(cdp, `(() => { const c = document.querySelector('button.model-chip[title^="模型管理"]'); if (!c) return false; c.click(); return true })()`))
     await sleep(1200)
+    // 批次 D「唯一编辑入口」（Task 8）的界面这一半：常驻提示词在弹窗里必须是只读展示块，
+    // 那一格旁边不许再有可写控件——同一字段两处可写必然漂移。
+    // 判据按"那一格里有没有 textarea/input"算，不按值长度算：提示词没设时值是空串，
+    // 用值长度当判据的话，有人把 textarea 加回来也测不出来。
+    const promptRo = await js(cdp, `(() => {
+      const ro = document.querySelector('[data-prompt-readonly]')
+      const modal = ro?.closest('.modal') ?? null
+      const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight
+      const b = ro?.getBoundingClientRect()
+      const rows = [...document.querySelectorAll('.modal .form-row')]
+        .filter((row) => /常驻提示词/.test(row.querySelector('label')?.textContent ?? ''))
+      return {
+        has: !!ro,
+        inModal: !!modal,
+        visible: !!b && b.width > 2 && b.height > 2 && b.top >= 0 && b.bottom <= vh + 1 && b.left >= 0 && b.right <= vw + 1,
+        rowFound: rows.length,
+        editableControls: rows.reduce((n, row) => n + row.querySelectorAll('textarea, input').length, 0)
+      }
+    })()`)
+    ok('弹窗里的常驻提示词是只读块、在弹窗内且完整看得见（不是只挂在 DOM 上）',
+      promptRo.has === true && promptRo.inModal === true && promptRo.visible === true && promptRo.rowFound === 1,
+      JSON.stringify(promptRo))
+    ok('那一格旁边没有可写的提示词控件（唯一编辑入口在侧栏卡片，两处可写必然漂移）',
+      promptRo.editableControls === 0, JSON.stringify(promptRo))
     ok('切换到 deepseek-chat（列表来自真实 /models）', await js(cdp, `(() => { const b = [...document.querySelectorAll('.btn')].find(x => x.textContent.trim().startsWith('deepseek-chat') && !x.disabled); if (!b) return false; b.click(); return true })()`))
     await sleep(600)
     await js(cdp, `(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === '完成'); b?.click(); return true })()`)
@@ -903,6 +927,32 @@ const main = async () => {
     await sleep(2000)
 
     // ---- 7c. 批次 F：任务级计划态（开工先出计划 → 批准 → 同一个 run 续跑）----
+    // 先验用户入口：计划态开关必须在执行设置里可见、可点、真写进配置。
+    // （复核发现的洞：批次 F 落地时只有 debug 钩子能开它，普通用户根本用不到这个特性。）
+    await ensureWfHome(cdp)
+    await js(cdp, 'window.__ahub_debug.workflow()')
+    await sleep(500)
+    // 开关坐在「工作流设置」弹窗里（ConfigPanel 是 Modal，默认不开）：不先把弹窗点开，
+    // 这条就会查不到节点而红，而第二条"关回去"会因为两次点击都落空而**空转报绿**。
+    // 这里必须按文案挑那颗 chip：`.cfg-chip` 在页面上有**两颗**——第一颗是「审核：人工/自动」的切换，
+    // 第二颗才是「更多设置」。按类名取第一颗等于在旁边那个开关上乱翻（实测就是这么红的）。
+    const chipClicked = await js(cdp, `(() => { const b = [...document.querySelectorAll('button.cfg-chip')].find((x) => /更多设置/.test(x.textContent ?? '')); if (!b) return false; b.click(); return true })()`)
+    await sleep(700)
+    const opened = await js(cdp, `!!document.querySelector('.modal[aria-label="工作流设置"]')`)
+    const swBefore = await js(cdp, `(() => { const s = document.querySelector('button.switch[aria-label="计划态"]'); return { found: !!s, checked: s?.getAttribute('aria-checked') ?? null } })()`)
+    await js(cdp, `(() => { document.querySelector('button.switch[aria-label="计划态"]')?.click(); return true })()`)
+    await sleep(500)
+    const swAfter = await js(cdp, `(() => ({ planFirst: !!window.__ahub_debug.state().config.planFirst, checked: document.querySelector('button.switch[aria-label="计划态"]')?.getAttribute('aria-checked') ?? null }))()`)
+    await js(cdp, `(() => { document.querySelector('button.switch[aria-label="计划态"]')?.click(); return true })()`)
+    await sleep(500)
+    const swBack = await js(cdp, '(() => !!window.__ahub_debug.state().config.planFirst)()')
+    await js(cdp, `(() => { document.querySelector('.modal-head button[title="关闭"]')?.click(); return true })()`)
+    await sleep(400)
+    ok('执行设置里有「计划态」开关，点下去真写进配置（这个特性不能只靠验证钩子才起得来）',
+      chipClicked === true && opened === true && swBefore.found === true && swAfter.planFirst === true && swAfter.checked === 'true',
+      JSON.stringify({ chipClicked, opened, swBefore, swAfter }))
+    ok('开关关回去后配置里 planFirst=false（不开半开状态；前置是同一次点击真的先把它打开过）',
+      swAfter.planFirst === true && swBack === false, JSON.stringify({ swAfter, swBack }))
     // 走 mock 服务，不烧真实额度。产物目录仍是上面 7/7b 用的 ART，
     // 这样 Task 11 的目录对照与这几条断言看的是同一个目录。
     const reqBefore7c = seen.requests.length
@@ -954,6 +1004,16 @@ const main = async () => {
       cliNote.length > 0 && cliNote.includes(ART), JSON.stringify(cliNote.slice(0, 160)))
     ok('对照措辞里没有超出能力的承诺（"一定没改/绝对没改/保证没写"一类，CLI 那侧拦不到就不许说）',
       !/一定没改|绝对没改|保证没改|保证没写|没有改动文件/.test(cliNote), JSON.stringify(cliNote.slice(0, 160)))
+    // 批准门不许有旁路：未批准时"单角色重跑执行"就是绕过批准去写盘的另一条路（复核时发现的洞，已堵）。
+    await js(cdp, 'window.__ahub_debug.rerunRole("executor")')
+    await sleep(1500)
+    const bypass = await js(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      return { roles: (r.cardDetails || []).map((c) => c.role), status: r.status, gateKind: r.gateKind }
+    })()`)
+    ok('计划未批准时「单角色重跑执行」被拒（不出现执行卡片、仍停在计划门）',
+      !bypass.roles.includes('executor') && bypass.status === 'waiting_user' && bypass.gateKind === 'plan',
+      JSON.stringify(bypass))
     // 批准：同一个 run 从执行角色续跑，不新建任务、不重放计划轮
     const runIdBefore = planGate ? planGate.runId : null
     await js(cdp, 'window.__ahub_debug.passGate()')

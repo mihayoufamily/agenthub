@@ -338,9 +338,9 @@ export interface ReviewGate {
    */
   kind?: 'review' | 'plan'
   /**
-   * 计划轮结束后产物目录的真实改动（「新增 x」「消失 y」逐条）。
-   * 这是给 CLI 角色那半边用的：它的写盘 AgentHub 拦不到，只能事后如实列出来；
-   * 清单来自目录对照，不是角色自述。目录清单触顶截断时会额外标一条。
+   * 计划轮结束后**产物目录的路径清单差集**（「新增 x」「消失 y」逐条）。
+   * 口径要说准：只比路径集合，不看内容——原地改内容、只改大小写重命名、先写后删都看不见。
+   * 它是给 CLI 角色那半边用的：那边的写盘 AgentHub 拦不到，只能事后如实列出（决策记录 A6）。
    */
   cliChanges?: string[]
 }
@@ -367,6 +367,13 @@ export interface WorkflowRun {
    * 点「存为产物」之前它不落盘（spec 批次 F：计划正文自己不该成为交付物）。
    */
   planText?: string
+  /**
+   * 这个任务是按 planFirst 起的（批次 F）。落在 run 上而不是只看当前 config：
+   * 全局配置随时能被改，而"批准前不执行"这句话必须跟着这条任务走。
+   */
+  planFirst?: boolean
+  /** 用户真的批准过这份计划。中断续跑按它判定，避免"计划还没批准就被续到执行角色" */
+  planApproved?: boolean
 }
 
 export interface WorkflowRoleConfig {

@@ -314,8 +314,13 @@ export function chatStream(
 ) {
   const ctrl = new AbortController()
   activeStreams.set(reqId, ctrl)
+  // 计划态下 MCP 工具整组不接：AgentHub 判断不了某个 server 的工具会不会写盘，
+  // 而这一轮唯一要守的承诺就是"批准前不产生文件改动"。MCP 的执行权在 AgentHub 手里
+  // （route.call 由我们发起），拦得住就不该用"声明它危险"代替"关掉它"。
+  // CLI 角色是另一回事——那是真拦不到，只能事后列改动。
+  const mcpActive = grant?.planMode === true ? undefined : mcp
   // 内置工具（有沙箱授权才有）+ MCP 工具合并成一张函数表；一个都没有就不带 tools 字段
-  const toolList = [...(grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb, grant.planMode) : []), ...(mcp?.defs ?? [])]
+  const toolList = [...(grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb, grant.planMode) : []), ...(mcpActive?.defs ?? [])]
   const tools = toolList.length ? toolList : undefined
 
   void (async () => {
@@ -385,7 +390,8 @@ export function chatStream(
             return
           }
           // MCP 工具走 server 自己的执行体，不进沙箱；其余仍是 AgentHub 的工具层
-          const route = mcp?.routes[tc.name]
+          // （计划态下 mcpActive 已是 undefined：这里查不到路由，调用会被下面的 grant 分支如实拒掉）
+          const route = mcpActive?.routes[tc.name]
           const call: ToolCall = { id: uid('tool'), tool: route ? route.label : tc.name, args: argsSummary(tc.args), status: 'running', ts: Date.now() }
           onEvent({ reqId, type: 'tool', toolCall: call })
           // 取消信号透传：正在执行的命令/联网/MCP 调用可被立即中断

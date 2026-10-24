@@ -2607,6 +2607,64 @@ console.log('\n[批次 F · 计划态] 批准前不产生文件改动（模型 A
       JSON.stringify(tools.toolDefs(true, true)) === JSON.stringify(tools.toolDefs(true, true, undefined)),
       `缺省=${namesOf(tools.toolDefs(true, true)).join(',')}；显式 undefined=${namesOf(tools.toolDefs(true, true, undefined)).join(',')}`)
 
+    // MCP 与计划态：MCP 的执行体是 AgentHub 自己发起的（route.call 在我们手里），
+    // 而 AgentHub 判断不了某个 server 的工具会不会写盘——拦得住的东西不许靠声明绕过去。
+    // 这条带**对照轮**：不带 planMode 时同一个 wiring 必须真的被调用，
+    // 否则"一次都没调"会因为测试自己没接好而恒绿。
+    {
+      const runPlanRound = async (planMode) => {
+        let mcpCalled = 0
+        const bodies = []
+        let call = 0
+        const { server, port } = await startMock({
+          '/v1/chat/completions': (req, res) => {
+            let raw = ''
+            req.on('data', (d) => (raw += d))
+            req.on('end', () => {
+              try { bodies.push(JSON.parse(raw)) } catch { bodies.push({}) }
+              call++
+              if (call === 1) {
+                // 模型硬要调那个 MCP 工具（schema 里没有它也要试一次）
+                res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+                res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'm1', function: { name: 'fs_write', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] })}\n\n`)
+                res.write('data: [DONE]\n\n')
+                res.end()
+              } else {
+                sse(res, [textFrame('计划正文'), stopFrame({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 })])
+              }
+            })
+          }
+        })
+        const wiring = {
+          defs: [{ type: 'function', function: { name: 'fs_write', description: '写文件', parameters: { type: 'object', properties: {} } } }],
+          routes: { fs_write: { label: 'mcp:fs_write', call: async () => { mcpCalled++; return { ok: true, output: '已写' } } } }
+        }
+        const cfg = { provider: 'Mock', baseUrl: `http://127.0.0.1:${port}/v1`, modelId: 'deepseek-chat' }
+        const events = await new Promise((resolve_) => {
+          const evs = []
+          openai.chatStream(cfg, 'k', 'req_mcp_' + Date.now(), [{ role: 'user', content: '规划' }],
+            (e) => { evs.push(e); if (e.type === 'done' || e.type === 'error') resolve_(evs) },
+            { dir: planRoot, ...(planMode ? { planMode: true } : {}) }, undefined, wiring)
+        })
+        server.close()
+        const toolEvents = events.filter((e) => e.type === 'tool').map((e) => `${e.toolCall?.tool}:${e.toolCall?.status}`)
+        return { names: (bodies[0]?.tools ?? []).map((t) => t.function?.name).filter(Boolean), mcpCalled, toolEvents }
+      }
+      const withPlan = await runPlanRound(true)
+      const withoutPlan = await runPlanRound(false)
+      ok('计划态下 MCP 工具不进发给模型的 schema（执行权在 AgentHub 手里，就不该只靠声明）',
+        !withPlan.names.includes('fs_write') && withPlan.names.includes('read_file'),
+        JSON.stringify(withPlan.names))
+      ok('计划态下 MCP 的执行体一次都没被发起（模型硬调也不跑）',
+        withPlan.mcpCalled === 0, JSON.stringify({ called: withPlan.mcpCalled, tools: withPlan.toolEvents }))
+      ok('对照轮：不带 planMode 时同一个 MCP wiring 真的跑得起来（所以上一条不是测试自己没接好）',
+        withoutPlan.names.includes('fs_write') && withoutPlan.mcpCalled === 1,
+        JSON.stringify({ names: withoutPlan.names, called: withoutPlan.mcpCalled }))
+      ok('计划态里模型硬调 MCP 工具时，得到的是如实的失败工具结果，不是静默成功',
+        withPlan.toolEvents.length > 0 && withPlan.toolEvents.some((t) => /error/.test(t)),
+        JSON.stringify(withPlan.toolEvents))
+    }
+
     // 结构性：拦的那一处要在 dispatch 的 switch 之前（行为断言管"五个都拦住"，这条管"别散到每个 case 里"）
     const dispSrc = readSrcSafe('src/main/tools.ts')
     const dispFrom = dispSrc.text.indexOf('async function dispatch(')
@@ -2680,6 +2738,48 @@ console.log('\n[批次 C/D 评审留账] 这几条钉住已修的 Minor，不许
   }
   ok('verify/** 里不许有"拿到 querySelector 结果就直接点下去"的写法（缺元素时要报红，不是把套件崩在中途丢报告）',
     bareClick.length === 0, `命中 ${bareClick.join(' ') || '0 处'}`)
+  // 批次 D（Task 8）「唯一编辑入口」原先一条机器守护都没有：弹窗改只读之后，
+  // 谁把 textarea 加回去不会有任何套件变红（本批评审实测确认：verify/ 里搜不到 systemPrompt 断言）。
+  const cvSrc = readSrcSafe('src/renderer/src/features/ChatView.tsx')
+  const amcSrc = readSrcSafe('src/renderer/src/components/AgentManageCard.tsx')
+  const cvWrites = /systemPrompt:/.test(cvSrc.text)
+  const amcWrites = /systemPrompt:/.test(amcSrc.text)
+  ok('常驻提示词的写入点全仓只有侧栏卡片一处（弹窗里那份必须是只读，两处可写必然漂移）',
+    cvSrc.error === null && amcSrc.error === null && !cvWrites && amcWrites && /data-prompt-readonly/.test(cvSrc.text),
+    `弹窗写入=${cvWrites} 卡片写入=${amcWrites} 弹窗只读块=${/data-prompt-readonly/.test(cvSrc.text)} ${cvSrc.error ?? ''}${amcSrc.error ?? ''}`)
+  // 批准门的旁路（复核时发现）：resumeInterrupted 按"最后一张卡是规划"推断该从谁接，
+  // 它不认识计划门——未批准的任务被标成 interrupted 后一点续跑就直接起执行角色。
+  // rerunRole 同一个洞。两处都必须问 planApproved。
+  const wfSrc = readSrcSafe('src/renderer/src/stores/workflow.ts')
+  const guardAt = (fnName) => {
+    const i = wfSrc.text.indexOf(fnName)
+    if (i < 0) return '找不到这个函数'
+    const j = wfSrc.text.indexOf('\n  },', i)
+    const body = wfSrc.text.slice(i, j < 0 ? undefined : j)
+    return { hasGuard: /run\.planFirst && !run\.planApproved/.test(body), len: body.length }
+  }
+  const gResume = guardAt('resumeInterrupted: async () =>')
+  const gRerun = guardAt('rerunRole: (role) =>')
+  ok('未批准的计划态任务：续跑与单角色重跑两条路都问 planApproved（批准门不能有旁路）',
+    wfSrc.error === null && gResume.hasGuard === true && gRerun.hasGuard === true,
+    JSON.stringify({ resume: gResume, rerun: gRerun, err: wfSrc.error }))
+  // 计划态开关必须"落盘 + 启动读回"两头都在：patchConfig 是**显式白名单**，App.tsx 水合也是逐字段列举，
+  // 少任何一头，表现都是"重启后悄悄忘掉我开了计划态"——而它改的是整个任务的执行方式。
+  const patchStart = wfSrc.text.indexOf('patchConfig: (p) =>')
+  // 切片终点必须从 patchStart 之后找：'savePreset:' 在接口声明里也出现一次（位置更靠前），
+  // 直接用第一个命中会把切片算成空串——这条断言于是恒红，红的还是断言自己。
+  const patchEnd = wfSrc.text.indexOf('savePreset:', patchStart)
+  const patchBlock = patchStart >= 0 ? wfSrc.text.slice(patchStart, patchEnd > patchStart ? patchEnd : undefined) : ''
+  const appSrc = readSrcSafe('src/renderer/src/App.tsx')
+  ok('planFirst 两头都在：patchConfig 的落盘白名单 + App 启动水合（缺一头就是重启静默关掉计划态）',
+    /planFirst: get\(\)\.config\.planFirst/.test(patchBlock) &&
+      appSrc.error === null && /planFirst: wd\?\.planFirst \?\? false/.test(appSrc.text),
+    `落盘=${/planFirst: get\(\)\.config\.planFirst/.test(patchBlock)} 水合=${appSrc.error === null && /planFirst: wd\?\.planFirst \?\? false/.test(appSrc.text)}`)
+  // 侧栏卡片里的 textarea 是 defaultValue（非受控）：不换 key 时 A→B 复用同一实例，
+  // A 的草稿显示成 B 的内容，下一次 blur 直接写进 B 那条记录。
+  const sbSrc = readSrcSafe('src/renderer/src/features/Sidebar.tsx')
+  ok('侧栏 Agent 管理卡片按 agentId 换 key（非受控 textarea 复用实例会把上一个 Agent 的草稿写进下一个）',
+    sbSrc.error === null && /key=\{menuFor\}/.test(sbSrc.text), sbSrc.error ?? '卡片挂载处没有 key={menuFor}')
 }
 
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)

@@ -176,6 +176,22 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
           />
         </div>
 
+        <div className="set-row">
+          <div>
+            <div className="lbl">先出计划，批准后再执行</div>
+            <div className="desc">
+              开工先跑一轮<b>只读规划</b>，产出计划等你批准；批准前不进执行与审核。
+              模型 Agent 的写类工具（写/改/删/移/执行命令）是真的关掉，MCP 工具本轮整组不接；
+              <b>CLI 角色拦不到</b>，只能在计划轮结束后列出产物目录里的改动。
+            </div>
+          </div>
+          <Switch
+            label="计划态"
+            on={!!config.planFirst}
+            onChange={(v) => patchConfig({ planFirst: v })}
+          />
+        </div>
+
         <div className="form-row" style={{ marginTop: 10 }}>
           <label>最大返工轮数</label>
           <input

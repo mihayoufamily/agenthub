@@ -725,6 +725,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       maxRounds: get().config.maxRounds,
       timeoutMin: get().config.timeoutMin,
       confirmEveryRound: get().config.confirmEveryRound,
+      // 计划态必须落盘：不落就是"重启后悄悄忘掉我开了计划态"，
+      // 而它改变的是整个任务的执行方式（批准前不写盘），忘掉一次等于换了种跑法还不吭声
+      planFirst: get().config.planFirst ?? false,
       maxTokens: get().config.maxTokens,
       budgetYuan: get().config.budgetYuan ?? 0,
       outputDir: get().config.outputDir
@@ -913,7 +916,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       startedAt: Date.now(),
       cards: [],
       demo,
-      outputDir
+      outputDir,
+      // 计划态跟着这条任务走（不是"当前配置里有没有开"），续跑判定才有依据
+      ...(cfg.planFirst ? { planFirst: true } : {})
     }
     set({ run, _cancelled: false, _started: true, _carryOver: null })
     useSettings.getState().addMemory('goal', `任务目标：${goal}`, false)
@@ -1146,6 +1151,13 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       useUi.getState().toast('演示任务是脚本内容，重跑没有意义', 'warn')
       return
     }
+    // 同 resumeInterrupted：计划还没批准时，单角色重跑能绕过批准门（尤其重跑"执行"——
+    // 那就是在未批准的计划上真写盘）。本轮没有"带反馈重跑计划轮"的入口，所以这里一律不放行，
+    // 并把可走的路说清楚，不让人对着一个没反应的按钮猜。
+    if (run.planFirst && !run.planApproved) {
+      useUi.getState().toast('计划还没批准，单角色重跑会绕过批准门。要么批准它继续，要么停止，要么新建任务重出计划。', 'warn')
+      return
+    }
     set({ _cancelled: false, _started: true })
     set((s) => (s.run ? { run: { ...s.run, status: 'running', stage: role === 'planner' ? 'planning' : role === 'executor' ? 'executing' : 'reviewing' } } : {}))
     void resumeRework(get, set, { startRole: role, only: true })
@@ -1163,6 +1175,14 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     }
     if (run.demo) {
       useUi.getState().toast('演示任务不续跑', 'warn')
+      return
+    }
+    // 计划态任务还没被批准过，就不许从"续跑"这条路进到执行角色——
+    // 下面那套"按最后一张卡推断该从谁接"的启发式不认识计划门，会把未批准的规划卡当成
+    // "规划已完成"，直接起执行。批准是这一轮唯一的门，没按过就当没跑完。
+    // 刻意不自动重跑计划轮：那是再花一次额度，得由人决定（要接着做就新建任务）。
+    if (run.planFirst && !run.planApproved) {
+      useUi.getState().toast('这个任务的计划还没批准，续跑会绕过批准门，所以不放行。要接着做请新建任务。', 'warn')
       return
     }
     // 只按卡片推断"该从谁接着跑"：已经产出过结论的角色不重放，避免重复扣额度与重复写文件
@@ -1212,7 +1232,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       }
       useSettings.getState().addMemory('confirm', '用户批准了计划，任务从执行角色继续（同一 run，不重放计划轮）', false)
       set((s) => ({
-        run: s.run ? { ...s.run, gate: undefined, status: 'running', stage: 'executing', notes: [...(s.run.notes ?? []), '计划已获批准，从执行角色继续（同一任务，不重跑计划轮）'] } : null
+        run: s.run ? { ...s.run, gate: undefined, status: 'running', stage: 'executing', planApproved: true, notes: [...(s.run.notes ?? []), '计划已获批准，从执行角色继续（同一任务，不重跑计划轮）'] } : null
       }))
       get().saveRun()
       void resumeRework(get, set, { startRole: 'executor' })

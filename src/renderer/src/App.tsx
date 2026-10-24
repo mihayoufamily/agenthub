@@ -152,6 +152,8 @@ export function App() {
           maxRounds: wd?.maxRounds ?? 3,
           timeoutMin: wd?.timeoutMin ?? 30,
           confirmEveryRound: wd?.confirmEveryRound ?? false,
+          // 计划态开关跟着默认值回来（patchConfig 已落盘这里必须读，否则重启就静默关掉）
+          planFirst: wd?.planFirst ?? false,
           maxTokens: wd?.maxTokens ?? 0,
           budgetYuan: wd?.budgetYuan ?? 0,
           outputDir: wd?.outputDir ?? ''
