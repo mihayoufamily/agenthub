@@ -2224,14 +2224,29 @@ console.log('\n[Z3] 脱敏与渲染口径统一（工具卡 / MCP 信任弹窗 a
 // 不是 grep 源码：删掉参数就会红，注释也满足不了它。
 console.log('\n[CLI] codex 显式要 workspace-write 沙箱（默认 read-only 会让它在产物目录写不了文件）')
 {
-  let cliArgsFor = null
-  try { cliArgsFor = (await import('../out/main/adapters/cli.js')).cliArgsFor } catch { /* 未导出时下面 FAIL */ }
+  let mod = {}
+  try { mod = await import('../out/main/adapters/cli.js') } catch { /* 未导出时下面 FAIL */ }
+  const cliArgsFor = mod.cliArgsFor
   const args = typeof cliArgsFor === 'function' ? cliArgsFor('codex', 'do it', '', {}) : []
   const i = Array.isArray(args) ? args.indexOf('--sandbox') : -1
   ok('codex exec 带 --sandbox workspace-write（写范围=cwd 即产物目录，不是全盘）',
     i >= 0 && args[i + 1] === 'workspace-write', `args=${JSON.stringify(args)?.slice(0, 200)}`)
   ok('codex 仍带 --skip-git-repo-check（产物目录通常不是 git 仓库），prompt 在位',
     args.includes('--skip-git-repo-check') && args.includes('do it'), `args=${JSON.stringify(args)?.slice(0, 200)}`)
+  // 工作根显式给，而且必须在 prompt 之前（位置参数之后的 flag 解析不可靠）
+  const withDir = typeof cliArgsFor === 'function' ? cliArgsFor('codex', 'do it', '', { workDir: 'D:\\out dir' }) : []
+  const ci = withDir.indexOf('-C')
+  ok('codex 用 -C 显式指定工作根（且在 prompt 之前），避免 apply_patch 落点靠猜',
+    ci >= 0 && withDir[ci + 1] === 'D:\\out dir' && ci < withDir.indexOf('do it'),
+    `args=${JSON.stringify(withDir)?.slice(0, 200)}`)
+  // file_change 两种形状都要能取出 path（只认旧形状会让产物登记静默丢掉）
+  const fch = typeof mod.codexFileChanges === 'function' ? mod.codexFileChanges : null
+  const modern = fch ? fch({ type: 'file_change', changes: [{ path: 'D:\\o\\a.c', kind: 'add' }, { path: '', kind: 'add' }] }) : []
+  const legacy = fch ? fch({ type: 'file_change', path: 'b.c', change_type: 'modify' }) : []
+  ok('codex file_change 解析兼容新旧两种形状，空 path 丢掉（旧实现只读顶层 path → 产物登记静默丢）',
+    Array.isArray(modern) && modern.length === 1 && modern[0].path === 'D:\\o\\a.c' && modern[0].kind === 'add' &&
+      Array.isArray(legacy) && legacy.length === 1 && legacy[0].path === 'b.c' && legacy[0].kind === 'modify',
+    `modern=${JSON.stringify(modern)} legacy=${JSON.stringify(legacy)}`)
 }
 
 // ---------- Z4. ESLint：注入面那 5 条 error 规则的"机器还开着"（修复波 A · 项 4）----------

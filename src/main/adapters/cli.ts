@@ -55,6 +55,28 @@ export function cliSupportsThinking(name: CliName): boolean {
 }
 
 /**
+ * codex 的 `file_change` 事件有两种形状，必须都认：
+ *   - 新版：`{ type: 'file_change', changes: [{ path, kind }] }`
+ *   - 旧版：`{ type: 'file_change', path, change_type }`
+ * 只读旧形状时 path 恒为 undefined，于是 `realOutPath(cwd, undefined)` 拿不到路径、**产物登记被静默丢掉**
+ * （用户实测：执行侧交付了文件，审核却"核对不到任何真实产物"，卡片上 path 也是空的）。
+ * 统一成 [{ path, kind }]，path 为空的直接丢掉——空路径没有可登记的语义。
+ */
+export function codexFileChanges(item: unknown): Array<{ path: string; kind: string }> {
+  const it = (item ?? {}) as { changes?: unknown; path?: unknown; change_type?: unknown }
+  const out: Array<{ path: string; kind: string }> = []
+  if (Array.isArray(it.changes)) {
+    for (const c of it.changes) {
+      const row = (c ?? {}) as { path?: unknown; kind?: unknown }
+      if (typeof row.path === 'string' && row.path.trim()) out.push({ path: row.path.trim(), kind: String(row.kind ?? '') })
+    }
+    return out
+  }
+  if (typeof it.path === 'string' && it.path.trim()) out.push({ path: it.path.trim(), kind: String(it.change_type ?? '') })
+  return out
+}
+
+/**
  * 供逻辑层断言用：把某个 CLI 的 spawn 参数算出来（**不 spawn、不碰环境**）。
  * 存在的理由：`SPECS` 是模块私有的，"codex 有没有带 --sandbox"这种事只能靠源码 grep 去猜，
  * 而 grep 会被注释满足（本项目已踩过）。这里给一个纯函数的缝，断言直接跑真代码。
@@ -425,7 +447,12 @@ const SPECS: Record<CliName, CliSpec> = {
       // cwd（= 产物目录）都写不了，模型会自己报告"当前文件系统权限为只读，无法创建文件"（用户实测踩到）。
       // AgentHub 的承诺本来就是"沙箱根切到产物目录、只换目录不提升访问级别"，所以显式给
       // workspace-write：可写范围就是 cwd（+临时目录），不是全盘；网络仍按 codex 的默认关闭。
-      const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write', full.slice(0, MAX_PROMPT_CHARS)]
+      const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+      // 工作根显式给（且必须在 prompt 这个位置参数**之前**）：不然 codex 只能从进程 cwd 推断 workspace，
+      // apply_patch 的落点在中文路径/非 git 目录下容易与预期错位（实测：应用里那次它"交付"了文件，
+      // 盘上一个都没有，而手工同参数同目录同模型能写出来）。
+      if (opts.workDir && opts.workDir.trim()) args.push('-C', opts.workDir.trim())
+      args.push(full.slice(0, MAX_PROMPT_CHARS))
       if (opts.model) args.push('-m', opts.model)
       // 思考强度：codex 官方用 model_reasoning_effort 配置项（-c 覆盖）
       if (opts.thinkingLevel && opts.thinkingLevel !== 'off') {
@@ -478,19 +505,22 @@ const SPECS: Record<CliName, CliSpec> = {
             })
           }
           if (item?.type === 'file_change') {
-            // 工具事件透传：文件变更；创建/修改且文件确实落盘时登记为真实产物（相对路径按 cwd 还原）
-            const written = item.change_type === 'delete' ? undefined : realOutPath(cwd, item.path)
-            emit({
-              type: 'tool',
-              toolCall: {
-                id: `codex-file-${++n}`,
-                tool: 'file_change',
-                args: { type: item.change_type ?? '', path: item.path ?? '' },
-                status: 'done',
-                ts: Date.now()
-              },
-              ...(written ? { writtenPath: written } : {})
-            })
+            // 文件变更：`changes:[{path,kind}]`（新版）与顶层 `path/change_type`（旧版）都认。
+            // 只读旧形状时 path 恒空 → realOutPath 拿到 undefined → **产物登记被静默丢掉**（实测踩到）。
+            for (const ch of codexFileChanges(item)) {
+              const written = ch.kind === 'delete' ? undefined : realOutPath(cwd, ch.path)
+              emit({
+                type: 'tool',
+                toolCall: {
+                  id: `codex-file-${++n}`,
+                  tool: 'file_change',
+                  args: { type: ch.kind, path: ch.path },
+                  status: 'done',
+                  ts: Date.now()
+                },
+                ...(written ? { writtenPath: written } : {})
+              })
+            }
           }
           // item.type === 'error' 多为配置告警（如未知配置项），不打断主流程
         } else if (type === 'turn.completed') {
@@ -879,6 +909,9 @@ export async function cliChatStream(
       cwdDir = join(app.getPath('documents'), 'AgentHub-workspaces', name)
       try { mkdirSync(cwdDir, { recursive: true }) } catch { /* 创建失败时 spawn 会如实报错 */ }
     }
+    // 起进程前留一行诊断：这次排查两次都卡在"它到底在哪个目录、带了什么参数"上看不见。
+    // 每个参数截断（prompt 可能很长，且里面有用户任务正文），日志只留在本机。
+    console.log(`[cli] ${name} exe=${target.exe} cwd=${cwdDir || '(继承主进程)'} args=${JSON.stringify(args.map((a) => (a.length > 60 ? `${a.slice(0, 60)}…` : a)))}`)
     const proc = spawn(target.exe, args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
