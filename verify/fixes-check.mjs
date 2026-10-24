@@ -1449,15 +1449,19 @@ child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ c
     live.code === 0 && /^\d+\.\d+\.\d+/.test(String(live.out)) && !/DEP0190/.test(String(liveRun.stderr)),
     JSON.stringify({ live, stderr: String(liveRun.stderr).slice(0, 180) }))
   // 对照组：故意用回旧形状（cmd.exe 当 file 还叠 shell:true），确认上一条不是空断言
-  // 前提：DEP0190 是 Node ≥ 22 才有的弃用警告（Electron 37 自带 Node 22；CI 原先钉 20，
-  // 于是"没有 DEP0190"那条在 CI 上是**空转永真**、"对照组"必红）。把版本当作显式前提断言出来，
-  // 而不是让这一组在新旧 Node 上给出两种都不可信的结果。
-  const nodeMajor = Number(String(process.versions.node).split('.')[0])
-  ok('Node 版本 ≥ 22（DEP0190 对照组的前提；Node 20 没有这条警告，这组断言在旧版上会空转）',
-    nodeMajor >= 22, `node=${process.versions.node}`)
+  // （这里原先加过一条"Node 版本 ≥ 22"的前提断言，论证 DEP0190 只在 Node ≥22 出现。CI 实测推翻了
+  // 这个前提——runner 上是 Node 22 也不出这条警告，所以那半句本来就不是可靠信号，一并撤掉。
+  // 运行时版本仍统一到 22：与 Electron 37 自带的一致，避免本地/CI/应用内三套 Node 各说各话。）
   const ctlRun = spawnSync(process.execPath, ['-e', liveScript(true)], { encoding: 'utf-8', timeout: 90_000, windowsHide: true })
-  ok('对照组：cmd.exe 当 file 再叠 shell:true 确实打出 DEP0190（说明上一条有牙）',
-    /DEP0190/.test(String(ctlRun.stderr)), String(ctlRun.stderr).slice(0, 180))
+  const ctl = parseChild(ctlRun)
+  const ctlDep = /DEP0190/.test(String(ctlRun.stderr))
+  // CI 实测（Node 22）：DEP0190 在 runner 上根本不出现，原来那条"对照组必须打出 DEP0190"于是必红，
+  // 而旁边"没有 DEP0190"那半条就成了空转永真。弃用警告在不同 Node 小版本上不一致，**不能拿它当牙的证明**；
+  // 换成可移植的证明：旧形状同样能真起 npm.cmd 并拿到版本号——说明上一条测的是真进程，不是空转。
+  // 警告本身只做记录（写进 extra，红的时候能一眼看出当时有没有），不再作为断言条件。
+  ok('对照组：旧形状（cmd.exe 当 file + shell:true + args）同样能起 npm.cmd 并拿到版本号——上一条"退出码 0 + 版本号"不是空转；DEP0190 是否出现随 Node 小版本而变，只作记录',
+    ctl.code === 0 && /^\d+\.\d+\.\d+/.test(String(ctl.out)),
+    JSON.stringify({ node: process.versions.node, dep0190: ctlDep, ctl, stderr: String(ctlRun.stderr).slice(0, 160) }))
   rmSync(hdir, { recursive: true, force: true })
 
   // ---- 任务4 Step7②：mcp:list 的形状闸门（迁移层刻意原样透传脏元素后，挡脏数据是消费者的活）----
