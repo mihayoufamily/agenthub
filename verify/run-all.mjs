@@ -48,8 +48,11 @@ const SUITES = [
   { name: 'wf-config', tier: 'gui', script: 'workflow-config-shot.mjs', min: 7, what: '工作流三角色配置条（跨厂商绑定）' },
   { name: 'model-picker', tier: 'gui', script: 'model-picker-shot.mjs', min: 3, what: 'CLI 模型清单进切换弹窗' },
   { name: 'model-list', tier: 'gui', script: 'model-list-check.mjs', min: 4, what: 'CLI 模型清单真实 IPC 返回', gate: false },
-  // cli 层要真跑 codex / CodeBuddy / arkcli（烧真实额度），本轮未实测 → 下限留空；跑过一轮后按实测 PASS 钉上
-  { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', min: 8, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
+  // cli 层要真跑 codex / CodeBuddy / arkcli（烧真实额度）。下限按实测钉：cli-thinking 8、cli-workflow 9；
+  // cross-vendor 留 null（能不能跑通随本机外部服务是否在线而变，钉在任何一侧都是假基线）。
+  // cli-thinking 不 spawn 应用（只 require 编译产物里的适配层 + 真跑 CLI），所以它不受单实例锁影响。
+  // launchesApp 默认 true：新加的套件不声明也会走这道闸门，声明 false 才跳过——漏标只会多等，不会少等。
+  { name: 'cli-thinking', tier: 'cli', script: 'cli-thinking.mjs', min: 8, launchesApp: false, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 吐出 reasoning 事件（codex / CodeBuddy）' },
   { name: 'cli-workflow', tier: 'cli', script: 'cli-workflow-check.mjs', min: 9, timeoutMs: 20 * 60 * 1000, what: '真实 CLI 工作流闭环：思考进卡片 + 产物真实落盘' },
   // `gate: false` —— 这套要三家外部服务同时可用（本机模型端点 + codex + CodeBuddy）。实测一轮里规划角色挑到的
   // 是本地 Qwen，服务没起就"任务失败：fetch failed"，红的是环境不是被测代码，所以只报不拦；
@@ -62,6 +65,18 @@ const wanted = args.only
   : null
 const tiers = ['logic', ...(args.gui ? ['gui'] : []), ...(args['with-cli'] ? ['cli'] : [])]
 const selected = SUITES.filter((s) => tiers.includes(s.tier) && (!wanted || wanted.includes(s.name)))
+
+// 一个套件都没选中就报"全绿"是这台机器的老毛病（跟"退出码 0 但不打印计数行"同一类）：
+// `--only a,b`（少写等号）会被解析成 wanted=['true']、`--only=ui,aproval` 会静默丢掉拼错的那套，
+// 两种都留下"跑了一轮什么都没验"的绿。这里一律 fail-closed。
+if (selected.length === 0) {
+  const names = SUITES.map((s) => s.name).join(', ')
+  const bogus = wanted ? wanted.filter((n) => !SUITES.some((s) => s.name === n)) : []
+  console.log(`[run-all] 没有选中任何套件，判红（不跑不等于跑过）`)
+  if (bogus.length) console.log(`    --only 里这些名字不存在：${bogus.join(', ')}（要写 --only=a,b，空格形式不吃）`)
+  console.log(`    现有套件：${names}；层级开关：logic 默认、--gui、--with-cli`)
+  process.exit(1)
+}
 
 const PASS_RE = /结果[：:]\s*(\d+)\s*PASS\s*\/\s*(\d+)\s*FAIL/
 
@@ -106,9 +121,9 @@ if (!args['no-build']) {
   console.log('[run-all] 构建通过（typecheck + main + renderer）')
 }
 for (const suite of selected) {
-  if (suite.tier !== 'logic') {
+  if (suite.tier !== 'logic' && suite.launchesApp !== false) {
     if (!waitAppGone()) {
-      console.log(`\n[FAIL] ${suite.name}  上一个套件残留的 AgentHub 进程未退出，跳过（避免误报成"起不来"）`)
+      console.log(`\n[FAIL] ${suite.name}  AgentHub.exe 还在运行，跳过（本套要独占启动它）。常见原因不是"上一个套件残留"，而是**用户自己开着应用**或在托盘后台运行——先请用户完全退出再跑`)
       failed++
       results.push({ name: suite.name, pass: null, fail: null, bad: true, gated: suite.gate !== false })
       continue
@@ -172,6 +187,5 @@ console.log('\n================ 汇总 ================')
 for (const x of results) {
   console.log(`  ${x.bad ? (x.gated ? 'FAIL' : 'warn') : 'OK  '}  ${x.name}${x.pass != null ? ` (${x.pass}/${(x.pass ?? 0) + (x.fail ?? 0)})` : ''}`)
 }
-if (results.length === 0) console.log('  没有选中任何套件（检查 --only 拼写）')
 console.log(`\n[run-all] 必过项失败 ${failed} 个${failed ? '' : '，全绿'}`)
 process.exit(failed > 0 ? 1 : 0)
