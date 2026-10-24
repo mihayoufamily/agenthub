@@ -195,7 +195,7 @@ function agentChatToCard(
   user: string,
   cardId: string,
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
-  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number; workflow?: boolean; cliWorkDir?: string; checkpointId?: string; runId?: string }
+  opts?: { maxTokens?: number; modelOverride?: string; cliTimeoutMs?: number; workflow?: boolean; cliWorkDir?: string; checkpointId?: string; runId?: string; planMode?: boolean }
 ): Promise<{ ok: true; text: string } | { ok: false; message: string; tokenLimit?: boolean }> {
   const reqId = uid('req')
   activeModelReqId = reqId
@@ -306,7 +306,10 @@ function agentChatToCard(
                 workflow: opts?.workflow,
                 ...(opts?.checkpointId ? { checkpointId: opts.checkpointId } : {}),
                 // 账本按 runId 归本：预算闸只算这次任务的钱，同时发生的工作站对话不算进来
-                ...(opts?.runId ? { runId: opts.runId } : {})
+                ...(opts?.runId ? { runId: opts.runId } : {}),
+                // 计划轮：渲染层只能给自己**加**这道闸（写类工具在执行前与 schema 两处都拦），
+                // 动不了 access/命令/联网——那些仍以主进程存储配置为唯一来源
+                ...(opts?.planMode ? { planMode: true } : {})
               }
             )
           : Promise.resolve({ ok: false })
@@ -351,8 +354,12 @@ async function runStage(
   ctx: RunContext,
   setRun: (fn: (r: WorkflowRun) => WorkflowRun) => void,
   isCancelled: () => boolean,
-  get: () => WorkflowState
+  get: () => WorkflowState,
+  opts?: { planMode?: boolean }
 ): Promise<StageOutcome | null> {
+  // 计划轮（批次 F）：这一轮只读地看、产出计划。写类工具由主进程真拦（Task 9 那道闸），
+  // CLI 角色拦不到，只能靠下面的提示词请求 + 事后列改动。
+  const planMode = opts?.planMode === true
   const roleCfg = role === 'planner' ? cfg.planner : role === 'executor' ? cfg.executor : cfg.reviewer
   const agent = useAgents.getState().agents.find((a) => a.id === roleCfg.agentId)
   const isDemoAgent = agent?.isDemo === true
@@ -450,17 +457,28 @@ async function runStage(
     ...(memoryBlock ? { memories: memoryBlock } : {})
   }
   const { system, user } = buildRoleMessages(role, promptCtx, execCap, agent.systemPrompt)
+  // 计划轮的措辞按角色分两类，两边都只说真话（spec 批次 F：承诺强度按角色分区）。
+  // 模型 Agent 的写类工具已被主进程真拦（schema 里也没有）；CLI 角色的写盘由它自己的
+  // 子进程执行，这里拦不到，只能请求它只读工作、并在计划轮结束后列出目录改动。
+  // 这句话里不出现"一定没改文件"——那是拦不住的东西，不能承诺。
+  const planNote = planMode
+    ? '\n\n【计划态 · 本轮】本轮交付物是一份计划，不是改动。请只读地把该看清的看清：目标、步骤、影响面、风险、验收标准。\n' +
+      (agent.kind === 'cli'
+        ? '你的写盘与命令由你自己的 CLI 执行，AgentHub 拦不到，所以这一轮请按只读方式工作；目录里多出或少了什么，会在计划轮结束后如实列给用户。'
+        : '你的写类工具（写文件、替换、删除、移动、执行命令）本轮已被关闭，只读与联网工具照常可用。')
+    : ''
   const useOutDir = (role === 'executor' || role === 'reviewer') && !!ctx.outputDir
   // CLI 超时按角色区分：规划 3 分钟 / 审核 5 分钟 / 执行 10 分钟（把无限挂起变有界失败）
   const cliTimeoutMs = role === 'planner' ? 3 * 60_000 : role === 'reviewer' ? 5 * 60_000 : 10 * 60_000
-  const res = await agentChatToCard(agent, system, user, card.id, setRun, {
+  const res = await agentChatToCard(agent, system + planNote, user, card.id, setRun, {
     maxTokens: cfg.maxTokens,
     modelOverride: roleCfg.modelOverride,
     cliTimeoutMs,
     workflow: useOutDir,
     // 整个任务共用一个检查点：回滚回到任务开始前，而不是某一轮开始前
     ...(runId ? { checkpointId: runId, runId } : {}),
-    ...(useOutDir ? { cliWorkDir: ctx.outputDir } : {})
+    ...(useOutDir ? { cliWorkDir: ctx.outputDir } : {}),
+    ...(planMode ? { planMode: true } : {})
   })
   if (isCancelled()) return null
   if (!res.ok) {
@@ -503,7 +521,9 @@ async function runStage(
       status: 'done'
     })
   }))
-  if (role === 'executor') await writeTextArtifactIfNone(ctx, card.id, conclusion, agent, setRun, get)
+  // 计划态下不兜底落盘（spec 推论 B17）：否则"计划正文"自己就成了产物，
+  // 与"本轮不产生文件改动"自相矛盾。批准之后执行角色那一轮照常落盘。
+  if (role === 'executor' && !planMode) await writeTextArtifactIfNone(ctx, card.id, conclusion, agent, setRun, get)
   get().saveRun()
   return { conclusion, ...(parsed?.checklist ? { checklist: parsed.checklist } : {}) }
 }
@@ -911,6 +931,36 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
 
     try {
       setRun((r) => ({ ...r, status: 'running' }))
+
+      // ---------- 计划轮（planFirst，批次 F）----------
+      // 只跑规划角色、这次调用的 grant 带 planMode：批准前不产生文件改动，交付物是 run.planText。
+      // 跑完就停在这里等人批准；批准后由 confirmGate('deliver') 从**执行角色**续跑同一个 run——
+      // 不重放计划轮（重放等于重复烧额度、重复写文件）。
+      if (cfg.planFirst) {
+        const supplements = extractSupplements(get().run)
+        const planCtx: RunContext = {
+          goal,
+          round: 1,
+          maxRounds: cfg.maxRounds,
+          outputDir,
+          ...(conventions ? { conventions } : {}),
+          ...(attachmentText ? { attachmentText } : {}),
+          ...(supplements.length ? { supplements } : {})
+        }
+        const planOut = await runStage('planner', 1, cfg, planCtx, setRun, isCancelled, get, { planMode: true })
+        // 失败 / Token 与预算上限都由 runStage 落到 run 上，这里不另写一套、也不粉饰成"已出计划"
+        if (isCancelled() || !planOut) return
+        setRun((r) => ({
+          ...r,
+          planText: planOut.conclusion.trim(),
+          stage: 'awaiting_plan_approval',
+          status: 'waiting_user',
+          gate: { id: uid('gate'), round: 1, passed: [], issues: [], kind: 'plan' }
+        }))
+        get().saveRun()
+        return
+      }
+
       let round = 1
       let prevReviewIssues: string[] = []
       while (round <= cfg.maxRounds) {
@@ -1137,6 +1187,22 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
 
     if (action === 'stop') {
       get().stop('user')
+      return
+    }
+    // 计划批准门（批次 F）：批准 = 同一个 run 从执行角色继续，带计划上下文，不重放计划轮。
+    // 这道分支也是边界：没批准（既不是 deliver 也不是 stop）就什么都不许跑，
+    // 否则计划态"批准前不改动"这句话在门这里漏掉。
+    if (run.gate.kind === 'plan') {
+      if (action !== 'deliver') {
+        useUi.getState().toast('计划还没批准，任务不会开始执行。点「批准并继续」，或先停止任务。', 'warn')
+        return
+      }
+      useSettings.getState().addMemory('confirm', '用户批准了计划，任务从执行角色继续（同一 run，不重放计划轮）', false)
+      set((s) => ({
+        run: s.run ? { ...s.run, gate: undefined, status: 'running', stage: 'executing', notes: [...(s.run.notes ?? []), '计划已获批准，从执行角色继续（同一任务，不重跑计划轮）'] } : null
+      }))
+      get().saveRun()
+      void resumeRework(get, set, { startRole: 'executor' })
       return
     }
     if (action === 'rework') {

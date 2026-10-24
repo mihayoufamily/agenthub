@@ -219,6 +219,17 @@ const main = async () => {
 
     // 等水合完成再取基线：__ahub_debug 比 store 水合早几十毫秒就绪，读太早会拿到 0 个 Agent
     await waitJs(cdp, 'window.__ahub_debug.state().agents.length > 0 || !!window.__ahub_debug.state().selectedId', 15000)
+    // 起跑前先扫掉本套件专用名的残留（批次 F 复核定位到的偶发根因）：
+    // 一次中途崩掉的运行会把「Mock 工具验证」留在用户配置里，而收尾的按字节还原又把快照里
+    // 那份脏基线写回去 → 下一轮基线=用户 5 + 残留 3，清理（正确地）删干净后得到 5，
+    // "清理后 Agent 数回到基线"于是红，而红的不是被测代码。
+    // 扫在取基线与快照**之前**：这样基线与快照都只含用户自己的 Agent，红才是真红。
+    const staleMocks = await js(cdp, `(() => window.__ahub_debug.state().agents.filter((a) => a.name === ${JSON.stringify(AGENT_NAME)}).length)()`)
+    if (staleMocks > 0) {
+      await js(cdp, `window.__ahub_debug.removeAgentByName(${JSON.stringify(AGENT_NAME)})`)
+      await sleep(1500) // 等持久化落盘：快照要在"干净"之后取
+      console.log(`  清理  起跑前扫掉上一轮遗留的 ${staleMocks} 个「${AGENT_NAME}」Agent（不扫就会污染基线与快照）`)
+    }
     const before = await js(cdp, 'window.__ahub_debug.state()')
     console.log('[ui] 启动前 Agent 数：' + before.agents.length)
     prevOutDir = before.configOutputDir ?? ''
@@ -887,6 +898,67 @@ const main = async () => {
     const st = await js(cdp, 'window.__ahub_debug.state()')
     if (st.run && st.run.status !== 'completed') await js(cdp, 'window.__ahub_debug.stopTask()')
     await sleep(2000)
+
+    // ---- 7c. 批次 F：任务级计划态（开工先出计划 → 批准 → 同一个 run 续跑）----
+    // 走 mock 服务，不烧真实额度。产物目录仍是上面 7/7b 用的 ART，
+    // 这样 Task 11 的目录对照与这几条断言看的是同一个目录。
+    const reqBefore7c = seen.requests.length
+    await js(cdp, `window.__ahub_debug.startPlanTask(${JSON.stringify(baseUrl)}, ${JSON.stringify(SANDBOX)}, '计划态验证：先给出要做什么的计划')`)
+    const planGate = await waitJs(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      return r && r.status === 'waiting_user' && r.gateKind === 'plan'
+        ? { ok: true, planTextLen: r.planTextLen, roles: (r.cardDetails || []).map((c) => c.role), stage: r.stage, runId: r.id }
+        : null
+    })()`, 180000)
+    ok('计划轮结束后挂出的是"计划批准门"（gateKind==="plan"），不是审核门', !!planGate, JSON.stringify(planGate))
+    console.log(`  [7c] 计划正文长度=${planGate && planGate.planTextLen} 卡片=${planGate && planGate.roles.join('/')} stage=${planGate && planGate.stage}`)
+    ok('计划门上有真实计划正文（长度>0；空正文的门等于把人晾在那儿）', !!planGate && planGate.planTextLen > 0, JSON.stringify(planGate))
+    ok('批准前没有执行/审核卡片（任务级：先只读规划一轮）',
+      !!planGate && !/executor|reviewer/.test(planGate.roles.join(',')), JSON.stringify(planGate && planGate.roles))
+    const planArts = await js(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      return { arts: (r.cardDetails || []).reduce((n, c) => n + (c.artifacts || []).length, 0), roles: (r.cardDetails || []).map((c) => c.role) }
+    })()`)
+    ok('计划轮不产生兜底落盘产物（否则计划正文自己成了交付物）', planArts.arts === 0, JSON.stringify(planArts))
+    // 真机侧的 schema 断言：计划轮那次调用，模型收到的工具清单里就不该有写类工具
+    const planBodies = seen.bodies.slice(reqBefore7c)
+    const planToolNames = planBodies.flatMap((b) => (b.tools || []).map((t) => t.function && t.function.name).filter(Boolean))
+    const WRITE5 = ['write_file', 'replace_in_file', 'delete_file', 'move', 'run_command']
+    ok('计划轮发给模型的 schema 里一个写类工具都没有（模型看不到就不会反复试）',
+      planToolNames.length > 0 && !planToolNames.some((n) => WRITE5.includes(n)),
+      `计划轮工具=${[...new Set(planToolNames)].join(',')}`)
+    ok('计划轮的 schema 仍带着只读工具（拦写不拦读，规划才看得清现场）',
+      planToolNames.includes('read_file') && planToolNames.includes('glob_files'),
+      [...new Set(planToolNames)].join(','))
+    // 界面这一半：门必须看得见、正文要落在视口内（"在 DOM 里"不等于"看得见"是本仓的老规矩）
+    await js(cdp, 'window.__ahub_debug.workflow()')
+    await sleep(400)
+    const planDom = await js(cdp, `(() => {
+      const card = document.querySelector('[data-plan-gate]')
+      const txt = document.querySelector('[data-plan-text]')
+      const vw = document.documentElement.clientWidth
+      const vh = document.documentElement.clientHeight
+      const inView = (el) => { if (!el) return null; const b = el.getBoundingClientRect(); return b.width > 2 && b.height > 2 && b.top >= 0 && b.left >= 0 && b.right <= vw + 1 && b.bottom <= vh + 1 }
+      return { card: !!card, cardVisible: inView(card), textVisible: inView(txt), text: txt ? txt.textContent.slice(0, 40) : '', approve: [...document.querySelectorAll('.gate-plan button')].some((b) => /批准并继续/.test(b.textContent)) }
+    })()`)
+    ok('计划批准门在界面上看得见（卡片与正文完整落在视口内，不只是挂在 DOM 上）',
+      planDom.card === true && planDom.cardVisible === true && planDom.textVisible === true, JSON.stringify(planDom))
+    ok('门上有「批准并继续」这个动作（人不点就不会执行）', planDom.approve === true, JSON.stringify(planDom))
+    // 批准：同一个 run 从执行角色续跑，不新建任务、不重放计划轮
+    const runIdBefore = planGate ? planGate.runId : null
+    await js(cdp, 'window.__ahub_debug.passGate()')
+    const afterApprove = await waitJs(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      if (!r) return null
+      const roles = (r.cardDetails || []).map((c) => c.role)
+      return roles.includes('executor') ? { roles, runId: r.id, planners: roles.filter((x) => x === 'planner').length } : null
+    })()`, 180000)
+    ok('批准后同一个 run 继续进三角色链（执行卡片出现，不是新建任务）',
+      !!afterApprove && afterApprove.runId === runIdBefore, JSON.stringify({ before: runIdBefore, after: afterApprove }))
+    ok('计划轮没有被重放（planner 卡片仍只有 1 张：重放等于重复烧额度）',
+      !!afterApprove && afterApprove.planners === 1, JSON.stringify(afterApprove))
+    await js(cdp, 'window.__ahub_debug.stopTask()')
+    await sleep(2000)
     await js(cdp, `window.__ahub_debug.setWorkflowOutputDir(${JSON.stringify(prevOutDir ?? '')})`)
     await sleep(800)
 
@@ -904,6 +976,11 @@ const main = async () => {
     const after2 = after.agents.length === before.agents.length ? after : await (async () => { await sleep(2500); return js(cdp, 'window.__ahub_debug.state()') })()
     console.log(`  [diag] 清理后 Agent 数：即时=${after.agents.length}，2.5s 后=${after2.agents.length}，基线=${before.agents.length}`)
     ok('清理后 Agent 数回到基线', after2.agents.length === before.agents.length, `${after.agents.length} / ${after2.agents.length} vs ${before.agents.length}`)
+    // 单独钉"没有残留"而不是并进上面那条计数比对：计数比对把"删多了"和"删少了"混成一个数字，
+    // 残留恰好是会把下一轮基线污染掉的那一侧，值得一条点名的断言。
+    ok('清理后没有本套件专用名的 Agent 残留（残留会污染下一轮的基线与快照）',
+      after2.agents.every((a) => a.name !== AGENT_NAME),
+      after2.agents.filter((a) => a.name === AGENT_NAME).map((a) => a.id).join(',') || '（无残留）')
   } catch (e) {
     console.error('[ui] 失败：' + (e?.stack || e?.message || e))
     fail++

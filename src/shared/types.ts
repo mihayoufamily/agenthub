@@ -271,7 +271,7 @@ export type TaskStatus =
   /** 折算费用达到预算上限自动停止（非失败：成果与记录保留） */
   | 'budget_limit'
 
-export type Stage = 'planning' | 'executing' | 'reviewing' | 'delivering'
+export type Stage = 'planning' | 'executing' | 'reviewing' | 'delivering' | 'awaiting_plan_approval'
 
 /** 卡片角色 */
 export type CardRole = 'planner' | 'executor' | 'reviewer' | 'delivery' | 'system'
@@ -331,6 +331,12 @@ export interface ReviewGate {
   passed: ChecklistItem[]
   issues: ChecklistItem[]
   reworkFeedback?: string
+  /**
+   * 门的种类。缺省 = 'review'（审核后人工确认，既有语义）；
+   * 'plan' = 计划批准门：批准前不进执行与审核，批准后同一个 run 继续。
+   * 老记录没有这个字段，按 'review' 渲染（不迁移、不猜）。
+   */
+  kind?: 'review' | 'plan'
 }
 
 export interface WorkflowRun {
@@ -350,6 +356,11 @@ export interface WorkflowRun {
   notes?: string[]
   /** 本次任务实际生效的产物目录（由主进程裁决后记录，交付卡片与事后回看都以此为准） */
   outputDir?: string
+  /**
+   * 计划轮（planFirst）产出的计划正文。批准门展示它、执行角色把它当作规划结论；
+   * 点「存为产物」之前它不落盘（spec 批次 F：计划正文自己不该成为交付物）。
+   */
+  planText?: string
 }
 
 export interface WorkflowRoleConfig {
@@ -385,6 +396,12 @@ export interface WorkflowConfig {
    * 留空 = 默认文档目录下的 AgentHub-artifacts。
    */
   outputDir?: string
+  /**
+   * 任务级计划态（批次 F）：开工先跑一轮**只读规划**，产出计划正文并挂批准门；
+   * 用户批准后才进正常三角色链，且同一个 run 继续（不重跑计划轮、不新建任务）。
+   * 缺省 false = 行为与既有任务完全一致。
+   */
+  planFirst?: boolean
 }
 
 /** 可自定义的全局快捷键动作（窗口内生效，非系统级热键） */

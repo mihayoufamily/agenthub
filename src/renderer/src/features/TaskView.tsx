@@ -26,7 +26,8 @@ const STAGE_TEXT: Record<Stage, string> = {
   planning: '规划中',
   executing: '执行中',
   reviewing: '审核中',
-  delivering: '交付中'
+  delivering: '交付中',
+  awaiting_plan_approval: '等待批准计划'
 }
 
 /**
@@ -407,7 +408,13 @@ function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
   )
 }
 
+/** 确认门按种类分流：'plan' 是计划批准门（批准前不进执行与审核），其余仍是审核后人工确认 */
 function GateCard({ run }: { run: WorkflowRun }) {
+  if (run.gate?.kind === 'plan') return <PlanGateCard run={run} />
+  return <ReviewGateCard run={run} />
+}
+
+function ReviewGateCard({ run }: { run: WorkflowRun }) {
   const confirmGate = useWorkflow((s) => s.confirmGate)
   const gate = run.gate!
   const [feedback, setFeedback] = useState('')
@@ -447,6 +454,65 @@ function GateCard({ run }: { run: WorkflowRun }) {
           停止任务
         </Button>
       </div>
+    </div>
+  )
+}
+
+/**
+ * 计划批准门（批次 F）。措辞按 spec 的承诺分区写，一句都不夸大：
+ * 模型 Agent 的写类工具是真拦的（执行前与 schema 两处），CLI 角色的写盘由它自己的
+ * CLI 执行、AgentHub 拦不到——所以这里绝不出现"一定没改文件"。
+ * 正文可选中复制；点「存为产物」之前它不落盘（计划正文自己不该成为交付物）。
+ */
+function PlanGateCard({ run }: { run: WorkflowRun }) {
+  const confirmGate = useWorkflow((s) => s.confirmGate)
+  const [savedPath, setSavedPath] = useState<string | null>(null)
+  const text = run.planText ?? ''
+  const savePlan = async () => {
+    const name = `计划-${run.goal.slice(0, 40).replace(/[\\/:*?"<>|]/g, '_')}.md`
+    const r = await bridge.artifacts.write(name, `# 计划：${run.goal}\n\n${text}\n`, run.id)
+    if (r.ok && r.path) {
+      setSavedPath(r.path)
+      useUi.getState().toast(`计划已存为产物：${r.path}`, 'ok')
+    } else {
+      useUi.getState().toast(`未能存为产物：${r.message ?? '未知原因'}`, 'error')
+    }
+  }
+  const copyPlan = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      useUi.getState().toast('计划正文已复制到剪贴板', 'ok')
+    } catch (e) {
+      // 剪贴板权限没放行时如实说，并给出可行的另一条路（正文本就可选中，还有"存为产物"）
+      useUi.getState().toast(`复制失败：${e instanceof Error ? e.message : '剪贴板不可用'}；正文可框选，或点「存为产物」`, 'warn')
+    }
+  }
+  return (
+    <div className="gate-card card-enter gate-plan" data-plan-gate="1">
+      <div className="gate-title">
+        <Icon name="warn" size={16} /> 计划待批准 · 批准前不执行
+      </div>
+      <div className="gate-plan-note">
+        这一轮是<b>计划态</b>：只读地看，产出的是一份计划，批准后才进执行与审核。
+        模型 Agent 的写类工具（写文件 / 替换 / 删除 / 移动 / 执行命令）本轮已被关闭；
+        CLI 角色的写盘与命令由它自己的 CLI 执行，AgentHub 拦不到，只能事后列出改动——所以这里不说"一定没改文件"。
+      </div>
+      <pre className="gate-plan-text gate-review" data-plan-text="1">
+        {text || '（规划角色没有返回正文）'}
+      </pre>
+      <div className="gate-actions">
+        <Button variant="primary" onClick={() => void confirmGate('deliver')}>
+          <Icon name="check" size={13} /> 批准并继续
+        </Button>
+        <Button variant="secondary" onClick={() => void copyPlan()}>复制正文</Button>
+        <Button variant="secondary" disabled={!text.trim()} onClick={() => void savePlan()}>
+          {savedPath ? '已存为产物' : '存为产物'}
+        </Button>
+        <Button variant="ghost" onClick={() => confirmGate('stop')} style={{ color: 'var(--danger)' }}>
+          停止任务
+        </Button>
+      </div>
+      {savedPath && <div className="gate-plan-note">已写入：{savedPath}</div>}
     </div>
   )
 }

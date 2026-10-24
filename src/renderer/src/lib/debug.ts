@@ -11,6 +11,34 @@ import type { AgentConfig, McpServer } from '@shared/types'
 
 export function installDebugHooks() {
   const w = window as unknown as Record<string, unknown>
+  /**
+   * mock 模型 Agent 绑三角色并起一个真实工作流任务（走本地 mock 服务，不烧真实额度）。
+   * startMockToolTask 与 startPlanTask 共用这一条路，只差 planFirst 一个开关——
+   * 复制一份就会有两处"怎么起一个 mock 任务"的口径，改一边忘一边。
+   */
+  const startMockTask = async (baseUrl: string, dir: string, goal: string, planFirst: boolean) => {
+    const store = useAgents.getState()
+    const r = await store.addCustomModelAgent(
+      { provider: 'Mock', baseUrl, modelId: 'mock-model' },
+      'mock-key'
+    )
+    if (!r.ok || !r.agent) throw new Error(`mock Agent 添加失败：${r.message}`)
+    store.updateAgent(r.agent.id, { name: 'Mock 工具验证', tools: { dir, allowCommands: false } })
+    const agent = useAgents.getState().agents.find((a) => a.id === r.agent!.id)!
+    const mk = () => ({ agentId: agent.id, agentName: agent.name, model: agent.model })
+    useWorkflow.getState().patchConfig({
+      planner: mk(),
+      executor: mk(),
+      reviewer: mk(),
+      reviewMode: 'human',
+      confirmEveryRound: true,
+      planFirst
+    })
+    const wf = useWorkflow.getState()
+    wf.setDraft(goal)
+    void wf.start()
+    return { agentId: agent.id }
+  }
   w.__ahub_debug = {
     // 场景跳转（验证专用：不写 lastMode，避免污染用户"恢复上次工作区"的偏好）
     brand: () => useUi.getState().setScreen('brand'),
@@ -175,21 +203,12 @@ export function installDebugHooks() {
       return r.agent.id
     },
     // 工作流工具 E2E：mock 模型 Agent（含文件工具授权）绑定三角色，跑一轮真实工作流（人工确认停门）
-    startMockToolTask: async (baseUrl: string, dir: string, goal: string) => {
-      const store = useAgents.getState()
-      const r = await store.addCustomModelAgent(
-        { provider: 'Mock', baseUrl, modelId: 'mock-model' },
-        'mock-key'
-      )
-      if (!r.ok || !r.agent) throw new Error(`mock Agent 添加失败：${r.message}`)
-      store.updateAgent(r.agent.id, { name: 'Mock 工具验证', tools: { dir, allowCommands: false } })
-      const agent = useAgents.getState().agents.find((a) => a.id === r.agent!.id)!
-      const mk = () => ({ agentId: agent.id, agentName: agent.name, model: agent.model })
-      useWorkflow.getState().patchConfig({ planner: mk(), executor: mk(), reviewer: mk(), reviewMode: 'human', confirmEveryRound: true })
-      const wf = useWorkflow.getState()
-      wf.setDraft(goal)
-      void wf.start()
-    },
+    startMockToolTask: (baseUrl: string, dir: string, goal: string) => startMockTask(baseUrl, dir, goal, false),
+    /**
+     * 计划态真机验证（批次 F）：同上，但 config.planFirst = true——
+     * 开工先跑一轮只读规划、挂计划批准门，批准后同一个 run 从执行角色续跑。
+     */
+    startPlanTask: (baseUrl: string, dir: string, goal: string) => startMockTask(baseUrl, dir, goal, true),
     // 批量添加演示 Agent（布局压力验证用：1/5/20 个 Agent 场景）
     addDemoAgents: (n: number) => {
       const store = useAgents.getState()
@@ -262,6 +281,10 @@ export function installDebugHooks() {
             status: useWorkflow.getState().run!.status,
             // 确认门要能被验证脚本看见：以前只暴露 status，脚本只能猜"waiting_user 大概是到门了"
             gate: !!useWorkflow.getState().run!.gate,
+            // 门的种类与计划正文：计划批准门与审核门都是 waiting_user + gate=true，
+            // 布尔值分不出这两种，断言"挂出来的是计划门"就必须读这个
+            gateKind: useWorkflow.getState().run!.gate?.kind ?? null,
+            planTextLen: (useWorkflow.getState().run!.planText ?? '').length,
             stage: useWorkflow.getState().run!.stage,
             round: useWorkflow.getState().run!.round,
             cards: useWorkflow.getState().run!.cards.length,
