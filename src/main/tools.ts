@@ -468,7 +468,10 @@ export async function execTool(
   signal?: AbortSignal,
   hooks?: ToolHooks
 ): Promise<ToolExecResult> {
-  const ctx = {
+  // 计划态连用户 Hook 都不跑：Hook 是"每次工具调用时代你执行"的任意命令，它自己就能写盘，
+  // 而"批准前不产生文件改动"是这一轮唯一的承诺——宁可这一轮不执行你配的命令，
+  // 也不让它绕过这道闸。代价如实写在界面上：这一轮 Hook 的否决与审计都不生效。
+  const hookCtx = {
     tool,
     argsJson,
     dir: grant.dir,
@@ -477,7 +480,8 @@ export async function execTool(
     ...(hooks?.meta?.runId ? { runId: hooks.meta.runId } : {}),
     ...(hooks?.meta?.reqId ? { reqId: hooks.meta.reqId } : {})
   }
-  const pre = await runHooks('pre', hooks?.userHooks, ctx, signal)
+  const userHooks = grant.planMode === true ? [] : hooks?.userHooks
+  const pre = await runHooks('pre', userHooks, hookCtx, signal)
   if (pre.blocked) {
     return { ok: false, output: `拒绝：Hook 否决了这次调用。\n${pre.notes.join('\n')}`, ...(pre.runs.length ? { hooks: pre.runs } : {}) }
   }
@@ -485,7 +489,7 @@ export async function execTool(
   const post = await runHooks(
     'post',
     hooks?.userHooks,
-    { ...ctx, result: { ok: res.ok, output: res.output, ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}) } },
+    { ...hookCtx, result: { ok: res.ok, output: res.output, ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}) } },
     signal
   )
   const runs = [...pre.runs, ...post.runs]

@@ -496,7 +496,8 @@ function PlanGateCard({ run }: { run: WorkflowRun }) {
       <div className="gate-plan-note">
         这一轮是<b>计划态</b>：只读地看，产出的是一份计划，批准后才进执行与审核。
         模型 Agent 的写类工具（写文件 / 替换 / 删除 / 移动 / 执行命令）本轮已被关闭，
-        该 Agent 绑定的 MCP 工具本轮整组不启用（判断不了某个 server 会不会写盘，执行权在我们手里就先关掉）。
+        该 Agent 绑定的 MCP 工具本轮整组不接（判断不了某个 server 会不会写盘，执行权在我们手里就先关掉），
+        你配置的 <b>Hook 本轮也不执行</b>——Hook 是自己会写盘的命令，代价是它的否决与审计这一轮也不生效。
         CLI 角色的写盘与命令由它自己的 CLI 执行，AgentHub 拦不到，只能事后列出改动——所以这里不说"一定没改文件"。
       </div>
       <pre className="gate-plan-text gate-review" data-plan-text="1">

@@ -2607,6 +2607,20 @@ console.log('\n[批次 F · 计划态] 批准前不产生文件改动（模型 A
       JSON.stringify(tools.toolDefs(true, true)) === JSON.stringify(tools.toolDefs(true, true, undefined)),
       `缺省=${namesOf(tools.toolDefs(true, true)).join(',')}；显式 undefined=${namesOf(tools.toolDefs(true, true, undefined)).join(',')}`)
 
+    // 计划态连用户 Hook 都不跑：Hook 是"每次工具调用时代你执行"的任意命令，它自己就能写盘，
+    // 而"批准前不产生文件改动"是这一轮唯一的承诺。代价如实认下：这一轮 Hook 的否决与审计也不生效。
+    {
+      const hookRule = (event, name) => [{ id: name, event, command: 'echo hit > ' + name + '.txt', match: '', enabled: true, timeoutMs: 4000 }]
+      const hkPlan = await tools.execTool({ ...planGrant, planMode: true }, 'read_file', JSON.stringify({ path: 'keep.md' }), undefined, { userHooks: hookRule('pre', 'plan-hook-pre') })
+      const hkPlain = await tools.execTool(planGrant, 'read_file', JSON.stringify({ path: 'keep.md' }), undefined, { userHooks: hookRule('pre', 'plain-hook-pre') })
+      ok('计划态下用户 Hook 一条都不跑（连读类调用也一样）——批准前不执行你配的命令',
+        hkPlan.ok === true && !existsSync(join(planRoot, 'plan-hook-pre.txt')) && (hkPlan.hooks?.length ?? 0) === 0,
+        JSON.stringify({ ok: hkPlan.ok, hooks: hkPlan.hooks?.length ?? 0, 文件出现: existsSync(join(planRoot, 'plan-hook-pre.txt')) }))
+      ok('对照轮：不带 planMode 时同一条 Hook 照跑、哨兵文件照出现（所以上一条不是 Hook 本身配错了）',
+        existsSync(join(planRoot, 'plain-hook-pre.txt')) && (hkPlain.hooks?.length ?? 0) >= 1,
+        JSON.stringify({ hooks: hkPlain.hooks?.length ?? 0, 文件出现: existsSync(join(planRoot, 'plain-hook-pre.txt')) }))
+    }
+
     // MCP 与计划态：MCP 的执行体是 AgentHub 自己发起的（route.call 在我们手里），
     // 而 AgentHub 判断不了某个 server 的工具会不会写盘——拦得住的东西不许靠声明绕过去。
     // 这条带**对照轮**：不带 planMode 时同一个 wiring 必须真的被调用，
@@ -2799,6 +2813,22 @@ console.log('\n[批次 C/D 评审留账] 这几条钉住已修的 Minor，不许
   const sbSrc = readSrcSafe('src/renderer/src/features/Sidebar.tsx')
   ok('侧栏 Agent 管理卡片按 agentId 换 key（非受控 textarea 复用实例会把上一个 Agent 的草稿写进下一个）',
     sbSrc.error === null && /key=\{menuFor\}/.test(sbSrc.text), sbSrc.error ?? '卡片挂载处没有 key={menuFor}')
+  // 卡片上下翻转的判定不再用估算常量： MENU_H 已从源码消失，位置由实测高度 + ResizeObserver 决定
+  ok('卡片翻转改用实测高度（MENU_H 那个估算常量必须已消失，且高度变化会重算）',
+    sbSrc.error === null && !/MENU_H/.test(sbSrc.text) && /new ResizeObserver\(place\)/.test(sbSrc.text),
+    `还留着 MENU_H=${/MENU_H/.test(sbSrc.text)} 有 observer=${/new ResizeObserver\(place\)/.test(sbSrc.text)}`)
+  // 确认门通知：门挂出时 status 是 waiting_user（waiting_review 是审核角色正在跑的状态），
+  // 原先那句判定基本永远为假——不是"计划门不发通知"，是所有门都不发。
+  ok('停在任何确认门都会发后台通知（判定要认 waiting_user + gate，不能只认 waiting_review）',
+    /!!run\.gate && \(run\.status === 'waiting_user' \|\| run\.status === 'waiting_review'\)/.test(wfSrc.text) &&
+      /run\.gate\?\.kind === 'plan'/.test(wfSrc.text),
+    'announce 的门判定或计划门分支没到位')
+  // 单次"本任务先出计划"：读一次就清，不落盘——否则下一次提交会被上一次的勾选悄悄带走
+  ok('单次计划开关读一次即清（不污染下一次提交，也不进持久化配置）',
+    /const usePlan = !!cfg\.planFirst \|\| get\(\)\.planNextTask/.test(wfSrc.text) &&
+      /if \(get\(\)\.planNextTask\) set\(\{ planNextTask: false \}\)/.test(wfSrc.text) &&
+      !/planNextTask: get\(\)\.config/.test(wfSrc.text),
+    `读取=${/const usePlan = !!cfg\.planFirst \|\| get\(\)\.planNextTask/.test(wfSrc.text)} 清除=${/if \(get\(\)\.planNextTask\) set\(\{ planNextTask: false \}\)/.test(wfSrc.text)}`)
 }
 
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)

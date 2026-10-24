@@ -6,6 +6,7 @@ import { useSettings } from '../stores/settings'
 import { useUi } from '../stores/ui'
 import { Composer } from '../components/Composer'
 import { Icon } from '../components/Icons'
+import { Switch } from '../components/primitives'
 import { ConfigPanel } from './ConfigPanel'
 import { RolePicker, type RoleKey } from './RolePicker'
 import { OutputDirChip } from '../components/OutputDir'
@@ -18,6 +19,8 @@ export function WorkflowHome() {
   const config = useWorkflow((s) => s.config)
   const start = useWorkflow((s) => s.start)
   const isDemoRun = useWorkflow((s) => s.isDemoRun)
+  const planNextTask = useWorkflow((s) => s.planNextTask)
+  const setPlanNextTask = useWorkflow((s) => s.setPlanNextTask)
   const tasks = useWorkflow((s) => s.tasks)
   const openTask = useWorkflow((s) => s.openTask)
   const removeTask = useWorkflow((s) => s.removeTask)
@@ -162,9 +165,19 @@ export function WorkflowHome() {
           </button>
         </div>
 
-        <button className="btn btn-primary wf-start" style={{ height: 40, minWidth: 120 }} onClick={onBegin}>
-          开始任务
-        </button>
+        <div className="wf-start-row">
+          <Switch
+            label="本任务先出计划"
+            on={planNextTask}
+            onChange={setPlanNextTask}
+          />
+          {/* 单次开关：勾一次即清。不动「工作流设置」里那个全局档——
+              "这一次先出计划"改的应该是这一次，不是以后每一次 */}
+          <span className="wf-start-hint">只影响这一次提交</span>
+          <button className="btn btn-primary wf-start" style={{ height: 40, minWidth: 120 }} onClick={onBegin}>
+            开始任务
+          </button>
+        </div>
 
         {demo && (
           <div style={{ marginTop: 18 }}>

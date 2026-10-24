@@ -74,6 +74,10 @@ const mock = http.createServer((req, res) => {
           }],
           usage: { prompt_tokens: 800, completion_tokens: 40, total_tokens: 840 }
         })
+      } else if (JSON.stringify(body).includes('SENTINEL-EMPTY-PLAN')) {
+        // 计划正文为空的那一档：本轮什么都不返回，只给 stop。
+        // 用来验"空计划不许批准"——这个形状在正常 mock 输出下永远造不出来，只能服务侧配合
+        send({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 } })
       } else {
         for (const t of ['找到了 ', '两个 markdown 文件：', 'note.md 与 src/b.md。']) {
           send({ choices: [{ index: 0, delta: { content: t } }] })
@@ -1066,8 +1070,19 @@ const main = async () => {
     ok('计划未批准时「单角色重跑执行」被拒（不出现执行卡片、仍停在计划门）',
       !bypass.roles.includes('executor') && bypass.status === 'waiting_user' && bypass.gateKind === 'plan',
       JSON.stringify(bypass))
+    // 剪贴板被拒时得如实报错并给出替代路径（正文本可选中，还有"存为产物"）。
+    // Electron 里剪贴板通常是通的，这一档必须临时把它改成 reject 才测得到；测完立刻还原。
+    await js(cdp, `(() => { window.__clipBack = navigator.clipboard; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: () => Promise.reject(new Error('denied by test')) } }); return true })()`)
+    await js(cdp, `(() => { const b = [...document.querySelectorAll('.gate-plan button')].find((x) => /复制正文/.test(x.textContent ?? '')); b?.click(); return true })()`)
+    await sleep(700)
+    const clipToast = await js(cdp, `(() => [...document.querySelectorAll('.toast-item,.toast')].map((t) => t.textContent).join('|'))()`)
+    await js(cdp, `(() => { if (window.__clipBack) Object.defineProperty(navigator, 'clipboard', { configurable: true, value: window.__clipBack }); return true })()`)
+    ok('剪贴板被拒时报的是"复制失败"并指出另两条路，不静默什么都不说',
+      /复制失败/.test(clipToast) && /存为产物|框选/.test(clipToast), JSON.stringify(clipToast.slice(0, 160)))
     // 批准：同一个 run 从执行角色续跑，不新建任务、不重放计划轮
     const runIdBefore = planGate ? planGate.runId : null
+    // 连点两次：门是同步清掉的，第二次应当无事发生——这条承诺以前只靠读代码认定
+    await js(cdp, 'window.__ahub_debug.passGate()')
     await js(cdp, 'window.__ahub_debug.passGate()')
     // 单执行循环的占用位：批准后那条链**同步**占住 _started，所以探针要紧贴在 passGate 之后发，
     // 不能等一会儿再发——等久了链可能已经跑到下一个门、占用位释放，那条断言就变成赌时长（会偶发假红）。
@@ -1078,10 +1093,12 @@ const main = async () => {
       const r = window.__ahub_debug.state().run
       if (!r) return null
       const roles = (r.cardDetails || []).map((c) => c.role)
-      return roles.includes('executor') ? { roles, runId: r.id, planners: roles.filter((x) => x === 'planner').length } : null
+      return roles.includes('executor') ? { roles, runId: r.id, planners: roles.filter((x) => x === 'planner').length, executors: roles.filter((x) => x === 'executor').length } : null
     })()`, 180000)
     ok('批准后同一个 run 继续进三角色链（执行卡片出现，不是新建任务）',
       !!afterApprove && afterApprove.runId === runIdBefore, JSON.stringify({ before: runIdBefore, after: afterApprove }))
+    ok('连点两次「批准并继续」不起第二条链（执行卡只有一张）',
+      !!afterApprove && afterApprove.executors === 1, JSON.stringify(afterApprove && afterApprove.roles))
     ok('链在跑时提交第二个任务被拒（run.id 没被顶掉：续跑那条链占着单执行循环）',
       !!afterSecond && afterSecond.runId === runIdBefore, JSON.stringify({ before: runIdBefore, afterSecond }))
     // "不重放计划轮"的判据是**规划卡张数与批准前一致**：上面已经重出过一次计划，
@@ -1090,6 +1107,56 @@ const main = async () => {
     ok('计划轮没有被重放（批准后规划卡张数与批准前一致：重放等于重复烧额度）',
       !!afterApprove && afterApprove.planners === plannersAtGate,
       JSON.stringify({ atGate: plannersAtGate, after: afterApprove }))
+    await js(cdp, 'window.__ahub_debug.stopTask()')
+    await sleep(2000)
+
+    // ---- 7d. 空计划的门 + 单次"本任务先出计划"（这两条动作面以前只有实现、没有断言）----
+    // mock 服务对含 SENTINEL-EMPTY-PLAN 的目标只回 stop、不回正文，才造得出"空计划"这一档
+    await js(cdp, `window.__ahub_debug.startPlanTask(${JSON.stringify(baseUrl)}, ${JSON.stringify(SANDBOX)}, 'SENTINEL-EMPTY-PLAN 让这一版计划没有正文')`)
+    const emptyGate = await waitJs(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      return r && r.gateKind === 'plan' && r.status === 'waiting_user' ? { planTextLen: r.planTextLen, roles: (r.cardDetails || []).map((c) => c.role) } : null
+    })()`, 180000)
+    ok('规划角色没吐正文时门照样挂出来（不静默把任务判成失败，也不假装出了计划）',
+      !!emptyGate && emptyGate.planTextLen === 0, JSON.stringify(emptyGate))
+    // 判据看**全文**：空计划那句是门上的最后一条 note，早先按前 80 字切会把要验的那句切掉（假红）
+    const emptyBtn = await js(cdp, `(() => { const b = [...document.querySelectorAll('.gate-plan button')].find((x) => /批准并继续/.test(x.textContent ?? '')); return { found: !!b, disabled: b ? b.disabled === true : null, hint: [...document.querySelectorAll('.gate-plan .gate-plan-note')].map((n) => n.textContent).join('|') } })()`)
+    ok('空计划时「批准并继续」禁用，并把原因写在门上看得到（不是让人对着一个没反应的按钮猜）',
+      emptyBtn.found === true && emptyBtn.disabled === true && /空的/.test(emptyBtn.hint), JSON.stringify({ found: emptyBtn.found, disabled: emptyBtn.disabled, hint: (emptyBtn.hint || '').slice(-90) }))
+    // 直接调存储层：绕过"按钮禁用"那一层，验拒绝不只长在脸上
+    await js(cdp, 'window.__ahub_debug.passGate()')
+    await sleep(2500)
+    const afterEmptyApprove = await js(cdp, `(() => {
+      const r = window.__ahub_debug.state().run
+      return { status: r?.status, gateKind: r?.gateKind, roles: (r?.cardDetails || []).map((c) => c.role) }
+    })()`)
+    ok('空计划时存储层也拒批准：执行卡片不出现、门仍挂在原地',
+      !afterEmptyApprove.roles.includes('executor') && afterEmptyApprove.gateKind === 'plan' && afterEmptyApprove.status === 'waiting_user',
+      JSON.stringify(afterEmptyApprove))
+    await js(cdp, 'window.__ahub_debug.stopTask()')
+    await sleep(1500)
+
+    // ② 单次开关：全局计划态关着，只勾「本任务先出计划」——这一次仍应先出计划，且全局配置不被改动
+    await js(cdp, 'window.__ahub_debug.restoreWorkflowConfig({ planFirst: false })')
+    await js(cdp, 'window.__ahub_debug.closeTask()')
+    await js(cdp, 'window.__ahub_debug.workflow()')
+    await sleep(900)
+    const preSingle = await js(cdp, '(() => ({ planFirst: !!window.__ahub_debug.state().config.planFirst }))()')
+    await typeInto('.wf-composer-wrap textarea, .composer textarea', '单次计划态验证：先给计划')
+    await sleep(400)
+    const switchFound = await js(cdp, `(() => { const s = document.querySelector('button.switch[aria-label="本任务先出计划"]'); if (!s) return false; s.click(); return true })()`)
+    await sleep(300)
+    const beginClicked = await js(cdp, `(() => { const b = document.querySelector('button.wf-start'); if (!b) return false; b.click(); return true })()`)
+    const singleGate = await waitJs(cdp, `(() => {
+      const s = window.__ahub_debug.state()
+      const r = s.run
+      return r && r.gateKind === 'plan' ? { gateKind: r.gateKind, configPlanFirst: !!s.config.planFirst, roles: (r.cardDetails || []).map((c) => c.role) } : null
+    })()`, 180000)
+    ok('「本任务先出计划」是单次开关：全局关着也能让这一次先出计划',
+      preSingle.planFirst === false && switchFound === true && beginClicked === true && !!singleGate && singleGate.gateKind === 'plan' && !singleGate.roles.includes('executor'),
+      JSON.stringify({ preSingle, switchFound, beginClicked, singleGate }))
+    ok('这一次之后全局配置仍是关的（单次勾选不许污染以后每一次提交）',
+      !!singleGate && singleGate.configPlanFirst === false, JSON.stringify(singleGate))
     await js(cdp, 'window.__ahub_debug.stopTask()')
     await sleep(2000)
     await js(cdp, `window.__ahub_debug.setWorkflowOutputDir(${JSON.stringify(prevOutDir ?? '')})`)

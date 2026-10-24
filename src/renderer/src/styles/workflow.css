@@ -257,8 +257,10 @@
 .gate-card .gate-title { font-size: 14px; font-weight: 700; color: var(--warn); display: flex; align-items: center; gap: 8px; }
 .gate-card .gate-review { font-size: 13px; color: var(--text); line-height: 1.6; }
 .gate-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-/* ---- 计划批准门（批次 F）：批准前不进执行与审核，正文可读、点存才落盘 ---- */
-.gate-plan-text {
+/* ---- 开始任务那一行：单次"先出计划"开关 + 提示 + 主按钮 ---- */
+.wf-start-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.wf-start-hint { font-size: 12px; color: var(--text-3); }
+/* ---- 计划批准门（批次 F）：批准前不进执行与审核，正文可读、点存才落盘 ---- */.gate-plan-text {
   margin: 0;
   padding: 10px 12px;
   border-radius: var(--r-sm);

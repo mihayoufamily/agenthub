@@ -58,6 +58,12 @@ interface WorkflowState {
   _started: boolean
   /** "继续修改"携带的上一任务上下文（start 时注入规划角色后清除） */
   _carryOver: string | null
+  /**
+   * 只对本次提交生效的计划态开关（不落盘）：全局开关在"工作流设置"里，
+   * 但"这一次先出个计划"不该改动用户的全局配置——那是改完就忘了的隐性提权/降权。
+   */
+  planNextTask: boolean
+  setPlanNextTask: (v: boolean) => void
 
   setDraft: (t: string) => void
   setAttachments: (a: Attachment[]) => void
@@ -112,15 +118,30 @@ let lastAnnounce = ''
  * 界面内的 toast 看不见。窗口聚焦时主进程自己跳过，不重复打扰。
  */
 function announce(run: WorkflowRun) {
-  const atGate = run.status === 'waiting_review' && !!run.gate
+  // 门挂出时 status 是 `waiting_user`（`waiting_review` 是审核角色**正在跑**的那个状态），
+  // 所以原先那句 `waiting_review && gate` 基本永远为假——不是"计划门不发通知"，是所有确认门都不发。
+  const atGate = !!run.gate && (run.status === 'waiting_user' || run.status === 'waiting_review')
+  const isPlanGate = run.gate?.kind === 'plan'
   const terminal = ['completed', 'failed', 'cancelled', 'timeout', 'rework_limit', 'token_limit', 'budget_limit'].includes(run.status)
   if (!atGate && !terminal) return
   const key = `${run.id}:${run.status}`
   if (key === lastAnnounce) return
   lastAnnounce = key
   const goal = run.goal.length > 18 ? run.goal.slice(0, 18) + '…' : run.goal
-  const title = atGate ? `等你确认：${goal}` : run.status === 'completed' ? `已完成：${goal}` : run.status === 'failed' ? `失败：${goal}` : `已停止：${goal}`
-  const body = atGate ? '回到 AgentHub 通过确认门，或填返工意见' : '在左侧「工作流」里点开查看结果与产物'
+  const title = isPlanGate
+    ? `等你批准计划：${goal}`
+    : atGate
+      ? `等你确认：${goal}`
+      : run.status === 'completed'
+        ? `已完成：${goal}`
+        : run.status === 'failed'
+          ? `失败：${goal}`
+          : `已停止：${goal}`
+  const body = isPlanGate
+    ? '批准后任务才开始执行；不批准可以填意见重出一版计划'
+    : atGate
+      ? '回到 AgentHub 通过确认门，或填返工意见'
+      : '在左侧「工作流」里点开查看结果与产物'
   void bridge.app.notify(title, body)
 }
 
@@ -539,7 +560,7 @@ async function runStage(
     ? '\n\n【计划态 · 本轮】本轮交付物是一份计划，不是改动。请只读地把该看清的看清：目标、步骤、影响面、风险、验收标准。\n' +
       (agent.kind === 'cli'
         ? '你的写盘与命令由你自己的 CLI 执行，AgentHub 拦不到，所以这一轮请按只读方式工作；目录里多出或少了什么，会在计划轮结束后如实列给用户。'
-        : '你的写类工具（写文件、替换、删除、移动、执行命令）本轮已被关闭，只读与联网工具照常可用。')
+        : '你的写类工具（写文件、替换、删除、移动、执行命令）本轮已被关闭，MCP 工具本轮不可用，只读与联网工具照常可用。')
     : ''
   const useOutDir = (role === 'executor' || role === 'reviewer') && !!ctx.outputDir
   // CLI 超时按角色区分：规划 3 分钟 / 审核 5 分钟 / 执行 10 分钟（把无限挂起变有界失败）
@@ -777,8 +798,10 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
   _cancelled: false,
   _started: false,
   _carryOver: null,
+  planNextTask: false,
 
   setDraft: (t) => set({ draft: t }),
+  setPlanNextTask: (v) => set({ planNextTask: v }),
   setAttachments: (a) => set({ attachments: a }),
   patchConfig: (p) => {
     set((s) => ({ config: { ...s.config, ...p } }))
@@ -968,6 +991,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
 
     const demo = get().isDemoRun()
     const cfg = { ...get().config }
+    // 这一次要不要先出计划：全局开关开着，或用户勾了"本任务先出计划"（勾一次即清，不落盘）
+    const usePlan = !!cfg.planFirst || get().planNextTask
+    if (get().planNextTask) set({ planNextTask: false })
     // 生效的产物目录由主进程裁决（配置留空 = 文档目录下的 AgentHub-artifacts）
     const outputDir = await bridge.artifacts.dir()
     const carryOver = get()._carryOver
@@ -991,7 +1017,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       demo,
       outputDir,
       // 计划态跟着这条任务走（不是"当前配置里有没有开"），续跑判定才有依据
-      ...(cfg.planFirst ? { planFirst: true } : {})
+      ...(usePlan ? { planFirst: true } : {})
     }
     set({ run, _cancelled: false, _started: true, _carryOver: null })
     useSettings.getState().addMemory('goal', `任务目标：${goal}`, false)
@@ -1015,7 +1041,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       // 只跑规划角色、这次调用的 grant 带 planMode：批准前不产生文件改动，交付物是 run.planText。
       // 跑完就停在这里等人批准；批准后由 confirmGate('deliver') 从**执行角色**续跑同一个 run——
       // 不重放计划轮（重放等于重复烧额度、重复写文件）。_started 由 start() 自己收尾。
-      if (cfg.planFirst) {
+      if (usePlan) {
         await runPlanRound(get, set, { attachmentText, carryOver: carryOver ?? undefined })
         return
       }

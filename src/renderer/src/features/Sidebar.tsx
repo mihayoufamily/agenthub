@@ -11,7 +11,9 @@ import { cls, fmtTokens } from '../lib/utils'
 import { WfTaskList } from './WfChips'
 
 const MENU_W = 190
-const MENU_H = 336 // Agent 管理卡片的实测高度（翻转判定用；跑完 ui-shot 的"菜单完整落在视口内"断言后按实测校准）
+// 卡片高度**不再是常量**：绑定的 Skill 数量、提示词长度、窗口宽度（换行）都会改它。
+// 原先写死一个估算值做上下翻转判定，估偏就会裁掉一截（计划缺口 #3 要求实测回填），
+// 现在改成打开后量真实高度来定位，内容变化时由 ResizeObserver 再校正。
 
 export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => void }) {
   const agents = useAgents((s) => s.agents)
@@ -31,6 +33,7 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
   const [renaming, setRenaming] = useState<string | null>(null)
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
   const menuBtnRefs = useRef<Record<string, HTMLElement | null>>({})
+  const menuRef = useRef<HTMLDivElement | null>(null)
 
   const onItemSelect = (id: string) => {
     select(id)
@@ -48,11 +51,32 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
     if (btn) {
       const r = btn.getBoundingClientRect()
       const left = Math.max(8, Math.min(r.right - MENU_W, window.innerWidth - MENU_W - 8))
-      const top = r.bottom + MENU_H + 6 > window.innerHeight - 8 ? r.top - MENU_H - 4 : r.bottom + 4
-      setMenuPos({ top, left })
+      // 先按"放在按钮下方"起个位置让元素能挂载，真实高度由下面的 effect 量完再校正
+      setMenuPos({ top: r.bottom + 4, left })
       setMenuFor(id)
     }
   }
+
+  /** 按**实测高度**决定往上翻还是往下放；技能清单是异步拉的，高度变了要重算 */
+  useEffect(() => {
+    const el = menuRef.current
+    if (!menuFor || !el) return
+    const place = () => {
+      const btn = menuBtnRefs.current[menuFor]
+      if (!btn) return
+      const r = btn.getBoundingClientRect()
+      const h = el.getBoundingClientRect().height
+      const left = Math.max(8, Math.min(r.right - MENU_W, window.innerWidth - MENU_W - 8))
+      const fitsBelow = r.bottom + h + 6 <= window.innerHeight - 8
+      const top = fitsBelow ? r.bottom + 4 : Math.max(8, r.top - h - 4)
+      // 同位置不回写：否则 ResizeObserver → setState → 重渲染 → observer 再触发，会自己转起来
+      setMenuPos((cur) => (cur && Math.abs(cur.top - top) < 1 && Math.abs(cur.left - left) < 1 ? cur : { top, left }))
+    }
+    place()
+    const ro = new ResizeObserver(place)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [menuFor])
 
   // 点击外部 / Escape 关闭菜单（.more 按钮自身由 openMenu 处理 toggle）
   useEffect(() => {
@@ -163,9 +187,10 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
       {/* Agent 管理卡片：fixed 定位（脱离滚动容器），按剩余空间向上/向下翻转 */}
       {menuFor && menuPos && (
         <div
+          ref={menuRef}
           className={cls('wf-detail', 'agent-menu')}
-          // maxHeight/overflow 是给 MENU_H 那个估算值兜底的：卡片高度会随绑定的 Skill 数量长
-          // （0–120px），估算偏小时翻转判定不够，没有这两条就会被视口裁掉一截。
+          // maxHeight/overflow 是第二层兜底：卡片高度会随绑定的 Skill 数量长
+          // （0–120px），窗口又可能很矮；量完高度定位之后仍然装不进视口时，让它自己滚动而不是被裁掉。
           style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, width: MENU_W, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto', zIndex: 70 }}
         >
           <AgentManageCard
