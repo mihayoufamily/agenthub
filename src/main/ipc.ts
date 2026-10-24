@@ -7,8 +7,8 @@ import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer } from '../shared/types'
-import { configurePriceOverrides } from '../shared/overrides'
-import { partitionHookRules } from '../shared/hooks'
+import { configurePriceOverrides, partitionPriceOverrides } from '../shared/overrides'
+import { partitionHookRules, sanitizeHookList } from '../shared/hooks'
 import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
 import { normalizePolicy, VERIFY_SWITCH } from '../shared/compat'
 import { execTool, type CommandApprover } from './tools'
@@ -250,7 +250,10 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   ipcMain.handle('mcp:trust:set', (_e, id: string, trusted: boolean) => ({ ok: true, list: approvals.setMcpTrust(String(id ?? ''), !!trusted) }))
 
   // ---------- 工具 Hook（用户在设置里配置） ----------
-  ipcMain.handle('hooks:list', () => getStore().getConfig().hooks ?? [])
+  // 读路径的形状闸门（复审 Out-of-Scope 里点出的：hooks:list 原样返回整表，手改 config.json 塞个
+  // null 会让设置页 rules.map 当场解引用炸掉，比"存了但看不见"更糟）。与 mcp:list 同一口径：
+  // 读的时候滤掉非对象，写的时候由 partitionHookRules 点名拒收。
+  ipcMain.handle('hooks:list', () => sanitizeHookList(getStore().getConfig().hooks))
   ipcMain.handle('hooks:set', (_e, list: HookRule[]) => {
     // 闸门抽到 shared/hooks.partitionHookRules（内部逐条跑 validateHook(h)，逻辑层可断言）：
     // 校验不通过的条目**原样留在配置里**（不删用户数据），只把原因回给界面点名显示。
@@ -264,19 +267,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- 自定义单价（覆盖内置表；随配置导出导入） ----------
   ipcMain.handle('prices:get', () => getStore().getConfig().priceOverrides ?? [])
   ipcMain.handle('prices:set', (_e, list: PriceOverride[]) => {
-    const clean = (Array.isArray(list) ? list : [])
-      .filter((o) => o && typeof o.pattern === 'string' && o.pattern.trim())
-      .map((o) => ({
-        pattern: o.pattern.trim(),
-        input: Number(o.input) || 0,
-        output: Number(o.output) || 0,
-        ...(o.cacheHit != null ? { cacheHit: Number(o.cacheHit) || 0 } : {}),
-        asOf: String(o.asOf ?? '').slice(0, 40)
-      }))
-      .slice(0, 100)
-    getStore().setPriceOverrides(clean)
-    configurePriceOverrides(clean)
-    return { ok: true, list: clean }
+    // 闸门抽到 shared/overrides.partitionPriceOverrides（逻辑层可断言）：空模式与条数截断以前都是静默丢
+    const { kept, rejected } = partitionPriceOverrides(list)
+    getStore().setPriceOverrides(kept)
+    configurePriceOverrides(kept)
+    return { ok: true, list: kept, rejected }
   })
 
   ipcMain.handle('app:menuSummary', () => {

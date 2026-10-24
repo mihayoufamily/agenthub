@@ -48,8 +48,9 @@ export function sanitizeMcpList(list: unknown): McpServer[] {
 }
 
 /**
- * 一张 mcpServers 表最多存多少条。界面上一次只加一条，所以这个界挡的是"整表暴涨"，
- * 不是日常使用（与 shared/hooks.HOOK_RULES_MAX 同一取向）。
+ * 一张 mcpServers 表"界面上"最多加多少条。**只作用于新增那一关**（设置页的「添加并探测」到上限就禁用），
+ * 不再作用于落盘：保存整表时按条数截断，等于替用户删掉表尾的 server（连带它的信任一起作废）——
+ * 而这正是本闸门要消灭的那类静默（与 shared/hooks.HOOK_RULES_MAX 同一取向）。
  */
 export const MCP_SERVERS_MAX = 20
 
@@ -95,10 +96,6 @@ export function partitionMcpServers(list: unknown): { kept: McpServer[]; rejecte
     const id = String((raw && typeof raw === 'object' ? (raw as { id?: unknown }).id : undefined) ?? `#${i + 1}`)
     if (!isShapedEntry(raw)) {
       rejected.push({ id, message: MCP_SHAPE_REJECT_MESSAGE })
-      continue
-    }
-    if (kept.length >= MCP_SERVERS_MAX) {
-      rejected.push({ id, message: `最多 ${MCP_SERVERS_MAX} 条，这一条没有保存` })
       continue
     }
     kept.push(stampMcpLegacy({ ...raw, id: raw.id || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` }))

@@ -86,8 +86,9 @@ export function validateHook(rule: { event?: string; command?: string; match?: s
 }
 
 /**
- * 一张 hooks 表最多存多少条。界面上一次只加一条，所以这个界挡的是"整表暴涨"
- * （脚本化写入、导入进来的异常配置），不是日常使用。
+ * 一张 hooks 表"界面上"最多加多少条。**只作用于新增那一关**（设置页的添加按钮到上限就禁用），
+ * 不再作用于落盘：保存整表时按条数截断等于替用户删数据，而这正是本闸门要消灭的那类静默。
+ * 手改/导入进来 50 条的配置会原样保住，只是界面不再让你继续加。
  */
 export const HOOK_RULES_MAX = 40
 
@@ -106,15 +107,26 @@ export const HOOK_RULES_MAX = 40
  * 设置页看得见也改得动；MCP 那一侧的读路径（sanitizeMcpList）本来就不返回形状不合格的记录，
  * 保留只会造成"存了但看不见"，所以那边是点名回界面而不保留（见 shared/mcp-list.partitionMcpServers）。
  *
- * 上限只挡**合法条目**的增长：校验不通过的不计数，否则一条超长旧规则会顺带把表尾的合法规则挤出去。
- * 残片（null / 字符串 / 数字）不保留：那不是用户数据，而 hooks:list 原样返回整表，
- * 留着会让设置页的 rules.map 当场解引用炸掉。
+ * 上限只挡**界面新增**，不在落盘时截断（复审 finding 3 的残口）：旧实现在这里
+ * `if (valid >= HOOK_RULES_MAX) { rejected.push('最多 40 条，这一条没有保存'); continue }`
+ * ——那仍然是把用户表尾的条目删掉、只是顺带说了一声。现在合法条目**一律保留**，
+ * 上限交给设置页的添加按钮（到上限禁用并说明），"不删用户数据"才对校验与条数两类都成立。
+ * 残片（null / 字符串 / 数字）不保留：那不是用户数据，而 hooks:list 现在也会滤掉非对象
+ * （读路径的形状闸门见 src/main/ipc.ts），留着只会变成"存了但看不见又改不动"。
  */
+/**
+ * `hooks:list` 的读路径形状闸门（与 mcp-list.sanitizeMcpList 同一口径）：
+ * 手改 config.json 塞进来的 null / 字符串 / 数字不进渲染层——否则设置页 `rules.map` 当场解引用炸掉，
+ * 而且炸在读取阶段，用户连"哪一条坏了"都看不到。非数组一律当空表。
+ */
+export function sanitizeHookList(list: unknown): HookRule[] {
+  return Array.isArray(list) ? (list.filter((h) => !!h && typeof h === 'object') as HookRule[]) : []
+}
+
 export function partitionHookRules(list: unknown): { kept: HookRule[]; rejected: RejectedEntry[] } {
   const incoming: unknown[] = Array.isArray(list) ? list : []
   const kept: HookRule[] = []
   const rejected: RejectedEntry[] = []
-  let valid = 0
   for (let i = 0; i < incoming.length; i++) {
     const raw = incoming[i]
     const isRule = !!raw && typeof raw === 'object'
@@ -126,11 +138,6 @@ export function partitionHookRules(list: unknown): { kept: HookRule[]; rejected:
       if (isRule) kept.push(raw as HookRule)
       continue
     }
-    if (valid >= HOOK_RULES_MAX) {
-      rejected.push({ id, message: `最多 ${HOOK_RULES_MAX} 条，这一条没有保存` })
-      continue
-    }
-    valid += 1
     kept.push(raw as HookRule)
   }
   return { kept, rejected }

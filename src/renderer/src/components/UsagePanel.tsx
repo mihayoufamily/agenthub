@@ -1,7 +1,7 @@
 // 用量统计与最近调用：数据源是主进程的调用账本（只含元数据，不含正文与凭据）。
 // 设置页与对话栏的快捷入口共用这一份实现，避免两处口径不一致。
 import React, { useEffect, useState } from 'react'
-import type { LedgerEntry, LedgerUsageRow, PriceOverride } from '@shared/types'
+import type { LedgerEntry, LedgerUsageRow, PriceOverride, RejectedEntry } from '@shared/types'
 import { PRICING_AS_OF, validatePriceOverride, configurePriceOverrides, pricingFreshness } from '@shared/pricing'
 import { bridge } from '../lib/ipc'
 import { useUi } from '../stores/ui'
@@ -161,6 +161,7 @@ function PriceEditor() {
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [err, setErr] = useState('')
+  const [rejected, setRejected] = useState<RejectedEntry[]>([])
 
   useEffect(() => {
     void bridge.prices.get().then(setList)
@@ -171,7 +172,12 @@ function PriceEditor() {
     // 主进程落盘 + 本进程立即生效：否则刚填的价要等重启才起作用
     configurePriceOverrides(r.list)
     setList(r.list)
-    useUi.getState().toast('单价已更新，后续费用折算按新价计算', 'ok')
+    // 没有生效的行必须说出来：以前是 .filter/.slice 静默丢，删了行却提示"已更新"
+    setRejected(r.rejected ?? [])
+    useUi.getState().toast(
+      r.rejected?.length ? `单价已更新；${r.rejected.length} 行没有生效（原因见下方）` : '单价已更新，后续费用折算按新价计算',
+      r.rejected?.length ? 'warn' : 'ok'
+    )
   }
 
   const add = async () => {
@@ -210,6 +216,16 @@ function PriceEditor() {
         <Button variant="secondary" onClick={() => void add()}>添加</Button>
       </div>
       {err && <div className="price-err" data-price-err>{err}</div>}
+      {rejected.length > 0 && (
+        <div className="price-err" data-price-rejected style={{ lineHeight: 1.7 }}>
+          {rejected.length} 行没有生效：
+          {rejected.map((r) => (
+            <div key={r.id} data-price-rejected-id={r.id}>
+              <code>{r.id}</code>：{r.message}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

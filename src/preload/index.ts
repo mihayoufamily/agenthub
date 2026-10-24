@@ -150,7 +150,8 @@ const api = {
   /** 自定义单价覆盖（内置表是手写快照，价格变了由你填，带填写日期） */
   prices: {
     get: () => ipcRenderer.invoke('prices:get') as Promise<PriceOverride[]>,
-    set: (list: PriceOverride[]) => ipcRenderer.invoke('prices:set', list) as Promise<{ ok: boolean; list: PriceOverride[] }>
+    /** rejected：空模式等没有生效的行会被点名回界面，不再由 .filter/.slice 静默丢掉 */
+    set: (list: PriceOverride[]) => ipcRenderer.invoke('prices:set', list) as Promise<{ ok: boolean; list: PriceOverride[]; rejected: RejectedEntry[] }>
   },
   /** 调用账本：只含元数据的用量与排障数据（不含正文与凭据） */
   ledger: {

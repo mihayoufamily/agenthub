@@ -5,8 +5,8 @@ import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow } from '../stores/workflow'
 import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe, RejectedEntry } from '@shared/types'
-import { validateHook, HOOK_COMMAND_MAX_LENGTH } from '@shared/hooks'
-import { MCP_SHAPE_REJECT_MESSAGE } from '@shared/mcp-list'
+import { validateHook, HOOK_COMMAND_MAX_LENGTH, HOOK_RULES_MAX } from '@shared/hooks'
+import { MCP_SHAPE_REJECT_MESSAGE, MCP_SERVERS_MAX } from '@shared/mcp-list'
 import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
 import { fingerprintCommand, redactCommandForDisplay } from '@shared/approvals'
 import { compatBadgeText, SANDBOX_FALLBACK_OPTIONS } from '@shared/compat'
@@ -612,8 +612,14 @@ function HookSection() {
           style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }}
           data-testid="hook-command"
         />
-        <Button variant="primary" onClick={() => void add()}>添加</Button>
+        <Button variant="primary" disabled={rules.length >= HOOK_RULES_MAX} onClick={() => void add()}>添加</Button>
       </div>
+      {/* 条数上限只在**新增**这一关：保存整表时不再截断（截断＝替用户删数据） */}
+      {rules.length >= HOOK_RULES_MAX && (
+        <div style={{ fontSize: 11.5, color: 'var(--warn)', marginTop: 6 }} data-hook-cap>
+          已有 {rules.length} 条，到上限 {HOOK_RULES_MAX} 条了：要再加请先删掉一条。保存不会再替你截断表尾。
+        </div>
+      )}
       {err && <div style={{ fontSize: 12, color: 'var(--danger)', marginTop: 6 }} data-hook-err>{err}</div>}
     </div>
   )
@@ -791,8 +797,13 @@ function McpSection() {
       <div style={{ display: 'flex', gap: 6 }}>
         <input placeholder="名称" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} style={{ width: 140, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-name" />
         <input placeholder='启动命令，例如 node "C:\path\to\server.js" 或 npx -y @some/mcp-server' value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-command" />
-        <Button variant="primary" onClick={() => void add()}>添加并探测</Button>
+        <Button variant="primary" disabled={list.length >= MCP_SERVERS_MAX} onClick={() => void add()}>添加并探测</Button>
       </div>
+      {list.length >= MCP_SERVERS_MAX && (
+        <div style={{ fontSize: 11.5, color: 'var(--warn)', marginTop: 6 }} data-mcp-cap>
+          已有 {list.length} 个，到上限 {MCP_SERVERS_MAX} 个了：要再加请先删掉一个。保存不会再替你截断表尾。
+        </div>
+      )}
       {refillTarget && list.some((x) => x.id === refillTarget.id) && (
         <div style={{ fontSize: 11.5, color: 'var(--warn)', marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' }} data-testid="mcp-refill-note">
           <span>
