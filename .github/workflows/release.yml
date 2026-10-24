@@ -36,15 +36,42 @@ jobs:
         shell: pwsh
         run: |
           $zip = "AgentHub-${{ github.ref_name }}-win-x64-portable.zip"
+          $dir = "release/AgentHub-win-x64"
+          $tar = "$env:SystemRoot\System32\tar.exe"
           if (Test-Path $zip) { Remove-Item $zip -Force }
+          # 先验"打包目录本身像不像真产物"，再谈压缩。实测踩过两种空壳：
+          # pack:portable 找不到 electron 二进制时是**报错退出**（这一步会红），
+          # 而 electron-builder 那条路会建出**空目录**——所以必须按文件逐个查，不能只看目录存在。
+          # 清单里刻意不放那个中文名说明文件：本机 PowerShell 5.1 会把无 BOM 的脚本按 ANSI 读，
+          # 名字一进字面量就成乱码（实测会把好包判成"缺文件"），守"pack 真跑过"用上面这几个就够了。
+          foreach ($must in @('AgentHub.exe', 'resources/app/package.json', 'resources/app/out/main/index.js', 'resources/app/dist/renderer/bundle.js', 'resources/app/build/icon.ico', 'start-compat-mode.cmd')) {
+            if (-not (Test-Path (Join-Path $dir $must))) { Write-Error "便携目录缺 $must"; exit 1 }
+          }
+          $src = Get-ChildItem -Path $dir -Recurse -File -Force | Measure-Object -Property Length -Sum
+          Write-Host "源目录：$($src.Count) 个文件，$([math]::Round($src.Sum / 1MB, 1)) MB"
           # 实测（319MB 真产物）：Compress-Archive -Path release/AgentHub-win-x64 把 118 个条目全套进
           # AgentHub-win-x64/ 一层，解压后根目录没有 AgentHub.exe，与历史包/使用说明不一致；用系统自带 bsdtar
-          & $env:SystemRoot\System32\tar.exe -a -c -f $zip -C release/AgentHub-win-x64 .
+          & $tar -a -c -f $zip -C $dir .
+          # pwsh 不会因为原生命令非零退出而停，必须自己接 $LASTEXITCODE——
+          # 上一轮就是死在这：tar 写包时报错、zip 文件照样存在，Test-Path 过关，问题被推到下一步
+          if ($LASTEXITCODE -ne 0) { Write-Error "bsdtar 创建 zip 失败（exit=$LASTEXITCODE）"; exit 1 }
           if (-not (Test-Path $zip)) { Write-Error "zip 未生成"; exit 1 }
-          # 自检：包内必须有根级 AgentHub.exe。注意 -notmatch 作用在数组上是「筛选」不是布尔，
-          # 写成 if ($entries -notmatch …) 会让平铺的好包也判失败，所以这里用 -match 取反。
-          $entries = & $env:SystemRoot\System32\tar.exe -tf $zip
-          if (-not ($entries -match '^\./AgentHub\.exe$' -or $entries -match '^AgentHub\.exe$')) { Write-Error "包内没有根级 AgentHub.exe：$($entries[0..5] -join ', ')"; exit 1 }
+          $zipBytes = (Get-Item $zip).Length
+          Write-Host "zip：$([math]::Round($zipBytes / 1MB, 1)) MB"
+          if ($zipBytes -lt 50MB) { Write-Error "zip 只有 $([math]::Round($zipBytes / 1MB, 1)) MB，不像是完整便携包"; exit 1 }
+          # 自检改成"真解一遍"而不是 `tar -tf`：用户拿到包做的事是解压，
+          # 只有解出来能看见根级 AgentHub.exe、文件数对得上，这个包才算数。
+          $tmp = Join-Path $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }) "zipcheck"
+          if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+          New-Item -ItemType Directory -Path $tmp | Out-Null
+          & $tar -xf $zip -C $tmp
+          if ($LASTEXITCODE -ne 0) { Write-Error "bsdtar 解 zip 失败（exit=$LASTEXITCODE）"; exit 1 }
+          if (-not (Test-Path (Join-Path $tmp 'AgentHub.exe'))) { Write-Error "解压后根目录没有 AgentHub.exe（平铺结构被改坏了）"; exit 1 }
+          $out = Get-ChildItem -Path $tmp -Recurse -File -Force | Measure-Object -Property Length -Sum
+          if ($out.Count -ne $src.Count) { Write-Error "包内文件数与源目录不符：$($out.Count) vs $($src.Count)"; exit 1 }
+          Write-Host "解包自检：$($out.Count) 个文件，$([math]::Round($out.Sum / 1MB, 1)) MB"
+          # 顺手把 sha256 打进日志，与 GitHub 侧资产的 digest 对得上才叫"发出去的就是这个包"
+          Write-Host "sha256：$((Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower())"
 
       - uses: softprops/action-gh-release@v2
         with:
