@@ -293,7 +293,11 @@ console.log('\n[F] run_command 输出截断边界（UTF-8 不被误解码为 GBK
 {
   // 60000 个"中" = 180KB UTF-8，超过 100KB 上限且截断点必落在多字节字符中间
   // commandPolicy:'auto' = 跳过命令审批（本节测的是输出解码，不是审批）
-  const r = await execTool({ dir: tmp, allowCommands: true, commandPolicy: 'auto' }, 'run_command', JSON.stringify({ command: `node -e "process.stdout.write('中'.repeat(60000))"` }))
+  // 命令行里**不出现非 ASCII**：以前直接把 '中' 写进 `node -e "…"`，它会穿过 cmd 用控制台代码页
+  // 解释一遍——中文 Windows 上是 UTF-8/936，CI 的 en-US 上是 437，同一个字符到 node 的 argv 里
+  // 可能已经变样（CI 实测：输出短到没触发截断，于是"标注了截断"红）。改成 charCode 构造，
+  // 命令行纯 ASCII，输出仍是 60000 个 UTF-8 中（180KB），三台机器上完全一致。
+  const r = await execTool({ dir: tmp, allowCommands: true, commandPolicy: 'auto' }, 'run_command', JSON.stringify({ command: `node -e "process.stdout.write(String.fromCharCode(0x4e2d).repeat(60000))"` }))
   ok('截断后仍为正常中文（无替换符）', r.ok && r.output.includes('中') && !r.output.includes('�'), r.output.slice(0, 60))
   ok('未被按 GBK 误解码（无"涓"类乱码）', !/涓|锟/.test(r.output), r.output.slice(0, 60))
   ok('标注了截断', r.output.includes('截断'), r.output.slice(-40))
@@ -1445,6 +1449,12 @@ child.once('close', (code) => { clearTimeout(wd); console.log(JSON.stringify({ c
     live.code === 0 && /^\d+\.\d+\.\d+/.test(String(live.out)) && !/DEP0190/.test(String(liveRun.stderr)),
     JSON.stringify({ live, stderr: String(liveRun.stderr).slice(0, 180) }))
   // 对照组：故意用回旧形状（cmd.exe 当 file 还叠 shell:true），确认上一条不是空断言
+  // 前提：DEP0190 是 Node ≥ 22 才有的弃用警告（Electron 37 自带 Node 22；CI 原先钉 20，
+  // 于是"没有 DEP0190"那条在 CI 上是**空转永真**、"对照组"必红）。把版本当作显式前提断言出来，
+  // 而不是让这一组在新旧 Node 上给出两种都不可信的结果。
+  const nodeMajor = Number(String(process.versions.node).split('.')[0])
+  ok('Node 版本 ≥ 22（DEP0190 对照组的前提；Node 20 没有这条警告，这组断言在旧版上会空转）',
+    nodeMajor >= 22, `node=${process.versions.node}`)
   const ctlRun = spawnSync(process.execPath, ['-e', liveScript(true)], { encoding: 'utf-8', timeout: 90_000, windowsHide: true })
   ok('对照组：cmd.exe 当 file 再叠 shell:true 确实打出 DEP0190（说明上一条有牙）',
     /DEP0190/.test(String(ctlRun.stderr)), String(ctlRun.stderr).slice(0, 180))

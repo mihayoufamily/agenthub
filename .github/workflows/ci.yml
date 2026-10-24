@@ -12,7 +12,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22 = Electron 37 自带的 Node 版本；原先钉 20 会让一条弃用警告断言在 CI 上变成空转
+          # （DEP0190 是 Node ≥22 才有的），本地/应用内/CI 三处的运行时版本越接近越好
+          node-version: 22
           cache: npm
       # CI 仅类型检查与构建（tsc + rollup，均无原生依赖），跳过 electron 二进制下载
       - run: npm ci
