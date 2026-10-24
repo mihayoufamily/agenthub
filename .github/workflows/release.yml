@@ -1,13 +1,25 @@
 name: Release
 
-# 推送 v* tag 时自动：构建 -> 组装便携版 -> 打 zip -> 创建 GitHub Release
-# 前置：package.json 的 version 与 tag 一致（下方校验步骤强约束）
+# 两个触发方式，两条互不相干的产物链路：
+#   push v* tag  -> portable：构建 -> 组装便携版（明文 resources/app，不打 asar）-> zip -> 建 GitHub Release
+#   workflow_dispatch -> installer：electron-builder 出 NSIS 安装包（asar: true），只传 workflow artifact、不碰 Release
+# 为什么要有第二条：`asar` 与 `NSIS` 这两件事在开发机上从没跑通过（本机 app-builder 受限），
+# 而便携版走的是明文目录，压根不经过 asar。这条链路把"安装包形态"变成 runner 上可重复验证的东西。
+# 前置：portable 要求 package.json 的 version 与 tag 一致（下方校验步骤强约束）
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+
+# 顶层给最小权限；需要写 Release 的 portable job 自己在 job 级抬回 contents: write
+permissions:
+  contents: read
 
 jobs:
   portable:
+    # tag 触发专属：这条里的 zip 名、校验都拿 github.ref_name 当版本号，
+    # workflow_dispatch 时 ref_name 是分支名（main），会把版本校验步骤带歪
+    if: github.event_name == 'push'
     runs-on: windows-latest
     permissions:
       contents: write
@@ -112,3 +124,75 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: AgentHub-${{ github.ref_name }}-win-x64-portable.zip
+
+  installer:
+    # 手动触发专属：产出 NSIS 安装包（asar: true 那条通路），只上传 workflow artifact，不建也不改 Release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # dist = npm run build && electron-builder --win（build 里含 typecheck，所以不用再单跑一遍 build）
+      - name: 打安装包（electron-builder：NSIS + asar）
+        run: npm run dist
+
+      - name: 验安装包与 asar
+        shell: pwsh
+        run: |
+          # 版本取自 package.json（dispatch 时 github.ref_name 是分支名，不能当版本号用）
+          $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $setup = Get-ChildItem -Path release -Filter "AgentHub-Setup-*.exe" -File | Select-Object -First 1
+          if (-not $setup) { Write-Error "electron-builder 没产出 AgentHub-Setup-<version>.exe"; exit 1 }
+          if ($setup.Name -ne "AgentHub-Setup-$ver.exe") {
+            Write-Error "安装包版本号与 package.json 不符：$($setup.Name) vs $ver"; exit 1
+          }
+          $mb = [math]::Round($setup.Length / 1MB, 1)
+          # NSIS 包体积下限给得很宽松（本机明文便携 zip 是 132MB，安装包正常也就同量级），
+          # 目的是抓"生成了个 0 字节的壳"这种假成功，不是拿体积当质量判据
+          if ($setup.Length -lt 20MB) { Write-Error "安装包只有 $mb MB，不像真产物"; exit 1 }
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $setup.FullName).Hash.ToLower()
+          # electron 资源目录：NSIS 之前会先出 win-unpacked，asar 是否真打上就看它里面的 app.asar
+          $asar = Join-Path 'release/win-unpacked/resources' 'app.asar'
+          if (-not (Test-Path $asar)) {
+            Write-Error "没有 release/win-unpacked/resources/app.asar：asar 这条通路根本没被构建"
+            exit 1
+          }
+          if (Test-Path (Join-Path 'release/win-unpacked/resources' 'app')) {
+            Write-Error "app.asar 旁边还留着明文 app 目录：asar 配置没生效"
+            exit 1
+          }
+          # listPackage 返回的路径用的是**本机分隔符**：Windows 上实测是 `\out\main\index.js` 这种
+          # 反斜杠带前导斜杠的形状（Linux/macOS 上才是 / 开头），所以判据先归一化再比，
+          # 别把分隔符写死——否则这条检查在别的 runner 镜像上会假红。
+          # 这三条少一条就说明"打进包的文件"和便携版跑的不是同一份东西。
+          node -e "
+            const asar = require('@electron/asar');
+            const norm = (p) => p.replace(/\\/g, '/').replace(/^\/+/, '');
+            const have = new Set(asar.listPackage(process.argv[1]).map(norm));
+            const need = ['package.json', 'out/main/index.js', 'dist/renderer/bundle.js'];
+            const missing = need.filter((n) => !have.has(n));
+            if (missing.length) { console.error('asar 里缺：' + missing.join(', ')); process.exit(1); }
+            console.log('asar 条目 ' + have.size + ' 个，关键三条都在');
+            require('fs').writeFileSync('asar-list.txt', [...have].sort().join('\n'));
+          " $asar
+          if ($LASTEXITCODE -ne 0) { Write-Error "asar 内容校验失败"; exit 1 }
+          Write-Host "安装包：$($setup.Name)｜$mb MB｜sha256 $hash"
+          "## 安装包自检`n`n- 文件：``$($setup.Name)``（$mb MB）`n- sha256：``$hash```n- asar：已生效，`release/win-unpacked/resources/app.asar` 里没有明文 app 目录" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: 上传安装包与 asar 清单
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentHub-win-installer
+          path: |
+            release/AgentHub-Setup-*.exe
+            asar-list.txt
+          if-no-files-found: error
+          retention-days: 30
