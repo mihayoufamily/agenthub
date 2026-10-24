@@ -37,9 +37,11 @@ const DEFAULT_SUITE_TIMEOUT_MS = 10 * 60 * 1000
 const SUITES = [
   { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 504, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 52, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态）' },
-  // ui=82：2026-10-24 v0.5.0 Task 1 实测（结果：82 PASS / 0 FAIL），比上一基线多的是 C1 那三条
-  // （模式 pill 下移到输入卡下方、悬浮或聚焦展开介绍、已选中再点一次直接进入）。
-  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 82, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出、首页模式选择（位置/展开/二次进入）' },
+  // ui=83：2026-10-24 v0.5.0 Task 1 修复轮 1 实测（结果：83 PASS / 0 FAIL）。
+  // 82 → 83 多的是"显式定视口 960×640 下介绍卡完整落在视口内"那一条（Ruling T1-e 的落点）；
+  // 变异自证跑过：把 .mi-note 文案改回上一轮长版本 → 该条红（bottom=661 / vh=640，裁 21px）、82 PASS / 1 FAIL，
+  // 还原后 83 PASS / 0 FAIL（bottom=636）。所以这个数字是量出来的，不是估的。
+  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 83, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出、首页模式选择（位置/展开可见/二次进入/最小高度完整可见）' },
   { name: 'approval', tier: 'gui', script: 'approval-shot.mjs', min: 94, what: '命令审批真机：没批准不执行、拒绝/本次/始终、危险形态仍要问、历史进设置' },
   { name: 'cli-e2e', tier: 'gui', script: 'cli-e2e.mjs', min: 10, what: 'CLI 适配器经真实 IPC 的行为' },
   { name: 'cli-shot', tier: 'gui', script: 'cli-shot.mjs', min: 4, what: '本机 CLI 面板截图（5 个条目与实测状态）', gate: false },

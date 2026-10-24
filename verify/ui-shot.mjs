@@ -414,28 +414,48 @@ const main = async () => {
     //    → 悬浮这条路改用 CDP Input.dispatchMouseEvent 走真鼠标，不拿"派发成功"当"用户悬浮过"；
     // ② React 18 把事件里的更新排到下一个任务提交（真人的一次动作与一次观察本来就在两个任务里）
     //    → 动作与观察分两次求值，与本套件其余各条同一个写法。
+    // 判据口径（修复轮 1 · Important-2）：Ruling T1-a 的全部理由就是"DOM 在 ≠ 用户看得见"——
+    // static 定位会把卡片推出视口而 `querySelector` 照样拿得到。同一把尺子必须量回断言本身，
+    // 所以这里不只问"卡片在不在 DOM"，还要求它整张落在视口内（top>=0 且 bottom<=innerHeight）；
+    // 否则产品换个方式回退（z-index / margin / transform）这条依然是绿的。
+    // parts（逐分行高）：FAIL 时直接指认是哪一行把卡片撑出视口的；960×640 那档每轮都另打一行
+    // `[mode-info@960x640]`，所以余量漂没漂是写在每次输出里的，不用等红了再来一轮。
+    const infoProbe = `(() => {
+      const e = document.querySelector('.mode-info')
+      if (!e) return { open: false }
+      const r = e.getBoundingClientRect()
+      return {
+        open: true,
+        title: String(e.querySelector('.mi-title')?.textContent ?? '').trim(),
+        top: Math.round(r.top), bottom: Math.round(r.bottom), vh: window.innerHeight,
+        visible: r.top >= 0 && r.bottom <= window.innerHeight,
+        parts: [...e.children].map((c) => (typeof c.className === 'string' ? c.className : '') + '=' + Math.round(c.getBoundingClientRect().height))
+      }
+    })()`
     const pillPt = await js(cdp, `(() => {
       const b = document.querySelector('.mode-pill-wrap [data-mode="workbench"]')
       if (!b) return null
       const q = b.getBoundingClientRect()
       return { x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2) }
     })()`)
-    let hoverInfo = false
+    let hoverInfo = null
     if (pillPt) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pillPt.x, y: pillPt.y, button: 'none' })
       await sleep(400)
-      hoverInfo = await js(cdp, `(() => {
-        const e = document.querySelector('.mode-info')
-        return e ? String(e.querySelector('.mi-title')?.textContent ?? 'open') : ''
-      })()`)
+      hoverInfo = await js(cdp, infoProbe)
       // 收起：Escape 走既有的关闭路径，别让悬浮的余温冒充键盘那条路的成果
       await js(cdp, `(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true })()`)
       await sleep(400)
     }
     await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]')?.focus(); return true })()`)
     await sleep(400)
-    const focusInfo = await js(cdp, `(() => !!document.querySelector('.mode-info'))()`)
-    ok('悬浮或键盘聚焦会展开模式介绍', !!hoverInfo && !!focusInfo, JSON.stringify({ hoverInfo, focusInfo }))
+    const focusInfo = await js(cdp, infoProbe)
+    // 标题也钉死（修复轮 1 · Minor）：悬浮/聚焦打开的必须是**工作站**那一台的卡片，
+    // 只判"非空"的话，错模式的介绍卡一样能过。
+    ok('悬浮或键盘聚焦会展开模式介绍（且介绍卡完整落在视口内，不只是 DOM 里存在）',
+      !!hoverInfo?.open && hoverInfo.visible && hoverInfo.title === '工作站模式'
+      && !!focusInfo?.open && focusInfo.visible && focusInfo.title === '工作站模式',
+      JSON.stringify({ hoverInfo, focusInfo }))
     // 二次点击进入：先确认"第一点只选中、没进"，再确认"再点同一个才进"（少一面就退回
     // "点一下就进"或"点两下还在原地"这两种都被计划判为错的行为）
     const sel = await js(cdp, `(() => {
@@ -457,6 +477,23 @@ const main = async () => {
       JSON.stringify({ ...selected, ...twoClick }))
     await js(cdp, 'window.__ahub_debug.brand()')
     await sleep(700)
+    // 修复轮 1 · Important-3（Ruling T1-e）：上一轮新增的 .mi-note（why 那句）把介绍卡撑到 228px，
+    // 在应用自己的最小高度（src/main/index.ts:283 minHeight:640）下底部被裁 21px。
+    // 上面那条悬浮/聚焦判的是**用户持久化窗口**这一档，本机窗口多大就量多大，绿红随环境漂；
+    // 这一条把视口钉死到最小档，"卡片整张看不看得见"才有一个不随机器变的落点。
+    // 照抄本套件既有的 Emulation.setDeviceMetricsOverride 写法（修复波 A · 项 7 同一先例）。
+    await setViewport(960, 640)
+    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]')?.focus(); return true })()`)
+    await sleep(500)
+    const infoMinBox = await js(cdp, infoProbe)
+    console.log('  [mode-info@960x640] ' + JSON.stringify(infoMinBox))
+    ok('应用自身最小高度（显式定视口 960×640）下模式介绍卡完整落在视口内',
+      !!infoMinBox.open && infoMinBox.visible && infoMinBox.title === '工作站模式',
+      `裁切=${infoMinBox.bottom - infoMinBox.vh}px ${JSON.stringify(infoMinBox)}`)
+    await js(cdp, `(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true })()`)
+    await sleep(300)
+    await cdp.send('Emulation.clearDeviceMetricsOverride')
+    await sleep(400)
     await js(cdp, 'window.__ahub_debug.workflow()')
     await sleep(1200)
     await shot('09-workflow-home')

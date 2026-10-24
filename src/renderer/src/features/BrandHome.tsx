@@ -15,7 +15,10 @@ import { Button } from '../components/primitives'
 import { Icon } from '../components/Icons'
 import { enterMode } from './ModeSwitch'
 
-/** 模式说明文案（文档三.1 建议文案） */
+/** 模式说明文案（文档三.1 建议文案）
+ *  `why` 承担 spec C1 的"为什么要先选"这句话，每张卡只说自己那台的前置条件：
+ *  上一轮两张卡都塞了"工作站要 A、工作流要 B"的双份事实，卡片因此在应用最小高度（640）下被裁 21px。
+ *  压短 + 合并那行 note 之后语义一条没丢（Ruling T1-e；真机断言守着 960×640 完整可见）。 */
 const MODE_INFO: Record<WorkMode, { title: string; pill: string; desc: string; enter: string; why: string }> = {
   workbench: {
     title: '工作站模式',
@@ -23,7 +26,7 @@ const MODE_INFO: Record<WorkMode, { title: string; pill: string; desc: string; e
     desc: '在一个界面中自由切换不同 Agent。每个 Agent 保留自己的会话和工作状态，适合由你直接安排任务、查看结果和决定下一步。',
     enter: '进入工作站模式',
     // spec C1：介绍文案要负责说清"为什么要先选"
-    why: '进工作站要先有可用 Agent；进工作流要三角色可用。先让你选是为了省掉后面的返工。'
+    why: '先选是为了少返工：工作站要先有可用 Agent。'
   },
   workflow: {
     title: '工作流模式',
@@ -31,7 +34,7 @@ const MODE_INFO: Record<WorkMode, { title: string; pill: string; desc: string; e
     desc: '让规划、执行、审核三个角色协作完成任务。系统按流程交接任务、检查结果并在必要时返工，支持自动审核与人工确认。',
     enter: '进入工作流模式',
     // spec C1：介绍文案要负责说清"为什么要先选"
-    why: '进工作站要先有可用 Agent；进工作流要三角色可用。先让你选是为了省掉后面的返工。'
+    why: '先选是为了少返工：工作流要三角色可用。'
   }
 }
 
@@ -139,7 +142,13 @@ export function BrandHome() {
           <div className="mode-info card-enter">
             <div className="mi-title">{MODE_INFO[infoKey].title}</div>
             <div className="mi-desc">{MODE_INFO[infoKey].desc}</div>
-            <div className="mi-note">{MODE_INFO[infoKey].why}</div>
+            {/* 一行 note 装两件事：spec C1 要的"为什么要先选" + "关闭不会切模式"的保证。
+               上一轮这两句各占一个 .mi-note（两行文案再加一个 10px gap），在应用自己的最小高度
+               960×640 下把卡片顶出视口 21px（变异自证实测：改回长文案，新断言 bottom=661/vh=640 红）。
+               合并只省掉那一行和那个 gap，两句话一条没删。 */}
+            <div className="mi-note">
+              {MODE_INFO[infoKey].why}关闭说明不会切换模式，草稿与附件保持不变。
+            </div>
             <div className="mi-actions">
               <Button
                 variant="primary"
@@ -153,7 +162,6 @@ export function BrandHome() {
               </Button>
               <Button variant="ghost" onClick={() => setInfoKey(null)}>关闭</Button>
             </div>
-            <div className="mi-note">关闭说明不会切换模式，草稿与附件保持不变。</div>
           </div>
         )}
       </div>
