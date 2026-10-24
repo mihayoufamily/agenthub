@@ -9,7 +9,7 @@ import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
-import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
+import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs, ensureWfHome, restoreWfHome, waitHydrated } from './cdp.mjs'
 
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)=(.*)$/)
@@ -146,6 +146,8 @@ let snapshotDefaults = null
 // 残留实例在场时禁止回写（同 approval-shot 的闸门）：往活实例正在用的 config.json 里写字节，
 // 它退出时又会把内存里的测试态盖回来，用户配置就留在测试中间态了。
 let snapshotWriteAllowed = true
+// 套件起跑前用户正打开着哪个任务（收尾把视图还回去；记录本身从不删）
+let homePrev = ''
 
 /** 等 AgentHub.exe 退干净：回写快照前必须确认没有活实例（与 approval-shot 同一实现口径） */
 function waitAppGone(timeoutMs = 30000) {
@@ -388,6 +390,9 @@ const main = async () => {
     ok('设置弹窗已关闭', !(await js(cdp, '!!document.querySelector(".settings-win")')))
 
     // ---- 6. 工作流首页（保存任务卡片是否遮挡）----
+    // 先确认视图在首页：应用一启动会恢复用户上次打开的任务，那时首页 composer 不在 DOM 里，
+    // 下面两条溢出审计会量到 null（量的不是产品）。收尾把视图还回去。
+    homePrev = (await ensureWfHome(cdp)).prev
     await js(cdp, 'window.__ahub_debug.workflow()')
     await sleep(1200)
     await shot('09-workflow-home')
@@ -713,6 +718,7 @@ const main = async () => {
     await sleep(1000)
     // 修复波 B · 项 1b：按字节把整份 config.json 还原回测试前（含 workflowDefaults 三个角色 id）。
     // 先等实例退净：残留实例在场时回写，写的是那个活实例正在用的文件，它退出又会把测试态盖回去。
+    await restoreWfHome(cdp, homePrev)
     if (!waitAppGone()) snapshotWriteAllowed = false
     if (cfgFile && snapshotWriteAllowed) {
       try {

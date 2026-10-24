@@ -78,6 +78,16 @@ export function installDebugHooks() {
       useWorkflow.getState().openTask(id)
       return useWorkflow.getState().run?.id ?? null
     },
+    /**
+     * 验证脚本用：把视图从"已打开的任务"切回工作流首页。应用一启动会恢复上次打开的任务，
+     * 那时首页的 composer 根本不在 DOM 里——首页布局断言于是量不到东西（量的不是产品问题）。
+     * 只改视图，不动 runs/ 落盘记录；返回之前打开的任务 id，套件收尾时用它把视图还原回去。
+     */
+    closeTask: () => {
+      const prev = useWorkflow.getState().run?.id ?? ''
+      useWorkflow.getState().newTask()
+      return { prev, now: useWorkflow.getState().run?.id ?? '' }
+    },
     stopTask: () => useWorkflow.getState().stop('user'),
     /** 中断续跑 / 单角色重跑（编排能力验证用） */
     resumeInterrupted: () => {
@@ -130,6 +140,22 @@ export function installDebugHooks() {
     setWorkflowOutputDir: (dir: string) => {
       useWorkflow.getState().patchConfig({ outputDir: dir })
       return dir
+    },
+    /**
+     * 验证脚本用：把三角色**显式绑到指定 Agent**（跨厂商真跑要用它，而不是断言"用户当前正好这么绑"）。
+     * 用户点一下角色条就会换绑定，靠现状当基线的套件会恒红、且红的不是被测代码。
+     */
+    setRoles: (ids: { planner: string; executor: string; reviewer: string }) => {
+      const mk = (id: string) => {
+        const a = useAgents.getState().agents.find((x) => x.id === id)
+        return a ? { agentId: a.id, agentName: a.name, model: a.model } : null
+      }
+      const p = mk(ids.planner)
+      const e = mk(ids.executor)
+      const r = mk(ids.reviewer)
+      if (!p || !e || !r) return { ok: false, message: '有角色 id 在当前 agents 里找不到（可能已被删除）' }
+      useWorkflow.getState().patchConfig({ planner: p, executor: e, reviewer: r, reviewMode: 'human' })
+      return { ok: true, planner: p, executor: e, reviewer: r }
     },
     // 验证脚本清理用：把快照的整份配置原样写回，角色绑定/审核方式不留残留
     restoreWorkflowConfig: (cfg: Record<string, unknown>) => {
@@ -208,7 +234,15 @@ export function installDebugHooks() {
       },
       // 运行中的流（E2E 等待流式结束用）：chat:<agentId> 键列表
       streamKeys: Object.keys(useSessions.getState().activeStreams),
-      agents: useAgents.getState().agents.map((a: AgentConfig) => ({ id: a.id, name: a.name, kind: a.kind, status: a.status })),
+      agents: useAgents.getState().agents.map((a: AgentConfig) => ({
+        id: a.id,
+        name: a.name,
+        kind: a.kind,
+        status: a.status,
+        // 套件按"哪个厂商的 CLI"挑角色时要能看出来（原先只有 name，等于逼脚本猜用户自填的显示名）
+        cli: a.cliConfig?.cli ?? '',
+        model: a.model ?? ''
+      })),
       // 多会话摘要（E2E 断言用）：agentId -> { sessions, activeId, titles, counts }
       sessions: Object.fromEntries(
         Object.entries(useSessions.getState().sessions).map(([agentId, list]) => [

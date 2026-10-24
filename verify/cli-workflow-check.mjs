@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
+import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs, ensureWfHome, restoreWfHome, waitHydrated } from './cdp.mjs'
 
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)=(.*)$/)
@@ -44,6 +44,7 @@ const shot = async (cdp, name) => {
 
 let cdp
 let proc
+let homePrev = ''
 const cleanup = []
 
 const main = async () => {
@@ -62,6 +63,10 @@ const main = async () => {
     await cdp.send('Runtime.enable')
     await cdp.send('Page.enable')
     if (!(await waitJs(cdp, '!!window.__ahub_debug', 30000))) throw new Error('页面未就绪')
+    // 等水合再读基线：agents 载入前 state() 是空表，那时读到的"产物目录=(默认)"是瞬态，不是用户配置
+    if (!(await waitHydrated(cdp))) throw new Error('渲染层 store 20s 内没水合（agents 为空），不当作产品缺陷报红')
+    // 起真任务前把视图切回首页：否则 startCliTask 撞在用户正打开着的那个任务上（会改写它的运行记录）
+    homePrev = (await ensureWfHome(cdp)).prev
 
     const before = await js(cdp, 'window.__ahub_debug.state()')
     const prevCfg = before.config
@@ -143,6 +148,7 @@ const main = async () => {
     console.error('[cliwf] 失败：' + (e?.stack || e?.message || e))
     fail++
   } finally {
+    await restoreWfHome(cdp, homePrev)
     try {
       await js(cdp, 'window.__ahub_debug.stopTask()')
       await sleep(2500)

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
+import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs, ensureWfHome, restoreWfHome, waitHydrated } from './cdp.mjs'
 
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)=(.*)$/)
@@ -19,6 +19,7 @@ const main = async () => {
   mkdirSync(OUT, { recursive: true })
   const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
   let cdp
+  let homePrev = ''
   let failed = 0
   let passed = 0
   // 修复波 B · 项 1c：本套件原来只打 ✓/✗、没有 `结果：N PASS / M FAIL` 汇总行，
@@ -38,6 +39,9 @@ const main = async () => {
 
     await js(cdp, 'window.__ahub_debug.brand()')
     await sleep(600)
+    // 视图先回首页：应用一启动会恢复用户上次打开的任务，那时配置条根本不在屏上（上一轮 5 条红全因为这个）
+    if (!(await waitHydrated(cdp))) throw new Error('渲染层 store 20s 内没水合（agents 为空），不当作产品缺陷报红')
+    homePrev = (await ensureWfHome(cdp)).prev
     await js(cdp, 'window.__ahub_debug.workflow()')
     await sleep(1500)
 
@@ -80,6 +84,7 @@ const main = async () => {
     failed++
     console.error('失败：' + e.message)
   } finally {
+    await restoreWfHome(cdp, homePrev)
     try { cdp?.socket?.end() } catch { /* noop */ }
     try { proc.kill() } catch { /* noop */ }
     await sleep(800)

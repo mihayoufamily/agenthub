@@ -60,38 +60,57 @@ for (const name of TARGETS) {
   const thinkingLevel = fromApp.thinkingLevel
   console.log(`  模型: ${model || '(不传 -m，用该 CLI 自己的默认模型)'} · 思考强度: ${thinkingLevel}`)
   const dir = mkdtempSync(join(tmpdir(), 'ahub-cli-think-'))
-  const events = []
-  const reqId = `think-${name}-${Date.now()}`
   const started = Date.now()
   try {
-    // cliChatStream 在 spawn 成功时就返回，事件是之后流进来的：必须等 done/error，不能等 promise
-    const settled = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve({ timeout: true }), 180000)
-      void cli
-        .cliChatStream(name, { workDir: dir, thinkingLevel, model }, reqId, [{ role: 'user', content: PROMPT }], (ev) => {
-          events.push(ev)
-          if (ev.type === 'done' || ev.type === 'error') {
-            clearTimeout(timer)
-            setTimeout(() => resolve({ finished: true }), 800)
-          }
-        })
-        .then((r) => {
-          if (!r.ok) {
-            clearTimeout(timer)
-            resolve({ startFailed: r.message })
-          }
-        })
-    })
-    if (settled.timeout) cli.cancelChat(reqId)
-    const reasoning = events.filter((e) => e.type === 'reasoning').map((e) => e.text)
-    const text = events.filter((e) => e.type === 'delta').map((e) => e.text).join('')
-    const err = events.find((e) => e.type === 'error')
-    console.log(`  [${Date.now() - started}ms] 事件 ${events.length} 条 · 思考 ${reasoning.length} 段 · 正文 ${text.length} 字`)
-    console.log('  结束状态:', JSON.stringify(settled).slice(0, 200))
-    if (reasoning.length) console.log('  思考首段:', JSON.stringify(reasoning[0].slice(0, 120)))
-    if (err) console.log('  错误:', String(err.message).slice(0, 200))
-    else if (!reasoning.length) console.log('  事件类型:', JSON.stringify(events.map((e) => e.type).slice(0, 20)))
-    ok(`${name} 吐出 reasoning 事件（工作流卡片过程区的数据源）`, reasoning.length > 0 && !settled.timeout, err ? String(err.message).slice(0, 120) : '')
+    // 上游这一轮吐几段思考摘要**不可控**（同机同参数实测过 1 段与 0 段），所以"真跑必须看到思考"
+    // 不能当门禁——那是一条会随机红的断言。产品承诺"它吐了我们就得并进思考区"改由逻辑层跑真代码钉住
+    // （`fixes-check` 的 `[CLI]` 段：`codexReasoningParts` 两条）。这里只如实报告观察到几段。
+    // 重试只针对"没走到 done"（挂起/中断是外部不确定），不针对思考段数。
+    let reasoning = []
+    let text = ''
+    let err = null
+    let timedOut = false
+    let sawDone = false
+    let attempts = 0
+    while (attempts < 2 && !(sawDone && !err)) {
+      attempts++
+      const events = []
+      const reqId = `think-${name}-${Date.now()}-${attempts}`
+      const settled = await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve({ timeout: true }), 180000)
+        void cli
+          .cliChatStream(name, { workDir: dir, thinkingLevel, model }, reqId, [{ role: 'user', content: PROMPT }], (ev) => {
+            events.push(ev)
+            if (ev.type === 'done' || ev.type === 'error') {
+              clearTimeout(timer)
+              setTimeout(() => resolve({ finished: true }), 800)
+            }
+          })
+          .then((r) => {
+            if (!r.ok) {
+              clearTimeout(timer)
+              resolve({ startFailed: r.message })
+            }
+          })
+      })
+      timedOut = !!settled.timeout
+      if (settled.timeout) cli.cancelChat(reqId)
+      reasoning = events.filter((e) => e.type === 'reasoning').map((e) => e.text)
+      text = events.filter((e) => e.type === 'delta').map((e) => e.text).join('')
+      err = events.find((e) => e.type === 'error')
+      sawDone = events.some((e) => e.type === 'done')
+      console.log(`  [第 ${attempts} 次 / ${Date.now() - started}ms] 事件 ${events.length} 条 · 思考 ${reasoning.length} 段 · 正文 ${text.length} 字`)
+      console.log('  结束状态:', JSON.stringify(settled).slice(0, 200))
+      if (reasoning.length) console.log('  思考首段:', JSON.stringify(reasoning[0].slice(0, 120)))
+      if (err) console.log('  错误:', String(err.message).slice(0, 200))
+      else if (!reasoning.length) console.log('  事件类型:', JSON.stringify(events.map((e) => e.type).slice(0, 20)))
+      if (!sawDone && !err && attempts < 2) console.log('  这次没走到 done（挂起或中断），再跑一次确认——重试只针对流不完整，不针对思考段数')
+    }
+    // 上游这一轮吐几段思考摘要**不可控**（同机同参数实测过 1 段与 0 段），所以"真跑必须看到思考"
+    // 不能当门禁——那是一条会随机红的断言。产品承诺"它吐了我们就得并进思考区"改由逻辑层跑真代码钉住
+    // （`fixes-check` 的 `[CLI]` 段：`codexReasoningParts` 两条）。这里只如实报告本轮观察到几段。
+    console.log(`  观察  本轮上游给了 ${reasoning.length} 段思考摘要`)
+    ok(`${name} 事件流完整（done 到达、不挂起、没有未处理错误）`, !timedOut && !err && sawDone, JSON.stringify({ timedOut, err: err && String(err.message).slice(0, 90) }))
     ok(`${name} 有正文回答`, text.trim().length > 0)
     // 多段思考之间必须留空行（分隔符补在后续段开头），否则界面里黏成一段、"只显重点"分段筛选失效
     ok(`${name} 多段思考之间有空行分隔（或只有一段）`, reasoning.length < 2 || reasoning.slice(1).every((t) => t.startsWith('\n\n')), JSON.stringify(reasoning[1]?.slice(0, 40)))

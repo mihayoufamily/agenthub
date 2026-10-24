@@ -131,3 +131,30 @@ export async function waitJs(cdp, expr, timeoutMs = 20000) {
     await sleep(500)
   }
 }
+
+/**
+ * 把工作流视图从"已打开的任务"切回首页，返回 { prev }（之前打开的任务 id）。
+ * 为什么需要：应用一启动会恢复上次打开的任务，那时首页 composer 根本不在 DOM 里，
+ * 首页布局/配置条断言于是量到 null 而报红——量的不是产品，是套件假设了"没有已打开的任务"。
+ * 只切视图，不动 runs/ 落盘记录；套件收尾用 restoreWfHome 把视图还给用户。
+ */
+export async function ensureWfHome(cdp) {
+  const r = await js(cdp, 'window.__ahub_debug.closeTask()')
+  await sleep(900)
+  return { prev: String(r?.prev ?? ''), now: String(r?.now ?? '') }
+}
+
+/** 还回原视图：之前没有打开的任务就保持首页 */
+export async function restoreWfHome(cdp, prevId) {
+  if (!prevId) return
+  try {
+    await js(cdp, `window.__ahub_debug.openWfTask(${JSON.stringify(prevId)})`)
+    await sleep(600)
+  } catch { /* 页面已关就算了：任务记录本身没动，用户下次从列表点进去即可 */ }
+}
+
+/** 等渲染层 store 水合完成（agents 载入前 state() 会返回空表，套件别把"没水合"读成"没装 Agent"） */
+export async function waitHydrated(cdp, timeoutMs = 20000) {
+  const ok = await waitJs(cdp, `(() => { const s = window.__ahub_debug.state(); return (s.agents || []).length > 0 })()`, timeoutMs)
+  return ok ? await js(cdp, 'window.__ahub_debug.state()') : null
+}

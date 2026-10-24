@@ -161,6 +161,11 @@ const main = async () => {
     }
 
     console.log('\n[4] cli:chat 事件通道（真实回复或明确错误，都必须到达渲染层）')
+    // 模型取该 CLI Agent 在应用里已绑的那一个：留空等于让 codebuddy 用它自己的全局默认，
+    // 而那个默认值在换 provider 后可能已经不可用——套件于是恒红，红的却不是被测的事件通道。
+    const cbModel = await js(cdp, `(() => { const s = window.__ahub_debug.state(); const a = (s.agents || []).find((x) => x.kind === 'cli' && x.cliConfig && x.cliConfig.cli === 'codebuddy'); return (a && a.cliConfig.model) || '' })()`)
+    const chatOpts = JSON.stringify(cbModel ? { model: cbModel } : {})
+    console.log('    模型 =', cbModel || '(应用里该 Agent 没填模型，按现状传空)')
     const ev = await js(cdp, `(async () => {
       const reqId = 'e2e-' + Date.now()
       return await new Promise((resolve) => {
@@ -170,7 +175,7 @@ const main = async () => {
           last = e
           if (e.type === 'done' || e.type === 'error') { off(); resolve(e) }
         })
-        window.agenthub.cli.chat('codebuddy', {}, reqId, [{ role: 'user', content: '只回复两个字：好的' }]).then((r) => {
+        window.agenthub.cli.chat('codebuddy', ${chatOpts}, reqId, [{ role: 'user', content: '只回复两个字：好的' }]).then((r) => {
           if (r && r.ok === false) { off(); resolve({ type: 'startFailed', message: r.message }) }
         })
         setTimeout(() => { off(); resolve(last ?? { type: 'timeout' }) }, 60000)
