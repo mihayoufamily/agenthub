@@ -174,8 +174,8 @@ const api = {
     dir: () => ipcRenderer.invoke('artifact:dir') as Promise<string>,    /** 由 AgentHub 落盘一篇文本产物：固定写入工作流产物目录，渲染层只能给文件名 */
     write: (fileName: string, content: string, checkpointId?: string) =>
       ipcRenderer.invoke('artifact:write', fileName, content, checkpointId) as Promise<{ ok: boolean; path?: string; message?: string; checkpoint?: string }>,
-    /** 产物目录真实文件清单（核对"验收项↔文件"用；主进程给，不让渲染层自己猜目录） */
-    ls: () => ipcRenderer.invoke('artifact:ls') as Promise<{
+    /** 产物目录真实文件清单（核对"验收项↔文件"用；主进程给，不让渲染层自己猜目录）。传 dir 列那个目录 */
+    ls: (dir?: string) => ipcRenderer.invoke('artifact:ls', dir) as Promise<{
       ok: boolean
       dir?: string
       files: { rel: string; bytes: number }[]

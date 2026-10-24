@@ -11,6 +11,7 @@ import { OutputDirChip } from '../components/OutputDir'
 import { CheckpointBar } from '../components/CheckpointBar'
 import { bridge } from '../lib/ipc'
 import { matchFileRef } from '@shared/acceptance'
+import { pickUnregistered, unregisteredNote } from '@shared/delivery-dir'
 import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls } from '../lib/utils'
 
@@ -474,6 +475,38 @@ function ReworkLimitCard({ run }: { run: WorkflowRun }) {
   )
 }
 
+/**
+ * 交付目录里"本任务没登记的文件"：列出来让你看见，不登记、也不替你删。
+ * 来源是真实目录清单（主进程给），不是角色自述；量的是这个任务自己的产物目录，不是"当前配置的那个"。
+ */
+function UnregisteredNote({ dir, registeredPaths }: { dir: string; registeredPaths: string[] }) {
+  const [note, setNote] = useState<string | null>(null)
+  const key = dir + '|' + registeredPaths.join(',')
+  useEffect(() => {
+    let alive = true
+    setNote(null)
+    void bridge.artifacts
+      .ls(dir)
+      .then((r) => {
+        if (!alive || !r.ok) return
+        const extra = pickUnregistered(r.files.map((f) => f.rel), registeredPaths, r.dir || dir)
+        setNote(extra.length ? unregisteredNote(extra, !!r.truncated) : null)
+      })
+      .catch(() => {
+        /* 读不到目录就不出提示：宁可少说一句，不编一条"有垃圾" */
+      })
+    return () => {
+      alive = false
+    }
+  }, [key])
+  if (!note) return null
+  return (
+    <div style={{ fontSize: 12, color: 'var(--warn)', background: 'rgba(154,103,0,.07)', borderRadius: 8, padding: '6px 10px', marginBottom: 10, lineHeight: 1.6 }}>
+      {note}
+    </div>
+  )
+}
+
 function DeliveryCard({ run }: { run: WorkflowRun }) {
   const exportRun = useWorkflow((s) => s.exportRun)
   const continueModify = useWorkflow((s) => s.continueModify)
@@ -519,6 +552,9 @@ function DeliveryCard({ run }: { run: WorkflowRun }) {
               </span>
             ))}
           </div>
+        )}
+        {run.outputDir && !run.demo && (
+          <UnregisteredNote dir={run.outputDir} registeredPaths={files.map((a) => a.path as string)} />
         )}
         {run.outputDir && !run.demo && (
           <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, lineHeight: 1.6 }}>

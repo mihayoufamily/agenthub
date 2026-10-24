@@ -695,20 +695,20 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   /** 工作目录的 repo map（大项目里让模型先看到地图，而不是靠 grep 摸黑） */
   ipcMain.handle('repomap:get', async (_e, dir?: string) => buildRepoMap(typeof dir === 'string' ? dir : undefined))
 
-  /** 产物目录的文件清单（验收项↔文件映射要拿真实目录核对，不能只信角色说的话） */
-  ipcMain.handle('artifact:ls', async () => {
-    const dir = workflowOutDir(getStore)
-    if (!dir) return { ok: false, files: [], message: '产物目录不可用' }
-    const { files, truncated } = await checkpoints.listDirFiles(dir)
+  /** 产物目录的文件清单（核对"验收项↔文件"用，不能只信角色说的话）。传 dir 时列那个目录（任务自己的产物目录），否则列当前配置的 */
+  ipcMain.handle('artifact:ls', async (_e, dir?: string) => {
+    const target = typeof dir === 'string' && dir.trim() ? dir.trim() : workflowOutDir(getStore)
+    if (!target) return { ok: false, files: [], message: '产物目录不可用' }
+    const { files, truncated } = await checkpoints.listDirFiles(target)
     const out: { rel: string; bytes: number }[] = []
     for (const rel of files) {
       try {
-        out.push({ rel, bytes: (await stat(join(dir, rel))).size })
+        out.push({ rel, bytes: (await stat(join(target, rel))).size })
       } catch {
         out.push({ rel, bytes: 0 })
       }
     }
-    return { ok: true, dir, files: out, truncated }
+    return { ok: true, dir: target, files: out, truncated }
   })
 
   /**
@@ -791,7 +791,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       return { ok: false }
     }
     // 事件复用 model:event 通道（reqId 路由），渲染层无需区分来源
-    const tap = ledgerTap({ channel: 'cli', harness: name, ...(opts?.model ? { model: opts.model } : {}) })
+    // 账本按**实际生效**的模型归本：Agent 没填模型时不留空（留空那条既归不进任何模型、也算不了钱）
+    const tap = ledgerTap({ channel: 'cli', harness: name, model: cli.cliEffectiveModel(name, opts) })
     return cli.cliChatStream(name, opts ?? {}, reqId, messages, (ev) => {
       tap(ev)
       getWin()?.webContents.send('model:event', ev)

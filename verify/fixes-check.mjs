@@ -2249,6 +2249,17 @@ console.log('\n[CLI] codex 显式要 workspace-write 沙箱（默认 read-only �
     pi >= 0 && pi === allOpts.length - 1 &&
       allOpts.indexOf('-C') < pi && allOpts.indexOf('-m') < pi && allOpts.lastIndexOf('-c') < pi,
     `args=${JSON.stringify(allOpts)?.slice(0, 240)}`)
+  // 账本归本：Agent 没填模型是设计内的（model 是"覆盖"字段），所以既不报错也不替用户猜一个具体模型，
+  // 而是如实写出"实际用哪个"——留空那条以前既归不进任何模型、也算不了钱（本机实测 12 条 codebuddy 调用）。
+  const eff = typeof mod.cliEffectiveModel === 'function' ? mod.cliEffectiveModel : null
+  ok('填了模型就原样用它归本（不加工、不截断）', eff ? eff('codex', { model: 'gpt-6-luna' }) === 'gpt-6-luna' : false,
+    eff ? `got=${JSON.stringify(eff('codex', { model: 'gpt-6-luna' }))}` : 'cliEffectiveModel 未导出')
+  const noModel = eff ? eff('codebuddy', {}) : ''
+  ok('没填模型时如实标"未指定"并点名该 CLI，不编一个具体模型名',
+    noModel.startsWith('未指定·') && noModel.includes('codebuddy') && !/gpt-|glm-|claude-/.test(noModel),
+    `got=${JSON.stringify(noModel)}`)
+  ok('没填模型也不抛异常（opts 缺省同样如实返回）',
+    (() => { try { return typeof (eff ? eff('dsh') : '') === 'string' } catch { return false } })())
   // file_change 两种形状都要能取出 path（只认旧形状会让产物登记静默丢掉）
   const fch = typeof mod.codexFileChanges === 'function' ? mod.codexFileChanges : null
   const modern = fch ? fch({ type: 'file_change', changes: [{ path: 'D:\\o\\a.c', kind: 'add' }, { path: '', kind: 'add' }] }) : []
@@ -2257,6 +2268,50 @@ console.log('\n[CLI] codex 显式要 workspace-write 沙箱（默认 read-only �
     Array.isArray(modern) && modern.length === 1 && modern[0].path === 'D:\\o\\a.c' && modern[0].kind === 'add' &&
       Array.isArray(legacy) && legacy.length === 1 && legacy[0].path === 'b.c' && legacy[0].kind === 'modify',
     `modern=${JSON.stringify(modern)} legacy=${JSON.stringify(legacy)}`)
+  // 思考摘要的形状解析（同机同参数实测：上游一次吐 1 段、一次吐 0 段，所以"真跑必看到"不能当门禁；
+  // 但"它吐了我们就得并进思考区"是产品承诺，这条跑真代码钉住）
+  const crp = typeof mod.codexReasoningParts === 'function' ? mod.codexReasoningParts : null
+  ok('codex reasoning 的 summary 数组（含 {text} 对象与裸字符串混排）逐条取出并去空白',
+    JSON.stringify(crp ? crp({ type: 'reasoning', summary: [' 甲 ', { text: '乙' }, { text: '  ' }, 3] }) : []) === JSON.stringify(['甲', '乙']),
+    `got=${JSON.stringify(crp ? crp({ type: 'reasoning', summary: [' 甲 ', { text: '乙' }, { text: '  ' }, 3] }) : [])}`)
+  ok('旧形状（只有 text）同样取到；非 reasoning 项与脏入参返回空表不抛',
+    crp ? crp({ type: 'reasoning', text: '丙' }).join('') === '丙' && crp({ type: 'agent_message', text: 'x' }).length === 0 &&
+      crp(null).length === 0 && crp('nope').length === 0 : false,
+    `got=${JSON.stringify(crp ? [crp({ type: 'reasoning', text: '丙' }), crp({ type: 'agent_message', text: 'x' })] : null)}`)
+}
+
+// 交付目录里"本任务没登记的文件"（本机真事：codex 探写入权限后在 outputDir 根留了 `.__write_probe.tmp`，
+// 审核方按"交付目录有垃圾"判过拒）。口径：列出来给用户看，**不删**。规则抽在纯模块，这里跑真代码。
+console.log('\n[交付目录] 未登记文件只如实列出，不代删')
+{
+  const dd = await import('../out/shared/delivery-dir.js')
+  const dir = 'D:\\sgenthub测试'
+  const reg = ['D:\\sgenthub测试\\artifacts\\hello.c', 'D:\\sgenthub测试\\写一个c的helloword_第1轮.md']
+  const files = ['artifacts/hello.c', '写一个c的helloword_第1轮.md', '.__write_probe.tmp']
+  ok('已登记的不再算垃圾，剩下的只有执行方自己留的那个探针文件',
+    JSON.stringify(dd.pickUnregistered(files, reg, dir)) === JSON.stringify(['.__write_probe.tmp']),
+    `got=${JSON.stringify(dd.pickUnregistered(files, reg, dir))}`)
+  // Windows 真盘上大小写不敏感、斜杠两种写法混用（登记的绝对路径来自 file_change，目录清单来自主进程）
+  const caseFiles = ['Sub/A.TXT']
+  const caseReg = ['D:\\sgenthub测试\\SUB\\a.txt']
+  const caseDir = 'd:\\SGENTHUB测试'
+  ok('反斜杠 + 大小写不同的登记路径仍能匹配上（不因为写法差异虚报成垃圾）',
+    dd.pickUnregistered(caseFiles, caseReg, caseDir).length === 0,
+    `got=${JSON.stringify(dd.pickUnregistered(caseFiles, caseReg, caseDir))}`)
+  // 刻意的宽松侧：登记的绝对路径折出"相对名"与"末段名"两个键，所以同名不同层级的文件**都不会被指成垃圾**
+  // （误告用户"这是垃圾"比漏报更糟——我们既没登记它、也不敢替它删）。这里期望 0，不是 1。
+  ok('同名不同层级时选择不虚报（宁可漏报，也不指着用户的正常文件说它是垃圾）',
+    dd.pickUnregistered(['env.txt', 'sub/env.txt'], ['D:\\out\\sub\\env.txt'], 'D:\\out').length === 0,
+    `got=${JSON.stringify(dd.pickUnregistered(['env.txt', 'sub/env.txt'], ['D:\\out\\sub\\env.txt'], 'D:\\out'))}`)
+  ok('脏入参不抛异常：非数组返回空表、数组里的 null/数字被丢掉',
+    dd.pickUnregistered(null, reg, dir).length === 0 &&
+      dd.pickUnregistered(['a', null, 3, ''], reg, dir).length === 1)
+  const many = Array.from({ length: 11 }, (_, i) => `junk${i}.tmp`)
+  const note = dd.unregisteredNote(many, false)
+  ok('文案如实：列出前 8 个 + 说明另有几个没列 + 明写"不替你删"，且截断时带上限说明',
+    note.includes('11 个') && note.includes('另有 3 个未列出') && note.includes('也不替你删') && !note.includes('已清理') &&
+      dd.unregisteredNote(['x.tmp'], true).includes('只对照了前一部分'),
+    `note=${note.slice(0, 120)}`)
 }
 
 // ---------- Z4. ESLint：注入面那 5 条 error 规则的"机器还开着"（修复波 A · 项 4）----------

@@ -85,6 +85,26 @@ export function cliArgsFor(name: CliName, prompt: string, system: string | undef
   return SPECS[name].buildArgs(prompt, system, opts)
 }
 
+/**
+ * codex 的 `reasoning` 项 → 要进思考区的段落（新版 `summary[]`、旧版 `text` 两种形状都认）。
+ * 为什么单独导出：上游这一轮**吐不吐思考不可控**（同参数实测过一次 1 段、一次 0 段），
+ * 所以"真跑必须看到思考"不能当门禁；但"它吐了我们就得解析出来并进思考区"是产品承诺，
+ * 那条要能在逻辑层跑真代码钉住（删掉解析就会红，注释满足不了）。
+ */
+export function codexReasoningParts(item: unknown): string[] {
+  const it = item as { type?: string; text?: unknown; summary?: unknown } | null
+  if (!it || it.type !== 'reasoning') return []
+  const parts: string[] = []
+  if (Array.isArray(it.summary)) {
+    for (const s of it.summary) {
+      const t = typeof s === 'string' ? s : String((s as { text?: unknown } | null)?.text ?? '')
+      if (t.trim()) parts.push(t.trim())
+    }
+  }
+  if (typeof it.text === 'string' && it.text.trim()) parts.push(it.text.trim())
+  return parts
+}
+
 /** 一个可启动目标：真正的可执行文件 + 固定前置参数 + 需要的环境变量 */
 export interface CliTarget {
   /** 真正被 spawn 的可执行文件（.exe） */
@@ -477,16 +497,9 @@ const SPECS: Record<CliName, CliSpec> = {
           const item = obj.item as { type?: string; text?: string; message?: string; command?: string; exit_code?: number; output?: string; change_type?: string; path?: string; summary?: unknown } | undefined
           if (item?.type === 'agent_message' && item.text) emit({ type: 'delta', text: item.text })
           if (item?.type === 'reasoning') {
-            // 思考过程：summary 数组（新版）或 text 字段（旧版），逐条去重后进入思考区，不计入正文
-            const parts: string[] = []
-            if (Array.isArray(item.summary)) {
-              for (const s of item.summary) {
-                const t = typeof s === 'string' ? s : String((s as { text?: unknown } | null)?.text ?? '')
-                if (t.trim()) parts.push(t.trim())
-              }
-            }
-            if (item.text?.trim()) parts.push(item.text.trim())
-            for (const p of parts) {
+            // 形状解析抽成导出的纯函数 `codexReasoningParts`（逻辑层跑真代码断言）：
+            // 上游这一轮吐不吐思考不可控（同参数实测过 1 段与 0 段），但"吐了就必须进思考区"是产品承诺
+            for (const p of codexReasoningParts(item)) {
               if (seenReasoning.has(p)) continue
               seenReasoning.add(p)
               // 整块上报的思考之间补空行（同 stream-json 解析器），保证界面能按段筛选重点
@@ -746,6 +759,33 @@ async function codexModelsFromEndpoint(): Promise<{ models: string[]; source: st
   } catch {
     return null
   }
+}
+
+/**
+ * 该 CLI **自己的**默认模型（本机确定读得到的只有 codex：`~/.codex/config.toml` 的 `model`）。
+ * 只用于"如实说明这次实际用了哪个模型"，**不参与模型清单**（清单只认中转端点，见 listModels）。
+ */
+function cliOwnDefaultModel(name: CliName): string {
+  if (name !== 'codex') return ''
+  try {
+    const p = join(homedir(), '.codex', 'config.toml')
+    if (!existsSync(p)) return ''
+    return readFileSync(p, 'utf-8').match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 这次调用**实际**会打给哪个模型。Agent 没填模型是设计内的（`CliChatOptions.model` 是"覆盖"字段），
+ * 所以这里不报错、也不替用户选一个——只是把真实生效的那一个如实写出来，
+ * 让调用账本与用量统计不再出现"model 为空、既归不了本也算不了钱"的条目。
+ */
+export function cliEffectiveModel(name: CliName, opts: CliChatOptions = {}): string {
+  const m = String(opts.model || '').trim()
+  if (m) return m
+  const d = cliOwnDefaultModel(name)
+  return d ? `未指定·用 ${name} 自身默认（${d}）` : `未指定·${name} 自己决定，AgentHub 不替你猜`
 }
 
 /** 读取某个 CLI 可枚举的模型清单（结果按进程缓存） */
