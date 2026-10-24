@@ -1,19 +1,45 @@
 /**
  * CLI 思考过程真机核验（需求 3）：真实 spawn codex / codebuddy，断言适配层吐出 reasoning 事件。
- * 用法：node verify/cli-thinking.mjs [codex] [codebuddy]
+ * 用法：node verify/cli-thinking.mjs [codex] [codebuddy] [--model <id>]
  * 说明：会真实调用本机 CLI（消耗少量额度）；cwd 用临时目录，不写任何用户数据，结束即删。
+ *
+ * 为什么要自己挑模型：不传 `-m` 时 codex 回落到 `~/.codex/config.toml` 的全局默认模型，
+ * 而本机那个默认值（gpt-5.5）被本地代理**广告在 /models 里、真调用时拒**——套件于是恒红，
+ * 红的却不是被测代码。挑法：`--model` 优先，否则读**只读**的用户 config 里同名 CLI Agent 已绑的
+ * model（工作站跑的就是它）；两条都拿不到才退回不传（行为同从前，并在日志里说明）。
  */
 import { createRequire } from 'node:module'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const require = createRequire(import.meta.url)
 const cli = require('../out/main/adapters/cli.js')
 
-const asked = process.argv.slice(2).filter((a) => !a.startsWith('--'))
-const NAMES = asked.length ? asked : ['codex', 'codebuddy']
+const argv = process.argv.slice(2)
+const modelFlagIdx = argv.indexOf('--model')
+const MODEL_FLAG = modelFlagIdx >= 0 ? String(argv[modelFlagIdx + 1] || '').trim() : ''
+const positional = modelFlagIdx >= 0 ? argv.filter((_, i) => i !== modelFlagIdx && i !== modelFlagIdx + 1) : argv
+const NAMES = positional.filter((a) => !a.startsWith('--'))
+const TARGETS = NAMES.length ? NAMES : ['codex', 'codebuddy']
 const PROMPT = '先想清楚再回答：为什么 0.1 + 0.2 不等于 0.3？用一两句话说明。'
+
+/** 只读用户 config，取该 CLI 在工作站里已绑并跑通过的模型与思考强度（工作站跑的就是这套参数） */
+function cliSettingsFromAppConfig(name) {
+  const out = { model: '', thinkingLevel: 'low' }
+  try {
+    const file = join(process.env.APPDATA || '', 'agenthub', 'config.json')
+    const cfg = JSON.parse(readFileSync(file, 'utf8'))
+    const hit = (cfg.agents || []).find((a) => a?.cliConfig?.cli === name)
+    if (hit) {
+      if (String(hit.cliConfig.model || '').trim()) out.model = String(hit.cliConfig.model).trim()
+      if (String(hit.cliConfig.thinkingLevel || '').trim()) out.thinkingLevel = String(hit.cliConfig.thinkingLevel).trim()
+    }
+  } catch {
+    /* 读不到就按默认参数跑，日志里会写清楚用的是哪套 */
+  }
+  return out
+}
 
 let pass = 0
 let fail = 0
@@ -22,13 +48,17 @@ const ok = (name, cond, extra = '') => {
   else { fail++; console.log(`  FAIL  ${name}${extra ? ' — ' + extra : ''}`) }
 }
 
-for (const name of NAMES) {
+for (const name of TARGETS) {
   console.log(`\n========== ${name} ==========`)
   if (!cli.isKnownCli(name)) { ok(`${name} 是已知 CLI`, false); continue }
   const test = await cli.testConnection(name)
   ok(`${name} 连接可用`, test.ok, test.message)
   if (!test.ok) continue
 
+  const fromApp = cliSettingsFromAppConfig(name)
+  const model = MODEL_FLAG || fromApp.model
+  const thinkingLevel = fromApp.thinkingLevel
+  console.log(`  模型: ${model || '(不传 -m，用该 CLI 自己的默认模型)'} · 思考强度: ${thinkingLevel}`)
   const dir = mkdtempSync(join(tmpdir(), 'ahub-cli-think-'))
   const events = []
   const reqId = `think-${name}-${Date.now()}`
@@ -38,7 +68,7 @@ for (const name of NAMES) {
     const settled = await new Promise((resolve) => {
       const timer = setTimeout(() => resolve({ timeout: true }), 180000)
       void cli
-        .cliChatStream(name, { workDir: dir, thinkingLevel: 'low' }, reqId, [{ role: 'user', content: PROMPT }], (ev) => {
+        .cliChatStream(name, { workDir: dir, thinkingLevel, model }, reqId, [{ role: 'user', content: PROMPT }], (ev) => {
           events.push(ev)
           if (ev.type === 'done' || ev.type === 'error') {
             clearTimeout(timer)

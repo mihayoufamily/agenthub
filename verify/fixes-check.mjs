@@ -2239,6 +2239,16 @@ console.log('\n[CLI] codex 显式要 workspace-write 沙箱（默认 read-only �
   ok('codex 用 -C 显式指定工作根（且在 prompt 之前），避免 apply_patch 落点靠猜',
     ci >= 0 && withDir[ci + 1] === 'D:\\out dir' && ci < withDir.indexOf('do it'),
     `args=${JSON.stringify(withDir)?.slice(0, 200)}`)
+  // 参数顺序的**不变量**（不是只钉 -C）：codex 的签名是 `exec [OPTIONS] [PROMPT]`，prompt 必须是最后一个。
+  // 真机踩到的证据：`-m`/`-c` 追加在位置参数之后时，`-m` 侥幸生效而 `-c model_reasoning_effort` 没换来
+  // 任何 reasoning 事件——所以"选项排在 prompt 之后"这一整类写法都要红。
+  const allOpts = typeof cliArgsFor === 'function'
+    ? cliArgsFor('codex', 'do it', '', { workDir: 'D:\\out dir', model: 'gpt-6-luna', thinkingLevel: 'high' }) : []
+  const pi = allOpts.indexOf('do it')
+  ok('codex 的 prompt 恒为最后一个参数（-C/-m/-c 全部排在它之前）',
+    pi >= 0 && pi === allOpts.length - 1 &&
+      allOpts.indexOf('-C') < pi && allOpts.indexOf('-m') < pi && allOpts.lastIndexOf('-c') < pi,
+    `args=${JSON.stringify(allOpts)?.slice(0, 240)}`)
   // file_change 两种形状都要能取出 path（只认旧形状会让产物登记静默丢掉）
   const fch = typeof mod.codexFileChanges === 'function' ? mod.codexFileChanges : null
   const modern = fch ? fch({ type: 'file_change', changes: [{ path: 'D:\\o\\a.c', kind: 'add' }, { path: '', kind: 'add' }] }) : []
