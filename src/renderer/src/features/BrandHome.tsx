@@ -1,5 +1,6 @@
-// 品牌首页：Logo 上半屏 + "今天要构建什么" + 输入区 + 右上角模式入口（点击弹说明卡片）
+// 品牌首页：Logo 上半屏 + "今天要构建什么" + 输入区 + 输入卡下方的模式入口（悬浮/聚焦出说明卡片）
 // 规则：先写需求后选模式允许；直接发送未选模式时先弹模式选择；选模式不自动提交需求；
+//       第一次点入口 = 选中，再点同一个已选中的入口 = 直接进入该模式；
 //       说明卡片关闭不切模式、不提交输入，草稿与附件保持不变
 import React, { useEffect, useState } from 'react'
 import type { WorkMode } from '@shared/types'
@@ -15,18 +16,22 @@ import { Icon } from '../components/Icons'
 import { enterMode } from './ModeSwitch'
 
 /** 模式说明文案（文档三.1 建议文案） */
-const MODE_INFO: Record<WorkMode, { title: string; pill: string; desc: string; enter: string }> = {
+const MODE_INFO: Record<WorkMode, { title: string; pill: string; desc: string; enter: string; why: string }> = {
   workbench: {
     title: '工作站模式',
     pill: '工作站',
     desc: '在一个界面中自由切换不同 Agent。每个 Agent 保留自己的会话和工作状态，适合由你直接安排任务、查看结果和决定下一步。',
-    enter: '进入工作站模式'
+    enter: '进入工作站模式',
+    // spec C1：介绍文案要负责说清"为什么要先选"
+    why: '进工作站要先有可用 Agent；进工作流要三角色可用。先让你选是为了省掉后面的返工。'
   },
   workflow: {
     title: '工作流模式',
     pill: '工作流',
     desc: '让规划、执行、审核三个角色协作完成任务。系统按流程交接任务、检查结果并在必要时返工，支持自动审核与人工确认。',
-    enter: '进入工作流模式'
+    enter: '进入工作流模式',
+    // spec C1：介绍文案要负责说清"为什么要先选"
+    why: '进工作站要先有可用 Agent；进工作流要三角色可用。先让你选是为了省掉后面的返工。'
   }
 }
 
@@ -78,48 +83,6 @@ export function BrandHome() {
 
   return (
     <div className="brand-home">
-      <div className="mode-pill-wrap">
-        <div className="mode-pill" role="radiogroup" aria-label="工作模式选择">
-          {(['workbench', 'workflow'] as const).map((m) => (
-            <button
-              key={m}
-              className={pendingMode === m ? 'active' : ''}
-              onClick={() => {
-                setPendingMode(m)
-                setInfoKey((k) => (k === m ? null : m)) // 再次点击同一入口：关闭说明
-              }}
-              aria-checked={pendingMode === m}
-              role="radio"
-              title={`查看${MODE_INFO[m].title}说明`}
-            >
-              {MODE_INFO[m].pill}
-            </button>
-          ))}
-        </div>
-
-        {/* 模式说明卡片：互斥不叠加；关闭不切模式、不提交输入 */}
-        {infoKey && (
-          <div className="mode-info card-enter">
-            <div className="mi-title">{MODE_INFO[infoKey].title}</div>
-            <div className="mi-desc">{MODE_INFO[infoKey].desc}</div>
-            <div className="mi-actions">
-              <Button
-                variant="primary"
-                onClick={() => {
-                  const m = infoKey
-                  setInfoKey(null)
-                  enterMode(m)
-                }}
-              >
-                <Icon name="chevron" size={13} /> {MODE_INFO[infoKey].enter}
-              </Button>
-              <Button variant="ghost" onClick={() => setInfoKey(null)}>关闭</Button>
-            </div>
-            <div className="mi-note">关闭说明不会切换模式，草稿与附件保持不变。</div>
-          </div>
-        )}
-      </div>
-
       <div className="home-logo-wrap">
         <div className="home-logo">
           <Logo />
@@ -139,6 +102,60 @@ export function BrandHome() {
           enterToSend={enterToSend}
           autoFocusOnMount
         />
+      </div>
+
+      {/* C1：模式选择在输入卡下方（原先钉在视口右上角，离"要做的决定"最远） */}
+      <div className="mode-pill-wrap">
+        <div className="mode-pill" role="radiogroup" aria-label="工作模式选择" onBlur={() => setInfoKey(null)}>
+          {(['workbench', 'workflow'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="radio"
+              aria-checked={pendingMode === m}
+              data-mode={m}
+              className={pendingMode === m ? 'active' : ''}
+              // 悬浮或键盘聚焦都展开介绍：只做 hover 的话，触屏与键盘用户永远拿不到解释
+              onMouseEnter={() => setInfoKey(m)}
+              onFocus={() => setInfoKey(m)}
+              onClick={() => {
+                if (pendingMode === m) {
+                  // 第二次点同一个已选中的入口 = 用户已经看过了，直接进
+                  setInfoKey(null)
+                  enterMode(m)
+                  return
+                }
+                setPendingMode(m)
+                setInfoKey(m)
+              }}
+            >
+              {MODE_INFO[m].pill}
+            </button>
+          ))}
+        </div>
+
+        {/* 模式说明卡片：互斥不叠加；关闭不切模式、不提交输入 */}
+        {infoKey && (
+          <div className="mode-info card-enter">
+            <div className="mi-title">{MODE_INFO[infoKey].title}</div>
+            <div className="mi-desc">{MODE_INFO[infoKey].desc}</div>
+            <div className="mi-note">{MODE_INFO[infoKey].why}</div>
+            <div className="mi-actions">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  const m = infoKey
+                  setInfoKey(null)
+                  enterMode(m)
+                }}
+              >
+                <Icon name="chevron" size={13} /> {MODE_INFO[infoKey].enter}
+              </Button>
+              <Button variant="ghost" onClick={() => setInfoKey(null)}>关闭</Button>
+            </div>
+            <div className="mi-note">关闭说明不会切换模式，草稿与附件保持不变。</div>
+          </div>
+        )}
       </div>
 
       <Modal

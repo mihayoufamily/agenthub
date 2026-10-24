@@ -393,6 +393,70 @@ const main = async () => {
     // 先确认视图在首页：应用一启动会恢复用户上次打开的任务，那时首页 composer 不在 DOM 里，
     // 下面两条溢出审计会量到 null（量的不是产品）。收尾把视图还回去。
     homePrev = (await ensureWfHome(cdp)).prev
+    // C1 的三条断言量的是**品牌首页**的 pill，而上面那行 ensureWfHome 只关任务、不改屏
+    // （closeTask 里没有 setScreen），此刻应用还停在第 2～5 步留下的 workbench 屏，
+    // .mode-pill-wrap 根本不在 DOM 里。先显式回品牌首页再量，否则绿红量的都不是被测对象。
+    await js(cdp, 'window.__ahub_debug.brand()')
+    await sleep(700)
+    // C1：模式选择从右上角绝对定位下移到输入卡下方；hover/聚焦出介绍；一点选中、二点进入
+    const pillBox = await js(cdp, `(() => {
+      const wrap = document.querySelector('.mode-pill-wrap')
+      const ask = document.querySelector('.home-ask') || document.querySelector('.home-composer-wrap')
+      if (!wrap || !ask) return null
+      const w = wrap.getBoundingClientRect(), a = ask.getBoundingClientRect()
+      return { belowAsk: w.top >= a.bottom - 2, topFromAsk: Math.round(w.top - a.bottom) }
+    })()`)
+    ok('模式选择 pill 已下移到输入卡下方（不再钉在视口右上角）', !!pillBox && pillBox.belowAsk, JSON.stringify(pillBox))
+    // 计划里这两条写成"一次求值里既按下又读 DOM"，真机量不到，原因都不在产品（一次性探针实测：
+    // focus() 之后 20ms 卡片就在 DOM 里了、同一次求值里读是 false；同一次求值连点两次 aria-checked
+    // 已经变 true 但 onClick 拿到的是上一次的渲染快照）：
+    // ① React 的 onMouseEnter 由原生 mouseover/mouseout 派生，直接派发 MouseEvent('mouseenter') 它收不到
+    //    → 悬浮这条路改用 CDP Input.dispatchMouseEvent 走真鼠标，不拿"派发成功"当"用户悬浮过"；
+    // ② React 18 把事件里的更新排到下一个任务提交（真人的一次动作与一次观察本来就在两个任务里）
+    //    → 动作与观察分两次求值，与本套件其余各条同一个写法。
+    const pillPt = await js(cdp, `(() => {
+      const b = document.querySelector('.mode-pill-wrap [data-mode="workbench"]')
+      if (!b) return null
+      const q = b.getBoundingClientRect()
+      return { x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2) }
+    })()`)
+    let hoverInfo = false
+    if (pillPt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pillPt.x, y: pillPt.y, button: 'none' })
+      await sleep(400)
+      hoverInfo = await js(cdp, `(() => {
+        const e = document.querySelector('.mode-info')
+        return e ? String(e.querySelector('.mi-title')?.textContent ?? 'open') : ''
+      })()`)
+      // 收起：Escape 走既有的关闭路径，别让悬浮的余温冒充键盘那条路的成果
+      await js(cdp, `(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true })()`)
+      await sleep(400)
+    }
+    await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]')?.focus(); return true })()`)
+    await sleep(400)
+    const focusInfo = await js(cdp, `(() => !!document.querySelector('.mode-info'))()`)
+    ok('悬浮或键盘聚焦会展开模式介绍', !!hoverInfo && !!focusInfo, JSON.stringify({ hoverInfo, focusInfo }))
+    // 二次点击进入：先确认"第一点只选中、没进"，再确认"再点同一个才进"（少一面就退回
+    // "点一下就进"或"点两下还在原地"这两种都被计划判为错的行为）
+    const sel = await js(cdp, `(() => {
+      const b = document.querySelector('.mode-pill-wrap [data-mode="workflow"]')
+      if (!b) return { found: false }
+      b.click()
+      return { found: true }
+    })()`)
+    await sleep(400)
+    const selected = await js(cdp, `(() => {
+      const b = document.querySelector('.mode-pill-wrap [data-mode="workflow"]')
+      return { checked: b?.getAttribute('aria-checked') ?? null, screen: window.__ahub_debug.state().screen }
+    })()`)
+    await js(cdp, '(() => { document.querySelector(\'.mode-pill-wrap [data-mode="workflow"]\')?.click(); return true })()')
+    await sleep(600)
+    const twoClick = await js(cdp, '(() => ({ screen: window.__ahub_debug.state().screen }))()')
+    ok('同一个已选中的入口再点一次直接进入该模式',
+      sel.found && selected.checked === 'true' && selected.screen === 'brand' && twoClick.screen === 'workflow',
+      JSON.stringify({ ...selected, ...twoClick }))
+    await js(cdp, 'window.__ahub_debug.brand()')
+    await sleep(700)
     await js(cdp, 'window.__ahub_debug.workflow()')
     await sleep(1200)
     await shot('09-workflow-home')

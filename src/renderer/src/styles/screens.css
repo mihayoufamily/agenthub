@@ -205,7 +205,7 @@
   animation: rise-in 380ms var(--ease) 220ms both;
 }
 
-/* 右上角模式选择 */
+/* 模式选择 pill（C1 起随首页内容流排布；定位与入场动画的口径见下方 .mode-pill-wrap） */
 .mode-pill {
   position: absolute;
   top: 20px;
@@ -232,8 +232,13 @@
 .mode-pill button:active { transform: translateY(0.5px); }
 .mode-pill button.active { background: var(--brand-ink); color: var(--brand-cream); }
 
-/* 模式说明卡片（点击入口弹出；文档三.1） */
-.mode-pill-wrap { position: absolute; top: 20px; right: 24px; opacity: 0; animation: rise-in 380ms var(--ease) 320ms both; z-index: 30; }
+/* C1：模式选择下移到输入卡下方——右上角那个位置原先离"要做的决定"最远，
+   且窗口窄时被 logo 与边距挤。改成流式排布后它跟着内容走，窄窗也不会悬空。
+   这里用 relative 而不是 static：介绍卡 .mode-info 是 `top: calc(100% + 10px); right: 0` 的
+   绝对定位，锚点必须是这个包裹层；一旦 static，它的包含块上溯到 .brand-home，卡片会被推到
+   整屏之下（DOM 在、看不见），C1 要的"悬浮出介绍"就成了一句空话。z-index 同理要有定位才生效。
+   入场动画保留在内层 .mode-pill 上（rise-in 380ms/320ms，与原来同一档），不重复播两遍。 */
+.mode-pill-wrap { position: relative; z-index: 30; margin-top: 10px; }
 .mode-pill-wrap .mode-pill { position: static; }
 .mode-info {
   position: absolute;

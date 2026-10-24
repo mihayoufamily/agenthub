@@ -37,7 +37,9 @@ const DEFAULT_SUITE_TIMEOUT_MS = 10 * 60 * 1000
 const SUITES = [
   { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 504, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 52, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态）' },
-  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 79, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出' },
+  // ui=82：2026-10-24 v0.5.0 Task 1 实测（结果：82 PASS / 0 FAIL），比上一基线多的是 C1 那三条
+  // （模式 pill 下移到输入卡下方、悬浮或聚焦展开介绍、已选中再点一次直接进入）。
+  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 82, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出、首页模式选择（位置/展开/二次进入）' },
   { name: 'approval', tier: 'gui', script: 'approval-shot.mjs', min: 94, what: '命令审批真机：没批准不执行、拒绝/本次/始终、危险形态仍要问、历史进设置' },
   { name: 'cli-e2e', tier: 'gui', script: 'cli-e2e.mjs', min: 10, what: 'CLI 适配器经真实 IPC 的行为' },
   { name: 'cli-shot', tier: 'gui', script: 'cli-shot.mjs', min: 4, what: '本机 CLI 面板截图（5 个条目与实测状态）', gate: false },
