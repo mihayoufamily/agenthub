@@ -18,3 +18,6 @@ verify/*.zip
 
 # SDD 隔离工作区（worktree），不入库
 .worktrees/
+
+# CI 里 verify 的落盘输出（失败时上传为 artifact，本地跑也不会进 git）
+verify.log

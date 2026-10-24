@@ -26,6 +26,17 @@ jobs:
       # 逻辑层回归：不起应用、不花额度。此前 CI 只做构建，断言从未在机器上跑过。
       # 断言条数不在这里写死（会随套件增长漂移）：verify/run-all.mjs 的 SUITES 表带每套件
       # min（某一轮实测的 PASS 数），条数一掉就跑红，CI 只要 `npm run verify` 退出码为 0。
-      - run: npm run verify
+      #
+      # 输出同时落盘并上传为 artifact：GitHub 的 job 日志会把长输出截断（实测一次失败只留下
+      # 十几行 PASS），"红了但看不出是哪条"会让下一次排查只能靠猜。`shell: bash` 的默认参数
+      # 带 `-eo pipefail`，所以 tee 之后退出码仍是 npm 的。
+      - run: npm run verify 2>&1 | tee verify.log
+        shell: bash
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-log
+          path: verify.log
+          if-no-files-found: warn
       # 运行时依赖只有 react/react-dom/zustand；出高危就拦，dev 依赖噪音不拦
       - run: npm audit --omit=dev --audit-level=high
