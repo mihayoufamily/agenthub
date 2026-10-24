@@ -443,6 +443,36 @@ const main = async () => {
     await js(cdp, `(() => { document.querySelector('.modal [aria-label="关闭"]')?.click(); return true })()`)
     await sleep(500)
 
+    // 批次 D：侧栏 ⋯ 扩成 Agent 管理卡片（常驻提示词 + Skill 注入方式 + Skill 清单），
+    // 且它是唯一编辑入口——同一字段两处可写必然漂移。
+    // 点击与观察分两次求值：React 18 不会在同一个任务里提交状态更新，
+    // 同一次求值里 querySelector 拿到的是点击前的 DOM（这个坑本轮已踩过两次）。
+    await js(cdp, `(() => { document.querySelector('.agent-item .more')?.click(); return true })()`)
+    await sleep(600)
+    const card = await js(cdp, `(() => {
+      const wrap = document.querySelector('.agent-menu')
+      const c = wrap && wrap.querySelector('[data-agent-card]')
+      if (!c) return { found: !!wrap, card: false }
+      return {
+        found: true, card: true,
+        hasPrompt: !!c.querySelector('textarea'),
+        hasSkillMode: !!c.querySelector('[data-skill-mode]'),
+        hasSkillList: !!c.querySelector('[data-skill-pick]'),
+        keepsOld: /重命名/.test(wrap.innerText) && /移除/.test(wrap.innerText)
+      }
+    })()`)
+    ok('侧栏 ⋯ 展开的是 Agent 管理卡片（常驻提示词 + Skill 注入方式 + Skill 清单）',
+      card.card && card.hasPrompt && card.hasSkillMode && card.hasSkillList, JSON.stringify(card))
+    ok('原有两项（重命名 / 移除）仍在卡片里，没被这次扩展挤掉', card.keepsOld === true, JSON.stringify(card))
+    const fits = await js(cdp, `(() => {
+      const m = document.querySelector('.agent-menu'); if (!m) return null
+      const r = m.getBoundingClientRect()
+      return { inside: r.top >= 0 && r.bottom <= window.innerHeight + 1, h: Math.round(r.height) }
+    })()`)
+    ok('卡片变高后菜单仍完整落在视口内（翻转判定按实际高度，不再按 82px 猜）', !!fits && fits.inside, JSON.stringify(fits))
+    await js(cdp, `(() => { document.body.click(); return true })()`)
+    await sleep(400)
+
     // ---- 6. 工作流首页（保存任务卡片是否遮挡）----
     // 先确认视图在首页：应用一启动会恢复用户上次打开的任务，那时首页 composer 不在 DOM 里，
     // 下面两条溢出审计会量到 null（量的不是产品）。收尾把视图还回去。

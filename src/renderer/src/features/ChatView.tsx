@@ -1213,24 +1213,16 @@ function ModelManageModal({ agent, onClose }: { agent: AgentConfig; onClose: () 
           </div>
         )}
 
-        {/* 常驻提示词：该执行者每次被调用都自动带上的长期要求 */}
+        {/* 常驻提示词：侧栏 ⋯ 的 Agent 管理卡片是唯一编辑入口，这里只读——
+            同一字段两处可写必然漂移（spec 批次 D）。 */}
         {!agent.isDemo && (
           <div className="form-row">
             <label>常驻提示词（每次调用自动注入）</label>
-            <textarea
-              defaultValue={agent.systemPrompt ?? ''}
-              onBlur={(e) => {
-                const v = e.target.value.trim()
-                if (v === (agent.systemPrompt ?? '').trim()) return
-                updateAgent(agent.id, { systemPrompt: v || undefined })
-                useUi.getState().toast(v ? '常驻提示词已保存（工作站对话与工作流角色都会注入）' : '已清空常驻提示词', 'ok')
-              }}
-              placeholder="例如：始终用中文回答；改代码前先跑测试；不要输出解释性前言。"
-              rows={4}
-              style={{ width: '100%', fontSize: 12.5, lineHeight: 1.6, fontFamily: 'inherit' }}
-            />
+            <div className="ro-block word-break" data-prompt-readonly="1">
+              {agent.systemPrompt?.trim() || '（未设置）'}
+            </div>
             <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4, lineHeight: 1.5 }}>
-              失焦即保存。工作流里它排在角色协议之后，不会覆盖输出格式与能力边界；与 Skill 的区别是"我对这个执行者的长期要求"，不是可复用的方法包。
+              这里只读。在侧栏点该 Agent 的 ⋯ 可编辑常驻提示词与 Skill 绑定——同一个字段两处可写必然漂移。
             </div>
           </div>
         )}

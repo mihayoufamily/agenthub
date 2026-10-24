@@ -4,13 +4,14 @@ import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
 import { Icon } from '../components/Icons'
+import { AgentManageCard } from '../components/AgentManageCard'
 import { LogoMark } from '../components/Logo'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
 import { cls, fmtTokens } from '../lib/utils'
 import { WfTaskList } from './WfChips'
 
 const MENU_W = 190
-const MENU_H = 82 // 两个菜单项的实测高度（翻转判定用）
+const MENU_H = 336 // Agent 管理卡片的实测高度（翻转判定用；跑完 ui-shot 的"菜单完整落在视口内"断言后按实测校准）
 
 export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => void }) {
   const agents = useAgents((s) => s.agents)
@@ -159,18 +160,23 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
         ))}
       </div>
 
-      {/* Agent 操作菜单：fixed 定位（脱离滚动容器），按剩余空间向上/向下翻转 */}
+      {/* Agent 管理卡片：fixed 定位（脱离滚动容器），按剩余空间向上/向下翻转 */}
       {menuFor && menuPos && (
         <div
           className={cls('wf-detail', 'agent-menu')}
           style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, width: MENU_W, zIndex: 70 }}
         >
-          <button className="foot-btn" onClick={() => { setRenaming(menuFor); setMenuFor(null) }}>
-            <Icon name="reorder" size={13} /> 重命名
-          </button>
-          <button className="foot-btn" onClick={() => { setRemoveTarget(menuFor); setMenuFor(null) }}>
-            <Icon name="close" size={13} /> 移除…
-          </button>
+          <AgentManageCard
+            agentId={menuFor}
+            onRename={() => {
+              setRenaming(menuFor)
+              setMenuFor(null)
+            }}
+            onRemove={() => {
+              setRemoveTarget(menuFor)
+              setMenuFor(null)
+            }}
+          />
         </div>
       )}
 
