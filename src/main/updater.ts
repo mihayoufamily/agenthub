@@ -47,14 +47,16 @@ export async function checkUpdate(manual: boolean): Promise<UpdateCheckResult> {
     } catch { /* 状态读取失败照常检查 */ }
   }
   try {
-    writeFileSync(statePath(), JSON.stringify({ lastCheck: Date.now() }))
-  } catch { /* 持久化失败不阻塞检查 */ }
-  try {
     const res = await net.fetch(RELEASES_API, {
       headers: { 'User-Agent': 'AgentHub-Updater', Accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(10000)
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    // lastCheck 只在真拿到响应后写：写在 fetch 之前的话，"没查成"（离线/超时/非 2xx）会被当成
+    // "查过了"，一次失败就把自动检查再压 3 天（旧写法正是这样，离线一次 → 3 天不再自动检查）
+    try {
+      writeFileSync(statePath(), JSON.stringify({ lastCheck: Date.now() }))
+    } catch { /* 持久化失败不阻塞检查 */ }
     const data = (await res.json()) as { tag_name?: string }
     const tag = (data.tag_name ?? '').trim()
     return { current, hasUpdate: cmpVersion(tag, current) > 0, latest: tag || undefined, releaseUrl: RELEASES_URL }

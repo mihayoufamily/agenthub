@@ -16,6 +16,9 @@ const PROTOCOL_VERSION = '2024-11-05'
 const DEFAULT_TIMEOUT = 15_000
 const MAX_BODY = 512 * 1024
 
+/** 单行缓冲上限（字符）：stdio 是换行分隔的 JSON-RPC，server 持续输出不含换行的数据会让行缓冲无界增长 */
+const MAX_LINE_BUFFER = 1 << 20
+
 /** 旧版单命令配置的拒收码：界面按这个码渲染，不靠文案匹配 */
 export const MCP_LEGACY_CODE = 'invalid_legacy_command'
 
@@ -129,6 +132,8 @@ export class McpClient {
   private seq = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   private buf = ''
+  /** 丢弃过超长未完结行：一条连接只报一次，避免 server 疯狂输出时刷屏 */
+  private droppedLine = false
   private proc?: ChildProcess
   private closed = false
 
@@ -168,6 +173,17 @@ export class McpClient {
       const line = this.buf.slice(0, idx).trim()
       this.buf = this.buf.slice(idx + 1)
       if (line) this.handleLine(line)
+    }
+    // 单行上限：while 已把完整行全部消费，剩下的 this.buf 是未完结行。JSON-RPC 一行一条
+    // 消息，1MB 还等不到换行只能是 server 违例或异常输出——整个丢掉（buffer 清空）保住
+    // 主进程内存；残余字节会在下一个换行处拼成一行坏数据，走上面"非协议行丢掉"的既有容错。
+    // 这里没有逐请求的事件通道可发 notice，console 镜像一行（本文件日志口径），一条连接只报一次。
+    if (this.buf.length > MAX_LINE_BUFFER) {
+      this.buf = ''
+      if (!this.droppedLine) {
+        this.droppedLine = true
+        console.log(`[mcp] ${this.server.name} 输出单行超过 1MB，已丢弃（协议违例或异常输出）`)
+      }
     }
   }
 

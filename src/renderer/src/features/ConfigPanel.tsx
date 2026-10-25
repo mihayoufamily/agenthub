@@ -27,7 +27,10 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
     const cur = config[key]
     const usable = (id: string) => {
       const a = agents.find((x) => x.id === id)
-      return !a || a.isDemo === true || (a.kind === 'model' && a.status === 'available')
+      // 与 RolePicker / store.validate 同口径：演示 Agent 恒可用，模型与 CLI Agent 一律按
+      // status === 'available' 判。原写法只放行 kind === 'model'，CLI 角色在这里永远被判
+      // "不可用：未连接"，而角色浮层（RolePicker）却放行——两个入口必须一个判定。
+      return !a || a.isDemo === true || (a.kind !== 'demo' && a.status === 'available')
     }
     return (
       <div className="form-row">

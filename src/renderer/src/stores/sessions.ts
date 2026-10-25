@@ -55,8 +55,15 @@ function activeOf(state: Core, agentId: string): AgentSession | undefined {
   return list.find((x) => x.id === state.activeOf[agentId]) ?? list[list.length - 1]
 }
 
-/** 变更活跃会话（无会话时自动创建默认会话；activeOf 失效时自动纠正），返回 set 所需 partial */
-function withActive(state: Core, agentId: string, fn: (ses: AgentSession) => AgentSession): { sessions: Record<string, AgentSession[]>; activeOf: Record<string, string> } {
+/**
+ * 变更活跃会话（无会话时自动创建默认会话；activeOf 失效时自动纠正），返回 set 所需 partial。
+ * Agent 已被删除时返回空 partial：删除后才到的残留流式事件（delta/usage/done…）不允许为已删
+ * id 自动重建会话并 persist 落盘——那会留下幽灵会话文件，模型的输出也继续白烧。
+ * useAgents 是顶层 import 但只在运行时 getState() 取值：sessions↔agents 互相引用成环，
+ * 两边都不在模块求值期碰对方，ESM/rollup 的活绑定下环安全。
+ */
+function withActive(state: Core, agentId: string, fn: (ses: AgentSession) => AgentSession): Partial<Pick<SessionsState, 'sessions' | 'activeOf'>> {
+  if (!useAgents.getState().agents.some((a) => a.id === agentId)) return {}
   let list = state.sessions[agentId]
   let activeId = state.activeOf[agentId]
   if (!list || list.length === 0) {
@@ -278,7 +285,17 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       // 长会话要么撑爆窗口报错、要么悄悄丢掉上下文，现在改成明确标出的规则式摘要
       const turns = (activeOf(get(), agentId)?.messages ?? [])
         // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位）
-        .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.error && !m.demo && !m.streaming && m.id !== msgId)
+        .filter((m) => !m.error && !m.demo && !m.streaming && m.id !== msgId)
+        // handoff 交接此前只留在界面上：它写入的是 role:'system'，被旧的"只放行 user/assistant"
+        // 口径挡在模型历史之外——对接收方模型，"有 Agent 交过接"等于没发生。这里把它映射成一条
+        // user 消息（带来源名前缀、保持原时序）喂进请求；会话存储里的 system 卡片不动：
+        // 留痕给用户看与喂给模型是两件事，此前只有前一件
+        .map((m) =>
+          m.role === 'system' && m.handoff
+            ? { ...m, role: 'user' as const, text: `[来自 Agent「${m.handoff.fromAgentName}」的交接]\n${m.text}` }
+            : m
+        )
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
         .slice(-HISTORY_WINDOW)
       const sysTokens = systemBlocks.reduce((n, b) => n + estimateTokens(b), 0)
       const win = contextWindowOf(agent.modelConfig?.modelId ?? agent.model, agent.modelConfig?.contextWindow ?? agent.cliConfig?.contextWindow)

@@ -9,7 +9,7 @@
  * 免得"自我提权"顺着配置通道回来。
  */
 import { join } from 'node:path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
 import type { ApprovalDecision, ApprovalRecord, ApprovalRequest } from '../shared/types'
 import { dangerousHit, rulesToAdd } from '../shared/approvals'
 
@@ -41,6 +41,8 @@ function read(): ApprovalFile {
     const raw = JSON.parse(readFileSync(dataPath, 'utf-8')) as Partial<ApprovalFile>
     return { rules: raw.rules ?? {}, mcpTrusted: raw.mcpTrusted ?? [], records: raw.records ?? [] }
   } catch {
+    // fail-safe 返回空（读不到/读不懂就当空起步，不把判定打死）；写侧已原子化（write 的 tmp+rename），
+    // 正常不该再读到写一半的残缺 JSON——走到这里多半是外部把文件改坏了
     return { rules: {}, mcpTrusted: [], records: [] }
   }
 }
@@ -50,7 +52,13 @@ function write(data: ApprovalFile) {
   try {
     const dir = join(dataPath, '..')
     if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(dataPath, JSON.stringify(data, null, 2), 'utf-8')
+    // 原子写：先写同目录 .tmp 再 rename 替换。直接 writeFileSync 覆盖时进程写一半崩溃，
+    // approvals.json 会变成残缺 JSON，read 的 fail-safe 返回空——白名单/MCP 信任/审批历史全静默丢。
+    // 同目录 renameSync 在 NTFS 上是原子替换：防的是进程写盘中断，不承诺断电级持久
+    // （NTFS 日志下 rename 替换已是本层能做的最强手段）。
+    const tmp = `${dataPath}.tmp`
+    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8')
+    renameSync(tmp, dataPath)
   } catch {
     // 审批文件写不进不能把真实调用打死；下一次判定会重新读
   }

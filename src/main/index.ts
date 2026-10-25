@@ -602,5 +602,7 @@ if (gotLock) {
 
 // 主题 IPC（在 ipc.ts 中注册其余通道）
 ipcMain.handle('theme:set', (_e, theme: 'light' | 'dark' | 'system') => {
+  // 值域闸门：nativeTheme.themeSource 的 setter 对非法值会 throw，渲染层传脏值不该掀掉主进程调用链
+  if (theme !== 'light' && theme !== 'dark' && theme !== 'system') return
   nativeTheme.themeSource = theme
 })

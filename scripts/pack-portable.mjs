@@ -1,6 +1,6 @@
 // 便携目录打包（纯 JS，不依赖 electron-builder 的 Go 二进制）
 // 产出 release/AgentHub-win-x64/：直接运行 AgentHub.exe（即 electron.exe 改名）
-import { cpSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { cpSync, rmSync, mkdirSync, renameSync, writeFileSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const cwd = process.cwd()
@@ -16,11 +16,19 @@ if (!existsSync(join(cwd, 'out', 'main', 'index.js')) || !existsSync(join(cwd, '
   process.exit(1)
 }
 
-// 目录被其他程序占用（如资源管理器打开中）时删除会失败，改为原地覆盖
+// 目录被其他程序占用（如资源管理器打开中）时删除会失败。原地覆盖会把旧构建里已删除/改名的文件
+// 混进新包，所以优先"挪走再新建"，挪不动才退回原地覆盖（显式警告，让人知道包里可能有残留）。
+let leftoverDir = ''
 try {
   rmSync(outDir, { recursive: true, force: true })
 } catch {
-  console.log('[pack] 旧目录被占用，改为原地覆盖')
+  leftoverDir = `${outDir}.old-${Date.now()}`
+  try {
+    renameSync(outDir, leftoverDir)
+    console.log(`[pack] 旧目录删不掉（被占用），已挪到 ${leftoverDir}，构建完成后清理`)
+  } catch {
+    console.warn('[pack] 警告：旧目录无法移走，包内可能混入上一版残留文件')
+  }
 }
 mkdirSync(join(outDir, 'resources', 'app'), { recursive: true })
 
@@ -58,6 +66,15 @@ writeFileSync(join(outDir, '使用说明.txt'), [
   '4. 首次使用建议点击"添加 Agent → 演示 Agent"体验完整流程。',
   ''
 ].join('\n'))
+
+// 收尾：清掉前面挪走的旧目录；失败只打一行警告（不影响本次产出，下轮打包会再试删一次）
+if (leftoverDir) {
+  try {
+    rmSync(leftoverDir, { recursive: true, force: true })
+  } catch {
+    console.warn(`[pack] 警告：旧目录清理失败（可手动删除）：${leftoverDir}`)
+  }
+}
 
 console.log(`[pack] done -> ${resolve(outDir)}`)
 console.log('[pack] 运行 AgentHub.exe 即可（免安装）')

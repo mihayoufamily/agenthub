@@ -52,7 +52,6 @@ export function TaskView() {
   const run = useWorkflow((s) => s.run)
   const config = useWorkflow((s) => s.config)
   const stop = useWorkflow((s) => s.stop)
-  const supplement = useWorkflow((s) => s.supplement)
   const exportRun = useWorkflow((s) => s.exportRun)
   const [detailOpen, setDetailOpen] = useState(false)
   const [now, setNow] = useState(Date.now())
@@ -155,18 +154,22 @@ export function TaskView() {
               </div>
             </div>
           )}
-          {(run.status === 'token_limit' || run.status === 'budget_limit') && (
+          {(run.status === 'token_limit' || run.status === 'budget_limit' || run.status === 'timeout') && (
             <div className="gate-card" style={{ borderColor: 'rgba(180,83,9,.4)', background: 'var(--warn-bg)' }} data-limit-card={run.status}>
               <div className="gate-title" style={{ color: 'var(--warn)' }}>
                 <Icon name="warn" size={16} />
                 {run.status === 'budget_limit'
                   ? `折算费用已达预算上限（${config.budgetYuan} 元），任务自动停止`
-                  : '累计 Token 已达上限，任务自动停止'}
+                  : run.status === 'timeout'
+                    ? `任务超时（${config.timeoutMin} 分钟），已自动停止`
+                    : '累计 Token 已达上限，任务自动停止'}
               </div>
               <div className="gate-review">
                 {run.status === 'budget_limit'
                   ? '预算闸只统计折算得出金额的调用（无公开单价又未自填单价的模型不计入），实际花费可能高于这个数。已完成的卡片与记录均已保留，可导出或以此为目标开新任务。'
-                  : '为控制成本已按设置自动停止（可在工作流设置中调整 Token 上限）。已完成的卡片与记录均已保留，可导出或以此为目标开新任务。'}
+                  : run.status === 'timeout'
+                    ? '超时视为停止条件：已完成的卡片、记录与产物引用均保留，可导出或以此为目标开新任务。'
+                    : '为控制成本已按设置自动停止（可在工作流设置中调整 Token 上限）。已完成的卡片与记录均已保留，可导出或以此为目标开新任务。'}
               </div>
               <div className="gate-actions">
                 <Button variant="secondary" onClick={() => useWorkflow.getState().continueModify()}>以此为目标开新任务</Button>
@@ -175,8 +178,9 @@ export function TaskView() {
               </div>
             </div>
           )}
-          {/* 终态操作卡：已取消/失败/超时——此前这些终态没有任何出口，
-              用户被留在死任务界面（补充输入无效、无法新建任务），实测修复 */}
+          {/* 终态操作卡：已取消/失败——此前这些终态没有任何出口，
+              用户被留在死任务界面（补充输入无效、无法新建任务），实测修复。
+              超时/Token 上限/预算上限走上面那张 limit 卡，中断走上面带"从中断处继续"的主卡 */}
           {(['cancelled', 'failed'] as const).includes(run.status as 'cancelled' | 'failed') && (
             <div className="gate-card" style={{ borderColor: 'rgba(220,38,38,.4)', background: 'var(--danger-bg, rgba(220,38,38,.06))' }}>
               <div className="gate-title" style={{ color: 'var(--danger)' }}>
@@ -184,7 +188,7 @@ export function TaskView() {
               </div>
               <div className="gate-review">
                 {run.status === 'cancelled'
-                  ? '任务已被手动停止（或超时）。已产生的卡片与记录均已保留，不会盲目重放可能产生副作用的操作。'
+                  ? '任务已被手动停止。已产生的卡片与记录均已保留，不会盲目重放可能产生副作用的操作。'
                   : '执行过程中出现错误（原因见下方记录/提示）。已产生的卡片与记录均已保留。'}
                 {run.notes && run.notes.length > 0 && (
                   <div style={{ marginTop: 6, color: 'var(--text-2)', lineHeight: 1.6 }}>
@@ -199,26 +203,12 @@ export function TaskView() {
               </div>
             </div>
           )}
-          {run.status === 'interrupted' && (
-            <div className="gate-card" style={{ borderColor: 'rgba(37,99,235,.4)', background: 'var(--info-bg)' }}>
-              <div className="gate-title" style={{ color: 'var(--info)' }}>
-                <Icon name="info" size={16} /> 应用重启导致执行状态未核对
-              </div>
-              <div className="gate-review">
-                已恢复任务记录展示。AgentHub 不会盲目重放可能产生副作用的操作，也不会把未核对的状态当作运行中。
-              </div>
-              <div className="gate-actions">
-                <Button variant="secondary" onClick={() => useWorkflow.getState().continueModify()}>以此为目标开新任务</Button>
-                <Button variant="ghost" onClick={() => void exportRun()}>导出任务记录</Button>
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
-      {/* 终态（已停止/失败/返工上限/中断）不展示补充输入——补充要求只在执行中有效，
-          终态保留输入会让用户误以为还能推进任务；出口统一由终态操作卡提供 */}
-      {!['cancelled', 'failed', 'rework_limit', 'interrupted'].includes(run.status) && (
+      {/* 终态（已停止/失败/返工上限/中断/超时/Token 上限/预算上限）不展示补充输入——补充要求只在执行中有效，
+          终态保留输入会让用户误以为还能推进任务；出口统一由上方各终态操作卡提供 */}
+      {!['cancelled', 'failed', 'rework_limit', 'interrupted', 'timeout', 'token_limit', 'budget_limit'].includes(run.status) && (
         <div className="wb-composer-wrap">
           <div style={{ width: 'min(860px, 100%)' }}>
             <TaskComposer />
@@ -229,20 +219,22 @@ export function TaskView() {
   )
 }
 
-/** 底部补充输入（草稿挂 ui store，独立于工作流执行状态） */
+/** 底部补充输入（本地草稿，独立于工作流执行状态）。
+ *  不再挂 ui store 的 homeDraft：那是"首页待发送需求"的专用通道，工作流里打了补充草稿
+ *  会让工作站的 ChatView 误标"有一条来自首页的需求待发送"。切任务丢草稿是可接受的取舍——
+ *  补充要求本来就只对当前任务有意义。 */
 function TaskComposer() {
-  const homeDraft = useUi((s) => s.homeDraft)
-  const setHomeDraft = useUi((s) => s.setHomeDraft)
+  const [text, setText] = useState('')
   const supplement = useWorkflow((s) => s.supplement)
   return (
     <Composer
-      value={homeDraft}
-      onChange={setHomeDraft}
+      value={text}
+      onChange={setText}
       onSend={() => {
-        const t = homeDraft.trim()
+        const t = text.trim()
         if (t) {
           supplement(t)
-          setHomeDraft('')
+          setText('')
         }
       }}
       placeholder="补充要求…（将在下一轮生效，不修改已执行步骤）"

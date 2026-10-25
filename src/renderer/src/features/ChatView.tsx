@@ -93,14 +93,24 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
     scrollToBottom()
     setNearBottom(true)
     setNewCount(0)
+    // 整个消息列表被换掉，条数差不是"新增"，计数基线要跟着重置
+    prevCount.current = messages.length
   }, [selectedId, activeSesId])
 
   // 新内容到达：底部附近跟随；否则计数提示
   const lastLen = messages.length
   const lastMsgLen = messages.length ? messages[messages.length - 1].text.length : 0
+  // "N 条新内容"只按**消息条数**的增量计：原先 lastMsgLen 一变（最后一条消息的每个流式文本
+  // 增量）也会走 +1 分支，不在底部时一次回复能把计数顶到几十
+  const prevCount = useRef(messages.length)
   useEffect(() => {
-    if (nearBottom) scrollToBottom()
-    else if (lastLen > 0) setNewCount((c) => c + 1)
+    const added = lastLen - prevCount.current
+    prevCount.current = lastLen
+    if (nearBottom) {
+      scrollToBottom()
+      return
+    }
+    if (added > 0) setNewCount((c) => c + added)
   }, [lastLen, lastMsgLen])
 
   const onScroll = () => {
@@ -373,7 +383,10 @@ function ContextUsageBar({
   )
 }
 
-function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentName: string; agentColor: string }) {
+/** memo：流式期间 store 每个 delta 都会重渲染 ChatView，整张消息列表跟着重跑。
+ *  props 全是稳定值（msg 引用 store 只在该条变化时替换，agentName/agentColor 是字符串，
+ *  无内联回调），内容没变的行可整行跳过重绘。 */
+const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentName: string; agentColor: string }) {
   if (msg.role === 'user') {
     return (
       <div className="msg user">
@@ -429,7 +442,7 @@ function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentNam
       </div>
     </div>
   )
-}
+})
 
 /** 会话面板：列表 / 切换 / 重命名 / 删除（fixed 定位防滚动容器裁切；空间不足自动上翻） */
 function SessionPanel({ list, activeId, anchorRef, onSwitch, onNew, onRename, onDelete, onClose }: {
@@ -537,21 +550,23 @@ export function MessageBody({ text }: { text: string }) {
   const parts = text.split(/```/g)
   return (
     <>
-      {parts.map((p, i) =>
-        i % 2 === 1 ? (
+      {parts.map((p, i) => {
+        if (i % 2 !== 1) return <React.Fragment key={i}>{p}</React.Fragment>
+        // 复制与显示用同一份剥过语言行的文本：原先复制的是原文，比屏幕上多一行语言标识
+        // （无语言块则是多一个空行），粘出来就对不上所见
+        const body = p.replace(/^\w*\n/, '')
+        return (
           <div key={i} className="codeblock" style={{ margin: '8px 0' }}>
             <button
               className="copy"
-              onClick={() => void navigator.clipboard.writeText(p)}
+              onClick={() => void navigator.clipboard.writeText(body)}
             >
               复制
             </button>
-            {p.replace(/^\w*\n/, '')}
+            {body}
           </div>
-        ) : (
-          <React.Fragment key={i}>{p}</React.Fragment>
         )
-      )}
+      })}
     </>
   )
 }

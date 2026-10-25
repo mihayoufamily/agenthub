@@ -3,7 +3,7 @@ import React, { useEffect, useRef } from 'react'
 import type { Attachment, Skill } from '@shared/types'
 import { Icon } from './Icons'
 import { IconButton } from './primitives'
-import { isSendEnter, fmtSize } from '../lib/utils'
+import { fmtSize } from '../lib/utils'
 import { bridge } from '../lib/ipc'
 import { useUi } from '../stores/ui'
 import { uid, cls } from '../lib/utils'
@@ -43,7 +43,6 @@ export function Composer({
   onRemoveSkill?: (id: string) => void
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null)
-  const composingRef = useRef(false)
 
   useEffect(() => {
     const el = taRef.current
@@ -62,7 +61,9 @@ export function Composer({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const native = e.nativeEvent
-    if (native.isComposing || native.keyCode === 229) return // IME 组合中：绝不误发送
+    // IME 防线只有这一道：native.isComposing / keyCode 229（不再另设 composingRef——
+    // 那个 ref 只写不读，会让人误以为还有第二道闸）
+    if (native.isComposing || native.keyCode === 229) return
     if (e.key === 'Enter' && !e.shiftKey) {
       if (enterToSend) {
         e.preventDefault()
@@ -134,8 +135,6 @@ export function Composer({
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={handleKeyDown}
-        onCompositionStart={() => (composingRef.current = true)}
-        onCompositionEnd={() => (composingRef.current = false)}
         aria-label="输入框"
       />
       <div className="composer-bar">

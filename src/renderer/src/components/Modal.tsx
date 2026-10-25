@@ -32,6 +32,12 @@ export function Modal({
 }) {
   const boxRef = useRef<HTMLDivElement>(null)
   const restoreRef = useRef<HTMLElement | null>(null)
+  // onClose 不能进 effect 依赖：调用方几乎全是内联箭头函数（每次父组件渲染都是新引用），
+  // 进依赖后 effect 每次渲染都重跑——cleanup 先把焦点拽回触发元素、再 focus 弹窗首元素，
+  // 流式期间父组件每个 delta 重渲染一次，弹窗里就打不了字。改走 ref，依赖只剩 [open]。
+  // 渲染期间同步写 ref 是 React 官方认可的 escape hatch。
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     if (!open) return
@@ -43,7 +49,7 @@ export function Modal({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
-        onClose()
+        onCloseRef.current()
         return
       }
       if (e.key === 'Tab') {
@@ -62,7 +68,7 @@ export function Modal({
       box.removeEventListener('keydown', onKey)
       restoreRef.current?.focus?.()
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
   return (

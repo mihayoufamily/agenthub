@@ -7,8 +7,11 @@
  * 超时与输出都有上限，执行记录随工具结果回传，界面与模型看到的是同一份。
  */
 import type { HookRule, HookRun } from '../shared/types'
-import { HOOK_DEFAULT_TIMEOUT, matchHook, hookEnv, type HookEnvInput } from '../shared/hooks'
+import { HOOK_DEFAULT_TIMEOUT, matchHook, hookEnv, HOOK_ARGS_FILE_THRESHOLD, type HookEnvInput } from '../shared/hooks'
 import { runShell } from './shell'
+import { promises as fs } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 export { HOOK_DEFAULT_TIMEOUT, matchHook, hookEnv, validateHook } from '../shared/hooks'
 export type { HookEnvInput }
@@ -40,35 +43,56 @@ export async function runHooks(
   const active = (rules ?? []).filter((r) => r.event === event && matchHook(r, ctx.tool))
   if (!active.length) return empty()
   const out = empty()
-  for (const rule of active) {
-    const timeoutMs = rule.timeoutMs && rule.timeoutMs > 0 ? rule.timeoutMs : HOOK_DEFAULT_TIMEOUT
-    const sh = await runShell(rule.command, {
-      ...(ctx.dir ? { cwd: ctx.dir } : {}),
-      timeoutMs,
-      env: hookEnv(event, ctx),
-      ...(signal ? { signal } : {})
-    })
-    const exit = sh.code
-    const blocked = event === 'pre' && (!sh.ok || exit !== 0 || sh.timedOut)
-    const body = (sh.output || sh.error || '').trim().slice(0, MAX_NOTE)
-    const run: HookRun = {
-      id: rule.id,
-      command: rule.command,
-      exit,
-      ok: !blocked,
-      blocked,
-      ...(sh.timedOut ? { timedOut: true } : {}),
-      ...(body ? { output: body } : {})
+  // argsJson 整包塞 AHUB_HOOK_ARGS 会撞 Windows 单环境变量约 32767 字符的上限（write_file 的
+  // 内容可达 1MB）：spawn 直接失败，pre Hook 被误判成"否决"（退出码 null 的误导提示）。
+  // 超阈值（留了余量的 30000，契约在 shared/hooks.ts）改走临时文件：AHUB_HOOK_ARGS_FILE 给
+  // 路径、AHUB_HOOK_ARGS 置空。参数仍然不经字符串拼接进命令行——只是超长时换个载体。
+  // 临时文件写不进（tmp 不可用之类）就退回原通道，让失败如实发生，不假装参数已传到。
+  let env = hookEnv(event, ctx)
+  let argsFile = ''
+  if (ctx.argsJson.length > HOOK_ARGS_FILE_THRESHOLD) {
+    const f = join(tmpdir(), `ahub-hook-args-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+    try {
+      await fs.writeFile(f, ctx.argsJson, 'utf-8')
+      argsFile = f
+      env = { ...env, AHUB_HOOK_ARGS: '', AHUB_HOOK_ARGS_FILE: f }
+    } catch { /* 退回整包 env：行为与旧版一致 */ }
+  }
+  try {
+    for (const rule of active) {
+      const timeoutMs = rule.timeoutMs && rule.timeoutMs > 0 ? rule.timeoutMs : HOOK_DEFAULT_TIMEOUT
+      const sh = await runShell(rule.command, {
+        ...(ctx.dir ? { cwd: ctx.dir } : {}),
+        timeoutMs,
+        env,
+        ...(signal ? { signal } : {})
+      })
+      const exit = sh.code
+      const blocked = event === 'pre' && (!sh.ok || exit !== 0 || sh.timedOut)
+      const body = (sh.output || sh.error || '').trim().slice(0, MAX_NOTE)
+      const run: HookRun = {
+        id: rule.id,
+        command: rule.command,
+        exit,
+        ok: !blocked,
+        blocked,
+        ...(sh.timedOut ? { timedOut: true } : {}),
+        ...(body ? { output: body } : {})
+      }
+      out.runs.push(run)
+      if (sh.timedOut) out.notes.push(`[hook ${event} ${rule.id}] 超时（${timeoutMs / 1000}s）已终止`)
+      if (blocked) {
+        out.blocked = true
+        out.notes.push(`[hook pre ${rule.id}] 否决本次调用：${body || `退出码 ${exit ?? 'null'}`}`)
+        // 已经否决就不用再跑后面的 pre 脚本
+        break
+      }
+      if (body) out.notes.push(`[hook ${event} ${rule.id}] ${body}`)
     }
-    out.runs.push(run)
-    if (sh.timedOut) out.notes.push(`[hook ${event} ${rule.id}] 超时（${timeoutMs / 1000}s）已终止`)
-    if (blocked) {
-      out.blocked = true
-      out.notes.push(`[hook pre ${rule.id}] 否决本次调用：${body || `退出码 ${exit ?? 'null'}`}`)
-      // 已经否决就不用再跑后面的 pre 脚本
-      break
-    }
-    if (body) out.notes.push(`[hook ${event} ${rule.id}] ${body}`)
+  } finally {
+    // Hook 进程跑完（无论成败、包括中途 break）都清掉临时文件：
+    // 里面是工具参数原文，不该在 tmp 里留副本（best-effort，清不掉不影响结果上报）
+    if (argsFile) await fs.rm(argsFile, { force: true }).catch(() => { /* best-effort */ })
   }
   return out
 }

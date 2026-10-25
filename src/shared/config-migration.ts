@@ -1,5 +1,5 @@
 // 配置迁移的纯规则层（store.ts 只负责读写盘；规则放这里才能被逻辑层验证覆盖）
-import type { McpServer } from './types'
+import type { McpServer, Prefs, AppConfig } from './types'
 
 /** 当前配置格式头版本：`store.ts` 的迁移链与 importConfig 都以此为准，不再各写各的数字 */
 export const SCHEMA_HEAD = 3
@@ -9,6 +9,50 @@ export interface McpConfigShape {
   mcpServers?: McpServer[]
   sandboxFallback?: 'auto' | 'ask' | 'off'
   schemaVersion?: number
+}
+
+/** v0 -> v1 缺的工作流骨架：谁都没选、审核走人工、预算不设上限（0=不限） */
+const defaultWorkflowDefaults: NonNullable<AppConfig['workflowDefaults']> = {
+  plannerAgentId: '',
+  executorAgentId: '',
+  reviewerAgentId: '',
+  reviewMode: 'human',
+  maxRounds: 3,
+  timeoutMin: 30,
+  confirmEveryRound: false,
+  maxTokens: 0,
+  budgetYuan: 0
+}
+
+/**
+ * v0 -> v1：补齐默认偏好与工作流骨架（旧配置缺的那一层）。
+ * 返回结构必须是"**展开 raw 再覆盖必填项**"——以前这里是重新拼一个字面量，只留
+ * schemaVersion/prefs/agents/workflowDefaults，任何调用它的路径都会静默丢掉
+ * mcpServers/presets/hooks/priceOverrides/skills（导入配置就是踩的这条）。
+ * v1->v2、v2->v3 一直住在本纯模块，把它也搬来对齐"迁移规则不进 store"的口径。
+ */
+export function migrateV0toV1(raw: Partial<AppConfig> & Record<string, unknown>): Partial<AppConfig> & Record<string, unknown> {
+  const defaultPrefs: Prefs = {
+    theme: 'system',
+    animations: true,
+    reducedMotion: false,
+    replayWelcome: true,
+    fontSize: 14,
+    sidebarCollapsed: false,
+    enterToSend: true,
+    shiftWheelSwitch: true,
+    firstRunDone: false,
+    lastMode: null
+  }
+  const oldPrefs = (raw.prefs ?? {}) as Partial<Prefs>
+  const oldWd = (raw.workflowDefaults ?? {}) as Partial<NonNullable<AppConfig['workflowDefaults']>>
+  return {
+    ...raw,
+    schemaVersion: 1,
+    prefs: { ...defaultPrefs, ...oldPrefs },
+    agents: (raw.agents as AppConfig['agents']) ?? [],
+    workflowDefaults: { ...defaultWorkflowDefaults, ...oldWd }
+  }
 }
 
 /**

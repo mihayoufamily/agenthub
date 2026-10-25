@@ -9,7 +9,7 @@
  * run_command 与 CLI Agent 自己写的文件不在这条链上，回滚不了——界面必须这么说，
  * 不能给一个"一键回滚"的假安全感。
  */
-import { promises as fs, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { promises as fs, existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve as resolvePath, relative as relOf, isAbsolute } from 'node:path'
 import type { FileChange, CheckpointManifest } from '../shared/types'
@@ -96,7 +96,8 @@ const backupPath = (id: string, rel: string) =>
   join(baseDir, id, 'files', `${createHash('sha1').update(rel.toLowerCase()).digest('hex').slice(0, 10)}__${rel.replace(/[\\/]/g, '_').slice(-80)}`)
 
 function safeId(id: string): boolean {
-  return /^[A-Za-z0-9._-]{1,64}$/.test(id)
+  // 字符集已排除路径分隔符；纯点串（"." / ".."）是仅剩的目录穿越形态，一并拒绝
+  return /^[A-Za-z0-9._-]{1,64}$/.test(id) && !/^\.+$/.test(id)
 }
 
 function readManifest(id: string): CheckpointManifest | null {
@@ -116,7 +117,13 @@ function writeManifest(m: CheckpointManifest) {
     const p = manifestPath(m.id)
     const dir = dirname(p)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(p, JSON.stringify(m, null, 2), 'utf-8')
+    // 半截 manifest（进程在 writeFileSync 中途死掉）会让下次 readManifest 解析失败返回 null
+    // → beforeChange 全部"检查点未启用"、回滚能力静默消失。同目录 tmp + rename 原子替换
+    // 消掉这个窗口（renameSync 在 Windows 上带替换语义；本函数全程同步，
+    // 两次写不会共用同一个 tmp 互相踩）。
+    const tmp = `${p}.tmp`
+    writeFileSync(tmp, JSON.stringify(m, null, 2), 'utf-8')
+    renameSync(tmp, p)
   } catch { /* 检查点写不进不该把工具调用打死 */ }
 }
 
@@ -159,6 +166,12 @@ export async function beforeChange(id: string, absPath: string): Promise<{ backe
   } catch {
     return { backed: false } // 新建文件：没有原件可备份，登记为 created 由回滚删除
   }
+  // 本检查点内登记过 created 的路径是任务中途新建的文件：没有"任务开始前的原件"可备份。
+  // 若在这里把中间态版本备进 backed，rollback ③ 会因 rel 在 backed 里跳过删除——任务前
+  // 不存在的文件回滚后仍残存（内容还是中间态）。判别依据是 entries 里的 created 记录；
+  // 不变量：backed 的语义严格等于"任务开始前就存在且已备原件"。record 按 (path, kind) 去重，
+  // 同一路径可以同时挂着 created 与 modified 两条 entries，some 只认 created、不受另一条影响。
+  if (m.entries.some((e) => e.path === absPath && e.kind === 'created')) return { backed: false }
   if (alreadyBacked(m, rel)) return { backed: true }
   if (st.size > MAX_BACKUP) {
     return { backed: false, reason: `该文件 ${st.size} 字节超过备份上限 ${MAX_BACKUP / 1024 / 1024}MB，未纳入回滚` }

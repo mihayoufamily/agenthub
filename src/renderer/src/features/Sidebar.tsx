@@ -5,6 +5,7 @@ import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
 import { Icon } from '../components/Icons'
 import { AgentManageCard } from '../components/AgentManageCard'
+import { Modal } from '../components/Modal'
 import { LogoMark } from '../components/Logo'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
 import { cls, fmtTokens } from '../lib/utils'
@@ -211,41 +212,42 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
       )}
 
       {removeTarget && (
-        <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setRemoveTarget(null) }}>
-          <div className="modal warning" style={{ width: 420 }} role="dialog">
-            <div className="modal-head">移除「{agents.find((a) => a.id === removeTarget)?.name}」</div>
-            <div className="modal-body">
-              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', paddingBottom: 8 }}>
-                请选择操作（两者互不影响对方）：
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <button
-                  className="btn btn-secondary"
-                  onClick={async () => {
-                    await removeAgent(removeTarget, { deleteHistory: false })
-                    setRemoveTarget(null)
-                    useUi.getState().toast('已移除连接（会话历史保留，可重新添加后查看）', 'ok')
-                  }}
-                >
-                  仅移除连接，保留历史记录
-                </button>
-                <button
-                  className="btn btn-danger"
-                  onClick={async () => {
-                    await removeAgent(removeTarget, { deleteHistory: true })
-                    setRemoveTarget(null)
-                    useUi.getState().toast('已移除连接并删除历史记录', 'ok')
-                  }}
-                >
-                  移除连接并删除历史记录
-                </button>
-              </div>
-            </div>
-            <div className="modal-foot">
-              <button className="btn btn-primary" onClick={() => setRemoveTarget(null)}>取消</button>
-            </div>
+        // 复用 Modal：手工 overlay 没有 Esc、焦点陷阱与焦点归还（可访问性三件套全缺）
+        <Modal
+          open
+          warning
+          title={`移除「${agents.find((a) => a.id === removeTarget)?.name}」`}
+          onClose={() => setRemoveTarget(null)}
+          footer={
+            <button className="btn btn-primary" onClick={() => setRemoveTarget(null)}>取消</button>
+          }
+        >
+          <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', paddingBottom: 8 }}>
+            请选择操作（两者互不影响对方）：
           </div>
-        </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <button
+              className="btn btn-secondary"
+              onClick={async () => {
+                await removeAgent(removeTarget, { deleteHistory: false })
+                setRemoveTarget(null)
+                useUi.getState().toast('已移除连接（会话历史保留，可重新添加后查看）', 'ok')
+              }}
+            >
+              仅移除连接，保留历史记录
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={async () => {
+                await removeAgent(removeTarget, { deleteHistory: true })
+                setRemoveTarget(null)
+                useUi.getState().toast('已移除连接并删除历史记录', 'ok')
+              }}
+            >
+              移除连接并删除历史记录
+            </button>
+          </div>
+        </Modal>
       )}
 
       <WfTaskList collapsed={collapsed} />

@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
-import { useWorkflow } from '../stores/workflow'
+import { useWorkflow, runBusy } from '../stores/workflow'
 import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe, RejectedEntry } from '@shared/types'
 import { validateHook, HOOK_COMMAND_MAX_LENGTH, HOOK_RULES_MAX } from '@shared/hooks'
 import { MCP_SHAPE_REJECT_MESSAGE, MCP_SERVERS_MAX } from '@shared/mcp-list'
@@ -448,7 +448,8 @@ function ApprovalSection() {
                 <span style={{ color: 'var(--text-3)' }}>{fmtTime(r.ts)}</span>
                 {r.agentName && <span style={{ color: 'var(--text-3)' }}>· {r.agentName}</span>}
               </div>
-              <code style={{ display: 'block', fontSize: 12, wordBreak: 'break-all', margin: '4px 0' }}>{r.command}</code>
+              {/* 落盘的是命令原文（可能带 token），回显必须过与工具卡/Hook 设置页同一个脱敏口径——历史裸奔等于把凭据留在屏幕上等截图 */}
+              <code style={{ display: 'block', fontSize: 12, wordBreak: 'break-all', margin: '4px 0' }}>{redactCommandForDisplay(r.command)}</code>
               <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>
                 {r.reason}
                 {r.rule ? ` → 写入白名单：${r.rule}` : ''}
@@ -495,6 +496,10 @@ function HookSection() {
   const [err, setErr] = useState('')
   // 被主进程点名的条目：校验不通过的**仍留在配置里**（不删用户数据），但必须说出来
   const [rejected, setRejected] = useState<RejectedEntry[]>([])
+  // 已有条目的编辑草稿（键 = `${规则id}:${字段}`）。不能逐击键就走整表保存：
+  // save 要等 hooks:set 回写 setRules，回写落地前受控 value 还是旧闭包里的值，快速输入丢字符。
+  // 改为击键只写本地草稿，失焦时若与落盘值不同才提交整表。
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
 
   const load = () => {
     void bridge.hooks.list().then(setRules)
@@ -510,6 +515,20 @@ function HookSection() {
 
   const patch = (id: string, p: Partial<HookRule>) => {
     void save(rules.map((h) => (h.id === id ? { ...h, ...p } : h)))
+  }
+
+  /** 失焦落表：草稿与落盘值不同才整表保存，并清掉这条草稿（回退到读 rules） */
+  const commitDraft = (h: HookRule, field: 'command' | 'match') => {
+    const key = `${h.id}:${field}`
+    const v = drafts[key]
+    if (v === undefined) return
+    const cur = field === 'command' ? h.command : h.match ?? ''
+    setDrafts((d) => {
+      const next = { ...d }
+      delete next[key]
+      return next
+    })
+    if (v !== cur) patch(h.id, field === 'command' ? { command: v } : { match: v })
   }
 
   const add = async () => {
@@ -560,15 +579,17 @@ function HookSection() {
             </select>
             <input
               placeholder="匹配工具的正则（留空=全部），如 write_file|replace_in_file"
-              value={h.match ?? ''}
-              onChange={(e) => patch(h.id, { match: e.target.value })}
+              value={drafts[`${h.id}:match`] ?? h.match ?? ''}
+              onChange={(e) => setDrafts((d) => ({ ...d, [`${h.id}:match`]: e.target.value }))}
+              onBlur={() => commitDraft(h, 'match')}
               style={{ flex: 1, minWidth: 120, height: 28, font: 'inherit', fontSize: 12.5 }}
             />
             <Button variant="ghost" onClick={() => void save(rules.filter((x) => x.id !== h.id))}>删除</Button>
           </div>
           <input
-            value={h.command}
-            onChange={(e) => patch(h.id, { command: e.target.value })}
+            value={drafts[`${h.id}:command`] ?? h.command}
+            onChange={(e) => setDrafts((d) => ({ ...d, [`${h.id}:command`]: e.target.value }))}
+            onBlur={() => commitDraft(h, 'command')}
             placeholder='node -e "console.log(process.env.AHUB_HOOK_FILE)"'
             style={{ width: '100%', boxSizing: 'border-box', height: 28, font: 'inherit', fontSize: 12.5 }}
           />
@@ -599,7 +620,16 @@ function HookSection() {
         <input
           placeholder="超时毫秒（默认 15000）"
           value={draft.timeoutMs ?? ''}
-          onChange={(e) => setDraft({ ...draft, timeoutMs: e.target.value ? Number(e.target.value) : undefined })}
+          onChange={(e) => {
+            // 清空 = 回默认值；非数字不进草稿（Number('abc') = NaN 会原样存进配置，保存时才炸）
+            if (e.target.value === '') {
+              setDraft({ ...draft, timeoutMs: undefined })
+              return
+            }
+            const n = Number(e.target.value)
+            if (!Number.isFinite(n)) return
+            setDraft({ ...draft, timeoutMs: n })
+          }}
           style={{ width: 130, height: 28, font: 'inherit', fontSize: 12.5 }}
           inputMode="numeric"
         />
@@ -1032,11 +1062,24 @@ function DataSection() {
             variant="danger"
             style={{ height: 28 }}
             onClick={async () => {
+              // 与 UsagePanel 清空账本同款确认门：这一步不可恢复，不能点一下就直接开删
+              if (!window.confirm('将删除全部工作流任务记录（含演示数据），不可恢复。确定继续？')) return
               const runs = await bridge.runs.list()
+              let removed = 0
+              let skipped = 0
               for (const r of runs) {
+                // 与 store.removeTask 同一道运行中保护：正在执行的任务记录还被执行循环在写，删不得
+                if (runBusy(r)) {
+                  skipped += 1
+                  continue
+                }
                 await bridge.runs.remove(r.id)
+                removed += 1
               }
-              useUi.getState().toast(`已清空 ${runs.length} 条任务记录`, 'ok')
+              useUi.getState().toast(
+                skipped > 0 ? `已清空 ${removed} 条任务记录（跳过进行中 ${skipped} 条）` : `已清空 ${removed} 条任务记录`,
+                'ok'
+              )
             }}
           >
             清空记录

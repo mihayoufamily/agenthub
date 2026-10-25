@@ -4,6 +4,9 @@ import type { AgentConfig, ScanResultItem, CustomModelConfig, CliName } from '@s
 import { bridge } from '../lib/ipc'
 import { uid } from '../lib/utils'
 import { useUi } from './ui'
+// sessions ↔ agents 互相引用成环（sessions 也 import 本文件）：两边都只在回调里 getState() 取值、
+// 不在模块求值期碰对方，ESM/rollup 的活绑定下环安全——removeAgent 需要查会话侧的活跃流
+import { useSessions } from './sessions'
 
 const DEMO_COLORS = ['#5b6cd9', '#1f9d6d', '#b4820b', '#a25b9e']
 
@@ -174,6 +177,12 @@ export const useAgents = create<AgentsState>()((set, get) => ({
   },
 
   removeAgent: async (id, opts) => {
+    // 有活跃流时拒绝删除：模型/CLI 通道还会继续回调（delta/usage…），删了 Agent 这些事件就
+    // 没人认领，会话侧会为已删 id 自动重建会话并落盘——幽灵会话文件 + 继续烧钱
+    if (useSessions.getState().activeStreams[`chat:${id}`]) {
+      useUi.getState().toast('这个 Agent 正在回复，先停止或等它结束再删除', 'warn')
+      return
+    }
     // 明确区分"移除连接"与"删除历史记录"
     if (opts.deleteHistory) {
       await bridge.sessions.remove(id, true)

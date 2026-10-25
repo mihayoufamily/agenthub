@@ -46,6 +46,20 @@ export interface CliChatOptions {
 /** Windows 命令行长度硬上限（UTF-16 code units）附近的安全值 */
 const MAX_PROMPT_CHARS = 28000
 
+/** ndjson 行缓冲上限（字符）：CLI 持续输出不含换行的数据时，未完结行缓冲会无界增长 */
+const MAX_LINE_BUFFER = 1 << 20
+
+/**
+ * 超长 prompt 截断 + 显式标记：静默截断等于把任务正文切掉尾巴还装作完整发出，
+ * 模型只能按残缺指令执行，用户却看不出来。标记本身约 25 字符，28000 + 25 ≈ 28025，
+ * 仍远低于 32767 的命令行上限（MAX_PROMPT_CHARS 取 28000 本来就是给它留的余量），
+ * 不会因为加了标记反过来撞上限。
+ */
+function clipPrompt(prompt: string): string {
+  if (prompt.length <= MAX_PROMPT_CHARS) return prompt
+  return prompt.slice(0, MAX_PROMPT_CHARS) + `\n\n[输入超长，已截断至 ${MAX_PROMPT_CHARS} 字符]`
+}
+
 /** Claude Code 思考预算（MAX_THINKING_TOKENS，官方文档档位） */
 const THINKING_BUDGET: Record<string, number> = { low: 4000, medium: 16000, high: 31999 }
 
@@ -404,7 +418,7 @@ const SPECS: Record<CliName, CliSpec> = {
     },
     testArgs: () => ['--version'],
     buildArgs(prompt, system, opts) {
-      const args = ['+chat', prompt.slice(0, MAX_PROMPT_CHARS), '--stream', '--include-events']
+      const args = ['+chat', clipPrompt(prompt), '--stream', '--include-events']
       if (system) args.push('--instructions', system)
       if (opts.model) args.push('--model', opts.model)
       return args
@@ -443,7 +457,7 @@ const SPECS: Record<CliName, CliSpec> = {
     },
     testArgs: () => ['--version'],
     buildArgs(prompt, system, opts) {
-      const args = ['-p', prompt.slice(0, MAX_PROMPT_CHARS), '--output-format', 'stream-json']
+      const args = ['-p', clipPrompt(prompt), '--output-format', 'stream-json']
       if (system) args.push('--system-prompt', system)
       if (opts.model) args.push('--model', opts.model)
       return args
@@ -497,7 +511,7 @@ const SPECS: Record<CliName, CliSpec> = {
         args.push('-c', `model_reasoning_effort=${opts.thinkingLevel}`)
       }
       // prompt 永远是最后一个参数
-      args.push(full.slice(0, MAX_PROMPT_CHARS))
+      args.push(clipPrompt(full))
       return args
     },
     format: 'ndjson',
@@ -617,7 +631,7 @@ const SPECS: Record<CliName, CliSpec> = {
       const args = ['-p', '--output-format', 'stream-json', '--permission-mode', perm]
       if (opts.model) args.push('--model', opts.model)
       // system 无独立 flag：以指令前缀并入 prompt
-      args.push((system ? `【系统指令】${system}\n\n【任务】${prompt}` : prompt).slice(0, MAX_PROMPT_CHARS))
+      args.push(clipPrompt(system ? `【系统指令】${system}\n\n【任务】${prompt}` : prompt))
       return args
     },
     format: 'ndjson',
@@ -656,7 +670,7 @@ const SPECS: Record<CliName, CliSpec> = {
     buildArgs(prompt, _system, opts) {
       // headless 一次性任务：system 以指令前缀并入 prompt
       const full = _system ? `【系统指令】${_system}\n\n【任务】${prompt}` : prompt
-      const args = ['headless', full.slice(0, MAX_PROMPT_CHARS)]
+      const args = ['headless', clipPrompt(full)]
       if (opts.model) args.push('--model', opts.model)
       return args
     },
@@ -954,8 +968,9 @@ export async function cliChatStream(
       try { mkdirSync(cwdDir, { recursive: true }) } catch { /* 创建失败时 spawn 会如实报错 */ }
     }
     // 起进程前留一行诊断：这次排查两次都卡在"它到底在哪个目录、带了什么参数"上看不见。
-    // 每个参数截断（prompt 可能很长，且里面有用户任务正文），日志只留在本机。
-    console.log(`[cli] ${name} exe=${target.exe} cwd=${cwdDir || '(继承主进程)'} args=${JSON.stringify(args.map((a) => (a.length > 60 ? `${a.slice(0, 60)}…` : a)))}`)
+    // 超过 60 字符的参数只记长度不记内容：那几乎必是 prompt（用户任务正文）——日志只记
+    // 事件不记正文（console 会全量镜像进 logs/main.log）；短参数保留原文，可读性还需要它。
+    console.log(`[cli] ${name} exe=${target.exe} cwd=${cwdDir || '(继承主进程)'} args=${JSON.stringify(args.map((a) => (a.length > 60 ? `[${a.length}字]` : a)))}`)
     const proc = spawn(target.exe, args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -968,6 +983,8 @@ export async function cliChatStream(
     let stderrTail = ''
     let doneEmitted = false
     let errored = false
+    // ndjson 路径丢弃过超长未完结行（>MAX_LINE_BUFFER）：close 时转成 notice 如实报告
+    let droppedLine = false
     // 行解析器：每次会话一个实例（内部维护 tool_use → tool_result 的跨行配对状态）
     const parser = spec.format === 'ndjson' ? spec.makeParser?.(cwdDir) : undefined
     const emit = (e: Omit<ChatChunkEvent, 'reqId'>) => {
@@ -1004,18 +1021,33 @@ export async function cliChatStream(
     })
     proc.stdout?.on('data', touch)
     proc.stderr?.on('data', touch)
+    // 按 chunk toString() 会在 64KB 边界切开多字节字符（中文/emoji 变替换符）：text 模式
+    // 污染交付文本，ndjson 模式让该行 JSON.parse 失败被静默丢行。TextDecoder 的 stream 模式
+    // 内部保持跨 chunk 的字节携带（与 shell.ts 的"Buffer 累积 + 严格解码"同一类坑；不用
+    // decoder.write()——@types/node 没声明它，decode(chunk,{stream:true}) 是同一语义且有
+    // 类型，也与 openai.ts 的流式解码写法一致），两条流各一个实例。
+    const stdoutDecoder = new TextDecoder('utf-8')
+    const stderrDecoder = new TextDecoder('utf-8')
     if (spec.format === 'text') {
       // 纯文本 CLI：直接作为增量透出（如 dsh headless 的最终答案）
       proc.stdout?.on('data', (d) => {
-        const text = d.toString()
+        const text = stdoutDecoder.decode(d, { stream: true })
         stdoutBuf += text
         if (text) emit({ type: 'delta', text })
       })
     } else {
       proc.stdout?.on('data', (d) => {
-        stdoutBuf += d.toString()
+        stdoutBuf += stdoutDecoder.decode(d, { stream: true })
         const lines = stdoutBuf.split('\n')
         stdoutBuf = lines.pop() ?? ''
+        // 单行上限：pop() 之后 stdoutBuf 只剩未完结行（完整行都在 lines 里逐条处理、用完
+        // 即释）。超 1MB 说明这一行等不到换行——整个丢掉（buffer 清空）；残余字节会在下一
+        // 个换行处拼成一行坏数据，被 startsWith('{')/JSON.parse 的既有容错丢掉，不混进有效数据。
+        // 丢弃动作不静默：droppedLine 由 close 出口统一转成 notice
+        if (stdoutBuf.length > MAX_LINE_BUFFER) {
+          stdoutBuf = ''
+          droppedLine = true
+        }
         for (const line of lines) {
           const t = line.trim()
           if (!t.startsWith('{')) continue
@@ -1026,7 +1058,7 @@ export async function cliChatStream(
       })
     }
     proc.stderr?.on('data', (d) => {
-      stderrTail = (stderrTail + d.toString()).slice(-600)
+      stderrTail = (stderrTail + stderrDecoder.decode(d, { stream: true })).slice(-600)
     })
     proc.on('error', (e) => {
       activeChats.delete(reqId)
@@ -1048,6 +1080,10 @@ export async function cliChatStream(
           parser?.(JSON.parse(t), emit)
         } catch { /* 忽略 */ }
       }
+      // 超长未完结行丢弃过就如实说一声：放 close（text/ndjson 两条格式路径共用的出口，
+      // 报告一处生效两处——实际只有 ndjson 会置位，text 模式没有行缓冲）而不是丢的当下，
+      // 一行报完不刷屏
+      if (droppedLine) emit({ type: 'notice', text: '上游输出单行超过 1MB，已丢弃（协议违例或异常输出）' })
       activeChats.delete(reqId)
       if (errored) return
       // 用户主动取消：优雅完成（与 openai 适配器行为一致），不再走"退出码 null"错误分支

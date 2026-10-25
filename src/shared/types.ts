@@ -247,8 +247,6 @@ export interface AgentSession {
   draft: string
   createdAt: number
   updatedAt?: number
-  /** 运行中的后台任务状态（演示） */
-  bgTask?: 'running' | 'awaiting' | null
 }
 
 /** 工作流任务状态机 */
@@ -357,7 +355,7 @@ export interface WorkflowRun {
   endedAt?: number
   cards: RoleCard[]
   gate?: ReviewGate
-  usage?: { tokens?: number; elapsedMs?: number }
+  usage?: { tokens?: number }
   demo?: boolean
   notes?: string[]
   /** 本次任务实际生效的产物目录（由主进程裁决后记录，交付卡片与事后回看都以此为准） */
@@ -499,7 +497,6 @@ export interface PriceOverride {
   asOf: string
 }
 
-/** 保存的任务：目标 + 三角色完整配置 + 审核方式（点击卡片直接恢复整套配置发起新任务） */
 /**
  * 工作流预设：只打包"用谁来干"——三角色各用哪个 Agent、各用什么模型。
  * 目标文字、产物目录、审核方式都不进预设（那是"干什么"和"怎么跑"，与预设正交）。
@@ -736,6 +733,4 @@ export interface AppInfo {
   node: string
   platform: string
   userDataPath: string
-  /** 系统文档目录（CLI Agent 未设工作目录时的默认落点） */
-  documentsPath: string
 }

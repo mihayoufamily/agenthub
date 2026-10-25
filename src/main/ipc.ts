@@ -129,8 +129,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     chrome: process.versions.chrome,
     node: process.versions.node,
     platform: `Windows ${process.getSystemVersion()}`,
-    userDataPath: app.getPath('userData'),
-    documentsPath: app.getPath('documents')
+    userDataPath: app.getPath('userData')
+    // documentsPath 已删：渲染层零消费（Grep 过 src/renderer 无引用），AppInfo 类型同步删字段
   }))
 
   ipcMain.handle('app:openDataFolder', () => {
@@ -160,7 +160,13 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- 配置 ----------
   ipcMain.handle('config:get', () => getStore().getConfig())
   ipcMain.handle('prefs:set', (_e, prefs: Prefs) => getStore().setPrefs(prefs))
-  ipcMain.handle('agents:set', (_e, agents: AgentConfig[]) => getStore().setAgents(agents))
+  // 运行时形状闸门：这里的 TS 类型只是编译期装饰，渲染层 invoke('agents:set', null) 会把
+  // `agents: null` 写进 config.json，后续 exportConfig 的 for-of 与设置页当场崩。回执口径同 config:importJson。
+  ipcMain.handle('agents:set', (_e, agents: AgentConfig[]) => {
+    if (!Array.isArray(agents)) return { ok: false, message: 'agents:set 只接受数组' }
+    getStore().setAgents(agents)
+    return { ok: true }
+  })
   ipcMain.handle('workflowDefaults:set', (_e, wd: AppConfig['workflowDefaults']) => getStore().setWorkflowDefaults(wd))
   ipcMain.handle('presets:set', (_e, list: AppConfig['presets']) => getStore().setPresets(list))
   /**
@@ -346,7 +352,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   // ---------- 会话 ----------
+  // sessions 形状闸门：非数组会在 store 侧被当对象落盘，加载路径又按数组解构——先挡在入口
   ipcMain.handle('session:save', (_e, agentId: string, sessions: AgentSession[], activeId?: string) => {
+    if (!Array.isArray(sessions)) return { ok: false, message: 'session:save 的 sessions 只接受数组' }
     getStore().saveSessions(agentId, sessions, activeId)
     return { ok: true }
   })
@@ -357,7 +365,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   // ---------- 工作流任务记录 ----------
+  // 非对象拒绝：null/字符串会带着 `undefined.json` 之类的文件名进 store，先挡在入口（store 侧另有 safeFileId 兜底）
   ipcMain.handle('run:save', (_e, run: WorkflowRun) => {
+    if (!run || typeof run !== 'object') return { ok: false, message: 'run:save 只接受任务记录对象' }
     getStore().saveRun(run)
     return { ok: true }
   })
@@ -369,7 +379,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   // ---------- 长期记忆 ----------
   ipcMain.handle('memory:get', () => getStore().getMemory())
-  ipcMain.handle('memory:set', (_e, entries) => getStore().setMemory(entries))
+  // 形状闸门：非数组照样能写进 memory.json，消费方（渲染层列表渲染）按数组解构会崩——与 agents:set 同口径
+  ipcMain.handle('memory:set', (_e, entries) => {
+    if (!Array.isArray(entries)) return { ok: false, message: 'memory:set 只接受数组' }
+    return getStore().setMemory(entries)
+  })
 
   // ---------- Agent 扫描 ----------
   ipcMain.handle('agents:scan', () => scanAgents())
@@ -630,22 +644,28 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return { ok: true, skill: saved }
   })
 
-  // ---------- 工具层（沙箱执行；渲染层可直调用于验证/高级用途） ----------
-  ipcMain.handle('tools:exec', async (_e, grant: ToolGrant, tool: string, argsJson: string, checkpointId?: string) => {
-    if (!grant || typeof grant.dir !== 'string' || !grant.dir) {
-      return { ok: false, output: '拒绝：未配置工具目录' }
-    }
-    // 这条入口是给验证脚本与高级用途直接跑一次工具用的：命令审批照样要过，
-    // 只是问的是"正在调用它的那个人"，而不是某个 Agent 的白名单
-    const cp = typeof checkpointId === 'string' ? checkpointId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) : ''
-    if (cp) await checkpoints.start(cp, grant.dir)
-    const userHooks = getStore().getConfig().hooks ?? []
-    return execTool(grant, tool, argsJson, undefined, {
-      approver: makeApprover('tools:exec', { dir: grant.dir }),
-      ...(cp ? { checkpoint: cp } : {}),
-      ...(userHooks.length ? { userHooks } : {})
+  // ---------- 工具层（沙箱执行） ----------
+  // 这条直调入口只存在于验证态：与 config:importJson 同一道闸门（argv 带 --ahub-verify 才注册）、同一先例。
+  // 原因：它接受渲染层自构造的 grant，`{dir:'C:\\', access:'full'}` 即全盘读写——与 model:chat
+  // "grant 从存储配置解析、不接受渲染层自构造（否则渲染层可自我提权）"的原则直接冲突。
+  // 渲染层要跑工具走 model:chat 那条路。app.isPackaged 不能当闸门——被测的部署构建本来就是 packaged。
+  if (process.argv.includes(VERIFY_SWITCH)) {
+    ipcMain.handle('tools:exec', async (_e, grant: ToolGrant, tool: string, argsJson: string, checkpointId?: string) => {
+      if (!grant || typeof grant.dir !== 'string' || !grant.dir) {
+        return { ok: false, output: '拒绝：未配置工具目录' }
+      }
+      // 这条入口是给验证脚本与高级用途直接跑一次工具用的：命令审批照样要过，
+      // 只是问的是"正在调用它的那个人"，而不是某个 Agent 的白名单
+      const cp = typeof checkpointId === 'string' ? checkpointId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) : ''
+      if (cp) await checkpoints.start(cp, grant.dir)
+      const userHooks = getStore().getConfig().hooks ?? []
+      return execTool(grant, tool, argsJson, undefined, {
+        approver: makeApprover('tools:exec', { dir: grant.dir }),
+        ...(cp ? { checkpoint: cp } : {}),
+        ...(userHooks.length ? { userHooks } : {})
+      })
     })
-  })
+  }
 
   // ---------- 改动检查点（回滚） ----------
   ipcMain.handle('checkpoint:manifest', async (_e, id: string) => {
@@ -756,7 +776,18 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     const body = text.length > MAX_ART ? text.slice(0, MAX_ART) + '\n…（内容超长，已截断）' : text
     try {
       mkdirSync(dir, { recursive: true })
-      const p = join(dir, safe)
+      // 同名自增：同轮单角色重跑不该覆盖旧卡登记的产物文件（历史事实被改写）。
+      // 首次写入的文件名不变（既有断言与用户预期不破），重跑产生 -2/-3… 新文件；试满 100 次仍冲突就如实拒绝。
+      let p = join(dir, safe)
+      if (existsSync(p)) {
+        const dot = safe.lastIndexOf('.')
+        const stem = dot > 0 ? safe.slice(0, dot) : safe
+        const ext = dot > 0 ? safe.slice(dot) : ''
+        let n = 2
+        while (n < 102 && existsSync(join(dir, `${stem}-${n}${ext}`))) n++
+        if (n >= 102) return { ok: false, message: '同名产物文件已尝试 100 个候选名仍冲突，拒绝写入' }
+        p = join(dir, `${stem}-${n}${ext}`)
+      }
       // 由 AgentHub 落盘的文本产物同样进检查点：它和工具写盘的文件混在一个目录里，
       // 回滚不该只认其中一半
       const cpId = typeof checkpointId === 'string' ? checkpointId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) : ''
@@ -775,10 +806,15 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     }
   })
 
-  /** 打开本机文件或目录（产物交付卡片用）：只接受存在的绝对路径 */
+  /** 打开本机文件或目录（产物交付卡片用）：只接受存在的绝对路径；可执行类型拒收 */
   ipcMain.handle('app:openPath', async (_e, p: string) => {
     if (typeof p !== 'string' || !isAbsolute(p)) return { ok: false, message: '只接受绝对路径' }
     if (!existsSync(p)) return { ok: false, message: `路径不存在：${p}` }
+    // 可执行扩展名黑名单：shell.openPath 对 .exe 等于"启动它"，等于让产物卡片能借道拉起任意程序。
+    // 与 app:openExternal 只放行 http(s) 的谨慎度对齐；打开文件夹与普通文档不受影响。
+    const EXE_EXT = new Set(['exe', 'bat', 'cmd', 'scr', 'com', 'msi', 'ps1', 'vbs', 'js', 'jar', 'lnk', 'hta', 'pif', 'cpl'])
+    const ext = (p.slice(p.lastIndexOf('.') + 1) || '').toLowerCase()
+    if (EXE_EXT.has(ext)) return { ok: false, message: '已拒绝打开可执行文件（.exe/.bat 等会直接运行程序），请从文件管理器手动打开' }
     const err = await shell.openPath(p)
     return err ? { ok: false, message: err } : { ok: true }
   })

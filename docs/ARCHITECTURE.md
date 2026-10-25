@@ -10,7 +10,8 @@
 │  ├─ store.ts    JSON 持久化（版本号 + 迁移）、    │
 │  │              safeStorage 凭据加密              │
 │  ├─ ipc.ts      全部 IPC 通道（allowlist 注册）   │
-│  ├─ discovery.ts 本机 Agent CLI 扫描（仅 PATH）   │
+│  ├─ discovery.ts  本机 Agent CLI 扫描（PATH + 已知安装位置     │
+│  │              + 盘符浅扫描；只定位不执行，不读 CLI 配置）│
 │  └─ adapters/openai.ts  OpenAI 兼容流式适配器     │
 ├─────────────────────────────────────────────────┤
 │ Preload（src/preload/）                          │

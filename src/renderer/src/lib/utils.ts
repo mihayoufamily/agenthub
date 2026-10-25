@@ -136,7 +136,13 @@ export function matchKeyBinding(binding: string | undefined, e: { ctrlKey: boole
   if (!binding) return false
   const want = parseKeyBinding(binding)
   if (!want) return false
-  if (want.ctrl !== (e.ctrlKey || e.metaKey)) return false
+  // ctrl 与 meta 的等价性只在"未显式声明 meta"（parse 里没写 Meta/Cmd，即 meta === false）时保留：
+  // 录制器产出的 Ctrl 键位沿用老的"带 Meta 修饰也算命中"行为。
+  // 显式声明了 meta 的键位（只有手改配置才写得出来，录制器产不出 meta）要求 e.metaKey 严格匹配，
+  // 且 ctrl 比较不再把 metaKey 并进来——原先无条件并入，手写的 Meta+K 永远失配且无任何提示。
+  const metaDeclared = want.meta === true
+  if (want.ctrl !== (e.ctrlKey || (metaDeclared ? false : e.metaKey))) return false
+  if (metaDeclared && !e.metaKey) return false
   if (want.alt !== e.altKey) return false
   if (want.shift !== e.shiftKey) return false
   const got = (e.key === ',' ? ',' : e.key.toLowerCase())

@@ -1,5 +1,6 @@
 import type { CustomModelConfig, ModelTestResult, ToolGrant, ToolCall, UsageInfo } from '../../shared/types'
 import { execTool, toolDefs, MAX_OUTPUT, type ToolHooks, type ToolExecResult } from '../tools'
+import { runHooks, type HookContext } from '../hooks'
 
 /**
  * MCP 工具接线：函数表（给模型的 schema）+ 路由表（工具名 → 这个 server 的执行体）。
@@ -67,6 +68,19 @@ const activeStreams = new Map<string, AbortController>()
 
 /** 工具调用轮数上限：防止模型无限循环调用工具 */
 const MAX_TOOL_ROUNDS = 16
+
+/**
+ * 模型流式连接的无数据空闲超时（毫秒）。此前 chatRound 完全没有时限：端点停发数据
+ * （半开连接、恶意中转，连响应头都不回的挂起同样算）时 fetch / reader.read() 永生挂死，
+ * MCP server 进程随请求滞留；CLI 侧有 10 分钟总超时 + 90 秒心跳，模型侧此前一条都没有。
+ * 只设"无数据"空闲、不设总时长上限——长回复合法，总界由引擎层 watchdog 管。
+ * 取 120 秒：与 CLI 侧 90 秒心跳同量级、留了余量（正常端点两次数据的间隔远小于此）。
+ * 导出成模块常量便于逻辑层断言。
+ */
+export const IDLE_TIMEOUT_MS = 120_000
+
+/** 单行缓冲上限（字符）：SSE 流按行切分，端点持续输出不含换行的数据会让未完结行无界增长 */
+const MAX_LINE_BUFFER = 1 << 20
 
 /**
  * 思考增量（reasoning_content）是否回传给接口：默认不回传——
@@ -186,6 +200,8 @@ interface RoundResult {
   usage?: UsageInfo
   /** 思考模型本轮的思考内容（仅 UI 展示；是否随 assistant 消息回传由 PASS_REASONING 控制） */
   reasoning: string
+  /** 本轮流式输出里丢弃过超长未完结行（>1MB）：chatRound 内没有事件通道，标记带回后转成 notice */
+  droppedLine?: boolean
 }
 
 /** 单轮对话请求（流式）：文本增量直发 onDelta、思考增量直发 onReasoning；结束时返回工具调用与完成原因 */
@@ -209,77 +225,119 @@ async function chatRound(
     ...(cfg.thinkingLevel && cfg.thinkingLevel !== 'off' ? { reasoning_effort: cfg.thinkingLevel } : {}),
     ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {})
   }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: headers(cfg, apiKey),
-    body: JSON.stringify(body),
-    signal
-  })
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`HTTP ${res.status} ${text.slice(0, 300)}`)
+  // 无数据空闲超时（IDLE_TIMEOUT_MS）：用内部 controller 聚合两个中止源——外部 signal
+  // （用户取消）照旧透传（abort 不带 reason → AbortError → 上层报"已取消"），空闲超时是
+  // 新增的一路：abort 带 reason，fetch / reader.read() 会以这个 Error 拒绝，上层如实走
+  // error 事件——两种中止在用户面前是两种不同的失败，不能都叫"已取消"。
+  const idleCtrl = new AbortController()
+  let idleTimedOut = false
+  const idleAbortReason = () =>
+    new Error(`模型连接空闲超时（${IDLE_TIMEOUT_MS / 1000} 秒无数据，已停止）：端点已断开或中转异常，请重试`)
+  const armIdle = () => setTimeout(() => {
+    idleTimedOut = true // 先置标记再中止：catch 里靠它兜底区分"用户取消"与"空闲超时"
+    idleCtrl.abort(idleAbortReason())
+  }, IDLE_TIMEOUT_MS)
+  let idle = armIdle()
+  const onOuterAbort = () => {
+    clearTimeout(idle) // 外部取消也要清掉计时器，别让超时回调在收尾之后还空跑一次
+    idleCtrl.abort()
   }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  const acc = new Map<number, AccToolCall>()
-  let finish: RoundResult['finish'] = null
-  let usage: UsageInfo | undefined
-  let reasoning = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const raw of lines) {
-      const line = raw.trim()
-      if (!line.startsWith('data:')) continue
-      const payload = line.slice(5).trim()
-      if (payload === '[DONE]') continue
-      try {
-        const json = JSON.parse(payload)
-        const choice = json.choices?.[0]
-        const delta = choice?.delta
-        if (typeof delta?.content === 'string' && delta.content) onDelta(delta.content)
-        // 思考模型的思考增量（reasoning_content）：收集并在事件流转发（UI 展示 + 多轮回传协议）
-        const rc = delta?.reasoning_content
-        if (typeof rc === 'string' && rc) {
-          reasoning += rc
-          onReasoning?.(rc)
-        }
-        // 流式工具调用分片：按 index 拼接 id/name/arguments
-        if (Array.isArray(delta?.tool_calls)) {
-          for (const tc of delta.tool_calls) {
-            const idx = typeof tc.index === 'number' ? tc.index : 0
-            const cur = acc.get(idx) ?? { id: '', name: '', args: '' }
-            if (tc.id) cur.id = tc.id
-            if (tc.function?.name) cur.name += tc.function.name
-            if (tc.function?.arguments) cur.args += tc.function.arguments
-            acc.set(idx, cur)
-          }
-        }
-        if (choice?.finish_reason === 'stop') finish = 'stop'
-        else if (choice?.finish_reason === 'tool_calls' || choice?.finish_reason === 'function_call') finish = 'tool_calls'
-        // 用量明细（尽力解析：total/prompt/completion；部分接口只在末帧带 usage）
-        if (json.usage) {
-          const u = json.usage as Record<string, number | undefined>
-          const prompt = typeof u.prompt_tokens === 'number' ? u.prompt_tokens : undefined
-          const completion = typeof u.completion_tokens === 'number' ? u.completion_tokens : undefined
-          usage = {
-            tokens: typeof u.total_tokens === 'number' ? u.total_tokens : (prompt != null && completion != null ? prompt + completion : undefined),
-            prompt,
-            completion
-          }
-        }
-      } catch { /* 忽略不完整 JSON 行 */ }
+  if (signal.aborted) onOuterAbort()
+  else signal.addEventListener('abort', onOuterAbort, { once: true })
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: headers(cfg, apiKey),
+      body: JSON.stringify(body),
+      signal: idleCtrl.signal
+    })
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '')
+      throw new Error(`HTTP ${res.status} ${text.slice(0, 300)}`)
     }
-  }
-  return {
-    finish,
-    toolCalls: [...acc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v),
-    usage,
-    reasoning
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    // 单行缓冲上限（MAX_LINE_BUFFER）：超长未完结行只能是端点违例/异常输出，丢弃后要如实
+    // 标记、随 RoundResult 带回 chatStream 转 notice——不能静默丢
+    let droppedLine = false
+    const acc = new Map<number, AccToolCall>()
+    let finish: RoundResult['finish'] = null
+    let usage: UsageInfo | undefined
+    let reasoning = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      clearTimeout(idle)
+      idle = armIdle() // 收到数据：空闲计时重置（长回复合法，只罚"停发"）
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      // 此时 buffer 只剩未完结行（完整行都在 lines 里，逐条处理、用完即释）。超 1MB 说明
+      // 这一行等不到换行——整个丢掉（buffer 清空）；残余字节会在下一个换行处拼成一行
+      // 坏数据，被下方 data:/JSON 的既有容错丢掉，不会混进有效数据
+      if (buffer.length > MAX_LINE_BUFFER) {
+        buffer = ''
+        droppedLine = true
+      }
+      for (const raw of lines) {
+        const line = raw.trim()
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (payload === '[DONE]') continue
+        try {
+          const json = JSON.parse(payload)
+          const choice = json.choices?.[0]
+          const delta = choice?.delta
+          if (typeof delta?.content === 'string' && delta.content) onDelta(delta.content)
+          // 思考模型的思考增量（reasoning_content）：收集并在事件流转发（UI 展示 + 多轮回传协议）
+          const rc = delta?.reasoning_content
+          if (typeof rc === 'string' && rc) {
+            reasoning += rc
+            onReasoning?.(rc)
+          }
+          // 流式工具调用分片：按 index 拼接 id/name/arguments
+          if (Array.isArray(delta?.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const idx = typeof tc.index === 'number' ? tc.index : 0
+              const cur = acc.get(idx) ?? { id: '', name: '', args: '' }
+              if (tc.id) cur.id = tc.id
+              if (tc.function?.name) cur.name += tc.function.name
+              if (tc.function?.arguments) cur.args += tc.function.arguments
+              acc.set(idx, cur)
+            }
+          }
+          if (choice?.finish_reason === 'stop') finish = 'stop'
+          else if (choice?.finish_reason === 'tool_calls' || choice?.finish_reason === 'function_call') finish = 'tool_calls'
+          // 用量明细（尽力解析：total/prompt/completion；部分接口只在末帧带 usage）
+          if (json.usage) {
+            const u = json.usage as Record<string, number | undefined>
+            const prompt = typeof u.prompt_tokens === 'number' ? u.prompt_tokens : undefined
+            const completion = typeof u.completion_tokens === 'number' ? u.completion_tokens : undefined
+            usage = {
+              tokens: typeof u.total_tokens === 'number' ? u.total_tokens : (prompt != null && completion != null ? prompt + completion : undefined),
+              prompt,
+              completion
+            }
+          }
+        } catch { /* 忽略不完整 JSON 行 */ }
+      }
+    }
+    return {
+      finish,
+      toolCalls: [...acc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v),
+      usage,
+      reasoning,
+      ...(droppedLine ? { droppedLine: true } : {})
+    }
+  } catch (e) {
+    // 双保险：若实现层没把 abort(reason) 透传成拒绝原因（仍以 AbortError 冒出），
+    // 用标记把"空闲超时"从"用户取消"里分出来，如实走 error 事件
+    if (idleTimedOut && (e as Error).name === 'AbortError') throw idleAbortReason()
+    throw e
+  } finally {
+    clearTimeout(idle)
+    signal.removeEventListener('abort', onOuterAbort)
   }
 }
 
@@ -295,6 +353,56 @@ function argsSummary(argsJson: string): Record<string, string> {
     return out
   } catch {
     return { raw: argsJson.slice(0, 200) }
+  }
+}
+
+/**
+ * MCP 工具调用包上用户的 pre/post Hook：Hook 此前只在 execTool 里跑，MCP route 直接调
+ * 就绕过了它——README 承诺的"每次工具调用前后执行你自己配的命令"对 MCP 工具整组失效。
+ * 规则表用 chatStream 透传进来的 hooks?.userHooks（与 execTool 分支同一份、同一轮对话
+ * 同口径）；计划态在 chatStream 入口已把 mcpActive 置 undefined，这里到不了，不用再判
+ * planMode。ctx.tool 直接用 route.label：ipc 组装时就是 `mcp:server名:工具名`，天然带
+ * mcp: 前缀，Hook 的 match 正则可按 `mcp:` 圈定；argsJson 用 tc.args 原串——它本身就是
+ * 模型回传的 JSON 文本（与 execTool 的 argsJson 同一形态），再包一层 JSON.stringify 会
+ * 把整串二次编码成带引号的假 JSON，Hook 脚本拿到就解析不出对象了。
+ */
+async function callMcpWithHooks(
+  route: McpWiring['routes'][string],
+  tc: AccToolCall,
+  grant: ToolGrant | undefined,
+  hooks: ToolHooks | undefined,
+  signal: AbortSignal
+): Promise<ToolExecResult> {
+  const meta = hooks?.meta
+  const hookCtx: HookContext = {
+    tool: route.label,
+    argsJson: tc.args,
+    ...(grant?.dir ? { dir: grant.dir } : {}),
+    ...(meta?.agentId ? { agentId: meta.agentId } : {}),
+    ...(meta?.agentName ? { agentName: meta.agentName } : {}),
+    ...(meta?.runId ? { runId: meta.runId } : {}),
+    ...(meta?.reqId ? { reqId: meta.reqId } : {})
+  }
+  const pre = await runHooks('pre', hooks?.userHooks, hookCtx, signal)
+  if (pre.blocked) {
+    // 与 execTool 的否决文案同一口径：模型看到的是"被用户规则拦下"，不是工具自身报错
+    return { ok: false, output: `拒绝：Hook 否决了这次调用。\n${pre.notes.join('\n')}`, ...(pre.runs.length ? { hooks: pre.runs } : {}) }
+  }
+  const res = await route.call(tc.args, signal)
+  const post = await runHooks(
+    'post',
+    hooks?.userHooks,
+    { ...hookCtx, result: { ok: res.ok, output: res.output, ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}) } },
+    signal
+  )
+  const runs = [...pre.runs, ...post.runs]
+  if (!runs.length) return res
+  // pre 的脚本输出也带回去：放行不等于无声——与 execTool 同一审计口径
+  const notes = [...pre.notes, ...post.notes]
+  return {
+    ...res,
+    output: `${res.output}${notes.length ? `\n\n${notes.join('\n')}` : ''}`,
+    hooks: runs
   }
 }
 
@@ -353,10 +461,16 @@ export function chatStream(
           usage: detailed ? { tokens, prompt: promptTokens, completion: completionTokens } : { tokens }
         })
       }
+      // 超长未完结行（>1MB）丢弃过 → notice 一行：chatRound 内没有事件通道，标记随结果带回，
+      // 在这里如实告知"有数据没进上下文"，不静默
+      const emitDropped = (dropped?: boolean) => {
+        if (dropped) onEvent({ reqId, type: 'notice', text: '上游输出单行超过 1MB，已丢弃（协议违例或异常输出）' })
+      }
       let rounds = 0
       for (;;) {
         const r = await chatRound(cfg, apiKey, convo, tools, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal, (t) => onEvent({ reqId, type: 'reasoning', text: t }))
         addUsage(r.usage)
+        emitDropped(r.droppedLine)
         if (r.finish !== 'tool_calls' || !grant || r.toolCalls.length === 0) {
           emitUsage()
           onEvent({ reqId, type: 'done' })
@@ -369,6 +483,7 @@ export function chatStream(
           // 标记后继续：下一轮无 tool_calls 自然收束
           const r2 = await chatRound(cfg, apiKey, convo, undefined, (t) => onEvent({ reqId, type: 'delta', text: t }), ctrl.signal, (t) => onEvent({ reqId, type: 'reasoning', text: t }))
           addUsage(r2.usage)
+          emitDropped(r2.droppedLine)
           emitUsage()
           onEvent({ reqId, type: 'done' })
           activeStreams.delete(reqId)
@@ -395,8 +510,11 @@ export function chatStream(
           const call: ToolCall = { id: uid('tool'), tool: route ? route.label : tc.name, args: argsSummary(tc.args), status: 'running', ts: Date.now() }
           onEvent({ reqId, type: 'tool', toolCall: call })
           // 取消信号透传：正在执行的命令/联网/MCP 调用可被立即中断
+          // MCP 分支也要过用户的 pre/post Hook（callMcpWithHooks）：route 不经 execTool，
+          // 不包这层的话用户 Hook 对 MCP 工具整组不生效；内置工具分支维持 execTool 原路径，
+          // 它内部已跑过 Hook，别再包一遍跑两次。
           const res: ToolExecResult = route
-            ? await route.call(tc.args, ctrl.signal)
+            ? await callMcpWithHooks(route, tc, grant, hooks, ctrl.signal)
             : grant
               ? await execTool(grant, tc.name, tc.args, ctrl.signal, hooks)
               : { ok: false, output: '拒绝：该 Agent 未启用 AgentHub 文件工具（只配了 MCP 工具时不能调它）' }

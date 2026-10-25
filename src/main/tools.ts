@@ -480,6 +480,8 @@ export async function execTool(
     ...(hooks?.meta?.runId ? { runId: hooks.meta.runId } : {}),
     ...(hooks?.meta?.reqId ? { reqId: hooks.meta.reqId } : {})
   }
+  // post 同样用这份过滤后的表——计划轮一条 Hook 都不跑，pre/post 都算；
+  // 只拦 pre 的话每次只读调用后用户 Hook 照跑，写盘口子还开着。
   const userHooks = grant.planMode === true ? [] : hooks?.userHooks
   const pre = await runHooks('pre', userHooks, hookCtx, signal)
   if (pre.blocked) {
@@ -488,7 +490,7 @@ export async function execTool(
   const res = await dispatch(grant, tool, argsJson, signal, hooks)
   const post = await runHooks(
     'post',
-    hooks?.userHooks,
+    userHooks,
     { ...hookCtx, result: { ok: res.ok, output: res.output, ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}) } },
     signal
   )
@@ -513,7 +515,9 @@ async function dispatch(
 ): Promise<ToolExecResult> {
   const approver = hooks?.approver
   const cp = hooks?.checkpoint
-  /** 改动前备份：返回"没备份成"的原因（越界/超上限），界面要如实显示 */
+  /** 改动前备份：返回"没备份成"的原因（越界/超上限），界面要如实显示。
+   *  rel=null 只表示"没有相对工作目录的路径可记"（完全访问模式下的目录外改动，或没开检查点），
+   *  调用方不能因此把整条 change 丢掉——unbacked 警示必须随登记到界面；rel 字段用绝对路径占位即可（纯显示字符串）。 */
   const backup = async (abs: string): Promise<{ rel: string | null; unbacked?: string }> => {
     if (!cp) return { rel: null }
     const rel = relativeOf(grant.dir || '.', abs)
@@ -565,7 +569,14 @@ async function dispatch(
         const bk = await backup(p)
         await fs.mkdir(dirname(p), { recursive: true })
         await fs.writeFile(p, content, 'utf8')
-        const change = bk.rel === null ? null : { rel: bk.rel, path: p, kind, diff, bytes: content.length, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
+        // 目录外（完全访问）改动 rel=null 也要登记，rel 用绝对路径占位（纯显示字符串，
+        // summarize 的 unbacked 清单按 e.rel 展示正好）——"不进入回滚清单"的警示要能到界面，
+        // 整条置 null 就是死代码。回滚语义：这类条目不在 m.backed 里，rollback ①②不会碰它；
+        // 唯一例外是 kind='created'——rollback ③ 的 resolvePath(m.dir, 绝对rel) 得回绝对路径，
+        // 会删掉目录外新建文件，正是"回到任务开始前"的正确行为；modified 无备份、只列出不可还原，
+        // 与 README"完全访问模式下的目录外改动不纳入回滚"的口径对齐（那条讲的是还原，可见这半边由本条补上）。
+        // 没开检查点时（rel=null 且无警示）维持不登记，与旧行为一致。
+        const change = bk.rel === null && !bk.unbacked ? null : { rel: bk.rel ?? p, path: p, kind, diff, bytes: content.length, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
         track(change)
         return { ok: true, output: `已写入 ${content.length} 字符`, writtenPath: p, ...(change ? { change } : {}) }
       }
@@ -594,7 +605,9 @@ async function dispatch(
         const bk = await backup(p)
         const { shell } = require('electron') as typeof import('electron')
         await shell.trashItem(p)
-        const change = bk.rel === null ? null : { rel: bk.rel, path: p, kind: 'deleted' as const, diff: null, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
+        // 同 write_file：目录外删除也登记（rel 绝对路径占位），警示到界面；不在 backed 里、
+        // 回滚没有针对 deleted 的分支，只列出、不可还原
+        const change = bk.rel === null && !bk.unbacked ? null : { rel: bk.rel ?? p, path: p, kind: 'deleted' as const, diff: null, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
         track(change)
         return { ok: true, output: '已移入回收站', ...(change ? { change } : {}) }
       }
@@ -603,17 +616,37 @@ async function dispatch(
         const to = sandboxPath(grant, args.to)
         if (!from || !to) return { ok: false, output: `拒绝：源或目标路径越界（仅限沙箱目录内）` }
         const bk = await backup(from)
+        // 目标已存在时 rename 是静默覆盖（Windows 上带 REPLACE_EXISTING 语义）：被覆盖的目标
+        // 原件同样要在改前 copy-on-write 备份，否则它不进检查点、无处恢复——"工具层每次改文件前
+        // 备份原件"的承诺对被覆盖方一样成立。diff 拍成"全删"（旧内容 vs 空串），界面能看到丢的是什么。
+        const toExisted = await existsFile(to)
+        const toDiff = toExisted ? await diffOfFile(to, '') : null
+        const toBk = toExisted ? await backup(to) : null
         await fs.mkdir(dirname(to), { recursive: true })
         await fs.rename(from, to)
         const fromRel = relativeOf(grant.dir || '.', from)
         // rel 记目标、from 记来源：回滚按"把目标挪回来源"处理（备份的是来源原件）
         const toRel = relativeOf(grant.dir || '.', to)
-        const change = toRel === null ? null : {
-          rel: toRel, path: to, kind: 'moved' as const, from: fromRel ?? undefined, diff: null,
+        // 目标在目录外（完全访问）也登记，rel 用绝对路径占位：rollback ② 的
+        // resolvePath(m.dir, 绝对rel) 得回绝对路径，照样把目标挪回来源（回到任务开始前）；
+        // 来源在目录外时 fromRel 为 null、不写 from，② 无从挪回，靠 bk.unbacked 如实警示。
+        const change = {
+          rel: toRel ?? to, path: to, kind: 'moved' as const, from: fromRel ?? undefined, diff: null,
           ...(bk.unbacked ? { unbacked: bk.unbacked } : {})
         }
-        if (change) track(change)
-        return { ok: true, output: '已移动', ...(change ? { change } : {}) }
+        track(change)
+        // 被覆盖目标单独登记一条 modified（record 按 path+kind 去重，与 moved 条目共存不互相顶掉；
+        // bytes 不适用——写进的字节数属于 moved 那条语义，这里只记"原目标内容没了"，FileChange.bytes
+        // 可选、直接省掉，不造假数字）。回滚顺序自证：rollback 先 ②（把 to 挪回 from——此刻 from
+        // 空缺、to 存在，前提成立），再 ①（backed 里有 toRel 的原件 → 拷回 to，还原被覆盖前的目标
+        // 内容）。若 ① 先行，fromRel 的原件会把 from 提前重建，② 的 !existsSync(from) 失效被跳过——
+        // 一旦 to 的备份没成功（超上限），被覆盖原件就永远留在挪不回位置的 to 里；② 在前则位置先归位，
+        // 损失只剩目标内容、且已如实标 unbacked。
+        if (toBk) track({
+          rel: toBk.rel ?? to, path: to, kind: 'modified' as const, diff: toDiff,
+          ...(toBk.unbacked ? { unbacked: toBk.unbacked } : {})
+        })
+        return { ok: true, output: '已移动', change }
       }
       case 'search_files': {
         const pattern = typeof args.pattern === 'string' ? args.pattern : ''
@@ -628,9 +661,12 @@ async function dispatch(
         } catch (e) {
           return { ok: false, output: `拒绝：非法正则（${(e as Error).message}）` }
         }
-        // 星高 >1 的典型结构（组内带量词、整体再带量词）在长行上会灾难性回溯，直接拒绝
-        if (args.is_regex === true && /\((?:[^()]*[+*?])[^()]*\)[+*?]|\[[^\]]+\][+*?]{2,}|[+*?]{3,}/.test(pattern)) {
-          return { ok: false, output: '拒绝：正则存在嵌套量词（可能灾难性回溯），请拆分为多个简单搜索' }
+        // 灾难性回溯的已知形态直接拒绝：组内带量词再整体带量词、纯交替组后带量词
+        // （(a|aa)*b 这类指数回溯）、字符类连缀量词、量词连排——matcher.test 跑在主进程，
+        // 一次卡死就是整个应用。启发式仍非完备（嵌套分组包住交替等形态会漏），
+        // 线性时间引擎（RE2 类）才是根治，本层先挡已知灾难形态；模式 200 长度上限不变，兜住没认出来的。
+        if (args.is_regex === true && /\((?:[^()]*[+*?])[^()]*\)[+*?]|\((?:[^()]*\|[^()]*)\)[+*?]|\[[^\]]+\][+*?]{2,}|[+*?]{3,}/.test(pattern)) {
+          return { ok: false, output: '拒绝：正则存在嵌套量词或带量词的交替组（可能灾难性回溯），请拆分为多个简单搜索' }
         }
         const root = resolvePath(grant.dir)
         const gfilter = compileGlob(args.glob)
@@ -713,7 +749,8 @@ async function dispatch(
         // 旧内容此刻还在内存里，直接算 diff，省一次读盘
         const bk = await backup(p)
         await fs.writeFile(p, next, 'utf8')
-        const change = bk.rel === null ? null : { rel: bk.rel, path: p, kind: 'modified' as const, diff: previewDiff, bytes: next.length, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
+        // 同 write_file：目录外改动也登记（rel 绝对路径占位），警示到界面；modified 无备份只列出
+        const change = bk.rel === null && !bk.unbacked ? null : { rel: bk.rel ?? p, path: p, kind: 'modified' as const, diff: previewDiff, bytes: next.length, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
         track(change)
         return { ok: true, output: `已替换 ${args.replace_all === true ? count : 1} 处`, writtenPath: p, ...(change ? { change } : {}) }
       }

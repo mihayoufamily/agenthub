@@ -2,8 +2,8 @@
 //
 // 三层判定，顺序固定：
 // ① 危险形态（rm -rf / del /s / format / curl|sh 这类）——**白名单不能覆盖**，一律要人确认；
-// ② 命令按 && || ; | 拆段，每一段都要被白名单规则单独覆盖，`npm test && del C:\*` 不能因为
-//    "npm test 在白名单里"就整条放行；
+// ② 命令按 cmd 真实语义拆段（&& || ; |、单 &、换行都是边界；引号只认双引号），每一段都要被
+//    白名单规则单独覆盖，`npm test && del C:\*` 不能因为"npm test 在白名单里"就整条放行；
 // ③ 规则默认整段相等才放行，只有以 `*` 结尾才是前缀放行——想放宽必须显式写通配，不靠猜。
 import type { ApprovalDecision, ApprovalRecord, ApprovalRequest } from './types'
 
@@ -14,21 +14,35 @@ export function normalizeCommand(s: string): string {
   return s.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
-/** 引号感知的命令分段：Windows 上 && || ; | 才是"另一条命令"的边界 */
+/**
+ * 引号感知的命令分段，按 cmd.exe 的真实语义：单 `&` 与换行（\r \n）和 && || ; | 一样都是
+ * "另一条命令"的边界；引号区只由 `"` 开启/关闭（cmd 不认单引号，`'` 是普通字符）。
+ * 旧版只认 && || ; |、还把 `'` 当引号——`git status & powershell …` 会整段命中 `git *` 前缀
+ * 免确认放行，这正是要修的洞。
+ * 引号外的 `^` 是 cmd 转义符：下一个字符（若存在）按普通字符并入本段并跳过，`^&` 不拆段；
+ * 段文本里 `^` 被剥掉不影响用途（段只用于匹配，不回显原文）。
+ * 已知残留：`%VAR%` 展开出分隔符属于 percent-expansion 发生在解析前后的问题，本层看不到
+ * 变量内容，只能靠"未覆盖段要人确认"兜底。
+ */
 export function splitSegments(command: string): string[] {
   const out: string[] = []
   let cur = ''
-  let q: string | null = null
+  let q = false
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]
     if (q) {
       cur += ch
-      if (ch === q) q = null
+      if (ch === '"') q = false
       continue
     }
-    if (ch === '"' || ch === "'") {
-      q = ch
+    if (ch === '"') {
+      q = true
       cur += ch
+      continue
+    }
+    if (ch === '^') {
+      if (i + 1 < command.length) cur += command[i + 1]
+      i++
       continue
     }
     const two = command.slice(i, i + 2)
@@ -38,7 +52,8 @@ export function splitSegments(command: string): string[] {
       i++
       continue
     }
-    if (ch === ';' || ch === '|') {
+    // 单 & 在 cmd 里是无条件命令分隔符，换行同理（cmd /c 对裸 LF/CRLF 按分隔符处理）
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '\r' || ch === '\n') {
       out.push(cur)
       cur = ''
       continue
@@ -61,20 +76,28 @@ export function ruleMatches(rule: string, segment: string): boolean {
   return s === r
 }
 
-/** 危险形态：这些不论白名单里写了什么都必须人工确认 */
+/**
+ * 危险形态：这些不论白名单里写了什么都必须人工确认。
+ * 清单是启发式不是完备集（只收评审点名的形态与常见变体：短旗标、.exe 后缀、长选项、PowerShell
+ * 同义命令），未命中的未知命令仍要走逐段确认——本清单只把"明显危险"提前到免确认判定之前。
+ * 各条只在自己那一段内扫描：[^&|;]* 不跨段（单 & 现在也是段边界，拆段后天然只剩单段，语义不变）。
+ */
 const DANGEROUS: { re: RegExp; label: string }[] = [
-  { re: /\brm\s+(?:-[a-z]+\s+)*-[a-z]*[rf][a-z]*\b/i, label: '递归/强制删除（rm -rf）' },
-  { re: /\bdel\s+\/s/i, label: '递归删除（del /s）' },
-  { re: /\berase\s+\/s/i, label: '递归删除（erase /s）' },
+  { re: /\brm\s+(?:(?:-{1,2}[a-z]+)\s+)*(?:-\w*[rf]\w*|--recursive|--force)\b/i, label: '递归/强制删除（rm -rf）' },
+  { re: /\b(del|erase)\s*\/s/i, label: '递归删除（del /s）' },
+  { re: /\b(rd|rmdir)\s*\/s/i, label: '递归删除（rd /s）' },
   { re: /\bformat(?:\s+\/[a-z])*\s+[a-z]:/i, label: '格式化磁盘（format）' },
   { re: /\bmkfs\b/i, label: '重建文件系统（mkfs）' },
   { re: /\b(shutdown|reboot|logoff)\b/i, label: '关机/重启' },
   { re: /\bnet\s+user\b/i, label: '改动系统账户（net user）' },
-  { re: /\breg\s+(delete|add)\b/i, label: '改动注册表（reg）' },
+  { re: /\breg(?:\.exe)?\s+(?:delete|add)\b/i, label: '改动注册表（reg）' },
   { re: /\bset-mppreference\b/i, label: '改动 Defender 策略' },
-  { re: /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/i, label: '网络脚本直接执行（curl | sh）' },
-  { re: /\bgit\s+push\b[^&|;]*--force(?:-with-lease)?\b/i, label: '强制推送（git push --force）' },
-  { re: /\bgit\s+(?:reset\s+--hard|clean\s+-[a-z]*f)\b/i, label: '丢弃工作区（git reset --hard / clean -f）' }
+  { re: /\bremove-item\b[^&|;]*\s-?recurse/i, label: '递归删除（Remove-Item -Recurse）' },
+  { re: /\b(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b[^|]*\|\s*(?:iex|invoke-expression|(?:sudo\s+)?(?:ba|z)?sh|powershell|cmd)\b/i, label: '网络脚本直接执行（curl | sh / iwr | iex）' },
+  { re: /\bpowershell(?:\.exe)?\b[^&|;]*\s-(?:e|enc|encodedcommand)\b/i, label: '编码命令执行（powershell -enc）' },
+  { re: /\bgit\s+push\b[^&|;]*\s(?:-{1,2}(?:f|force(?:-with-lease)?))\b/i, label: '强制推送（git push -f/--force）' },
+  { re: /\bgit\s+reset\b[^&|;]*\s--hard\b/i, label: '丢弃工作区改动（git reset --hard）' },
+  { re: /\bgit\s+clean\b[^&|;]*\s-\w*f\w*/i, label: '丢弃未跟踪文件（git clean -f）' }
 ]
 
 /** 命中的危险形态名称（没命中返回 null） */

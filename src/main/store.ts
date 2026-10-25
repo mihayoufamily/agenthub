@@ -1,11 +1,21 @@
 import { app, safeStorage } from 'electron'
-import { migrateV1toV2, migrateV2toV3, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
+import { migrateV0toV1, migrateV1toV2, migrateV2toV3, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
 import { join } from 'node:path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync, renameSync } from 'node:fs'
 import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
 
 /** 迁移链要处理的原始配置形状：可能有未知键，也可能缺字段，一切以"保留"为先 */
 type RawCfg = Partial<AppConfig> & Record<string, unknown>
+
+/**
+ * 渲染层可控 ID（agentId / run.id）的路径闸门：这些 ID 直接拼进文件路径，`..\..` 一类串能逃出 userData。
+ * 与 checkpoints.safeId 同口径（字符白名单 + 长度上限），另拒纯点串（`.`/`..`/`...` 是目录语义）。
+ * 本仓威胁模型里渲染层不是可信方（与 ipc.ts model:chat"不接受渲染层自构造的 grant"同一原则），
+ * store 是权威闸门，ipc 侧不重复校验。
+ */
+function safeFileId(id: string): boolean {
+  return /^[A-Za-z0-9._-]{1,64}$/.test(id) && !/^\.+$/.test(id)
+}
 
 interface StoreDirs {
   config: string
@@ -45,12 +55,20 @@ export class Store {
       if (!existsSync(p)) return fallback
       return JSON.parse(readFileSync(p, 'utf-8')) as T
     } catch {
+      // 损坏保留：解析失败时把坏文件改名挪开（best-effort，挪不动也不报错），让用户有机会手工找回；
+      // 不挪开的话，下一次任何写点（迁移回写/保存）都会把整份原数据覆盖掉。
+      try { renameSync(p, `${p}.corrupt-${Date.now()}`) } catch { /* 文件被占用等：保留 fallback 语义即可 */ }
+      // 取舍：应用不因一个坏文件拒启动——宁可空跑也不挡所有人进门，返回 fallback 照常起。
       return fallback
     }
   }
 
   private writeJson(p: string, data: unknown) {
-    writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8')
+    // 原子落盘：先写同目录临时文件再 rename 整体替换，防"写一半进程崩了/被杀了"留下半份 JSON，
+    // 把整份 config/会话/记忆清零。断电级持久不是本层承诺（rename 前掉电仍可能是旧文件）。
+    const tmp = `${p}.tmp`
+    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8')
+    renameSync(tmp, p)
   }
 
   log(line: string) {
@@ -147,7 +165,14 @@ export class Store {
     for (const a of cfg.agents) {
       if (a.modelConfig) a.modelConfig.hasKey = false
     }
-    return JSON.stringify({ ...cfg, exportedAt: new Date().toISOString(), note: 'API Key 不会被导出，导入后需重新填写' }, null, 2)
+    // MCP server 的 env 是第三方凭据（GitHub token 等）的存放位，与"配置导出不含任何秘密"的承诺冲突：
+    // 保留键名（导入后知道要重填哪些）、值置空串；null/非对象元素原样透传（迁移层的既有口径）
+    for (const s of cfg.mcpServers ?? []) {
+      if (s && typeof s === 'object' && s.env && typeof s.env === 'object') {
+        for (const k of Object.keys(s.env)) s.env[k] = ''
+      }
+    }
+    return JSON.stringify({ ...cfg, exportedAt: new Date().toISOString(), note: 'API Key 不会被导出，导入后需重新填写；MCP server 的环境变量值已置空，导入后需重填' }, null, 2)
   }
 
   importConfig(json: string): { ok: boolean; message: string } {
@@ -173,10 +198,13 @@ export class Store {
 
   // ---------- 会话（v2 多会话：每 Agent 一个文件，内容为会话数组；旧单会话格式加载时自动迁移） ----------
   saveSessions(agentId: string, sessions: AgentSession[], activeId?: string) {
+    // ID 不合法直接 no-op：宁可不落这次会话，也不在任意路径建文件
+    if (!safeFileId(agentId)) return
     this.writeJson(join(this.dirs.sessions, `${agentId}.json`), { v: 2, sessions, activeId })
   }
 
   loadSessions(agentId: string): { sessions: AgentSession[]; activeId?: string } | null {
+    if (!safeFileId(agentId)) return null
     const raw = this.readJson<Record<string, unknown> | null>(join(this.dirs.sessions, `${agentId}.json`), null)
     if (!raw) return null
     if (Array.isArray(raw.sessions)) {
@@ -203,6 +231,8 @@ export class Store {
 
   removeSession(agentId: string, deleteHistory: boolean) {
     // deleteHistory=false 时仅"移除连接"不动会话；此处只有 deleteHistory=true 才清空全部会话
+    // ID 不合法 no-op：清空/写回都不该落到 userData 之外的路径
+    if (!safeFileId(agentId)) return
     if (deleteHistory) {
       const p = join(this.dirs.sessions, `${agentId}.json`)
       if (existsSync(p)) writeFileSync(p, JSON.stringify({ v: 2, sessions: [], activeId: undefined }))
@@ -211,6 +241,8 @@ export class Store {
 
   // ---------- 工作流任务记录 ----------
   saveRun(run: WorkflowRun) {
+    // run.id 来自渲染层，同 saveSessions 的闸门口径
+    if (!safeFileId(run.id)) return
     this.writeJson(join(this.dirs.runs, `${run.id}.json`), run)
   }
 
@@ -229,6 +261,7 @@ export class Store {
   }
 
   removeRun(id: string) {
+    if (!safeFileId(id)) return
     const p = join(this.dirs.runs, `${id}.json`)
     if (existsSync(p)) unlinkSync(p)
   }
@@ -281,7 +314,10 @@ export class Store {
 
   private writeCredMap(map: Record<string, string>) {
     if (!safeStorage.isEncryptionAvailable()) throw new Error('当前系统不支持安全凭据存储')
-    writeFileSync(this.dirs.credentials, safeStorage.encryptString(JSON.stringify(map)))
+    // 与 writeJson 同一道原子替换：凭据文件写一半被杀，损失的是整份凭据表
+    const tmp = `${this.dirs.credentials}.tmp`
+    writeFileSync(tmp, safeStorage.encryptString(JSON.stringify(map)))
+    renameSync(tmp, this.dirs.credentials)
   }
 
   saveCredential(keyId: string, secret: string) {
@@ -307,45 +343,3 @@ export class Store {
   }
 }
 
-/** v0 -> v1 缺的工作流骨架：谁都没选、审核走人工、预算不设上限（0=不限） */
-const defaultWorkflowDefaults: NonNullable<AppConfig['workflowDefaults']> = {
-  plannerAgentId: '',
-  executorAgentId: '',
-  reviewerAgentId: '',
-  reviewMode: 'human',
-  maxRounds: 3,
-  timeoutMin: 30,
-  confirmEveryRound: false,
-  maxTokens: 0,
-  budgetYuan: 0
-}
-
-/**
- * v0 -> v1：补齐默认偏好与工作流骨架。
- * 返回结构必须是"**展开 raw 再覆盖必填项**"——以前这里是重新拼一个字面量，只留
- * schemaVersion/prefs/agents/workflowDefaults，任何调用它的路径都会静默丢掉
- * mcpServers/presets/hooks/priceOverrides/skills（导入配置就是踩的这条）。
- */
-function migrateV0toV1(raw: RawCfg): RawCfg {
-  const defaultPrefs: Prefs = {
-    theme: 'system',
-    animations: true,
-    reducedMotion: false,
-    replayWelcome: true,
-    fontSize: 14,
-    sidebarCollapsed: false,
-    enterToSend: true,
-    shiftWheelSwitch: true,
-    firstRunDone: false,
-    lastMode: null
-  }
-  const oldPrefs = (raw.prefs ?? {}) as Partial<Prefs>
-  const oldWd = (raw.workflowDefaults ?? {}) as Partial<NonNullable<AppConfig['workflowDefaults']>>
-  return {
-    ...raw,
-    schemaVersion: 1,
-    prefs: { ...defaultPrefs, ...oldPrefs },
-    agents: (raw.agents as AppConfig['agents']) ?? [],
-    workflowDefaults: { ...defaultWorkflowDefaults, ...oldWd }
-  }
-}

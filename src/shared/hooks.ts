@@ -4,7 +4,9 @@
 // - pre：退出码非 0 = 否决这次调用，脚本的 stdout/stderr 原样回传给模型；
 // - post：只观察与后处理，失败不撤销已发生的改动，但如实报告；
 // - 数据只通过环境变量传入：命令是人写的、参数是模型给的，
-//   把参数拼进命令串等于把注入面留在自己的脚本里。
+//   把参数拼进命令串等于把注入面留在自己的脚本里。超长参数（超过 HOOK_ARGS_FILE_THRESHOLD）
+//   时执行层改走临时文件载体（AHUB_HOOK_ARGS_FILE 指路径、AHUB_HOOK_ARGS 置空），
+//   同样不经命令行拼接——只是换了载体，注入面没有变大。
 import type { HookRule, RejectedEntry } from './types'
 
 export const HOOK_DEFAULT_TIMEOUT = 15_000
@@ -34,6 +36,16 @@ export function matchHook(rule: HookRule, tool: string): boolean {
   }
 }
 
+/**
+ * AHUB_HOOK_ARGS 换用临时文件载体的阈值（字符）。Windows 单个环境变量约 32767 字符上限，
+ * 而 write_file 的内容可达 1MB：整包塞进环境变量时 spawn 直接失败，pre Hook 会被误判成
+ * "否决"（退出码 null 的误导提示）。超过阈值时 main/hooks.ts（执行层）把 argsJson 写进
+ * 临时文件，环境变量改给 AHUB_HOOK_ARGS_FILE（文件路径）并把 AHUB_HOOK_ARGS 置空，
+ * Hook 进程退出后删除该文件。取 30000 是给 32767 留余量。本层是纯规则层不碰磁盘，
+ * 只定契约；hookEnv 本身仍按原样构建，换载体由执行层在其结果上覆盖。
+ */
+export const HOOK_ARGS_FILE_THRESHOLD = 30000
+
 export interface HookEnvInput {
   tool: string
   argsJson: string
@@ -45,7 +57,9 @@ export interface HookEnvInput {
   reqId?: string
 }
 
-/** 传给脚本的环境变量（一律字符串化，缺省给空串而不是省略：脚本读起来不用防 undefined） */
+/** 传给脚本的环境变量（一律字符串化，缺省给空串而不是省略：脚本读起来不用防 undefined）。
+ *  AHUB_HOOK_ARGS 过长时不在这层换载体（纯规则层不碰磁盘）：执行层会置空它并补一个
+ *  AHUB_HOOK_ARGS_FILE 指向临时文件，见 HOOK_ARGS_FILE_THRESHOLD。 */
 export function hookEnv(event: 'pre' | 'post', ctx: HookEnvInput): Record<string, string> {
   return {
     AHUB_HOOK_EVENT: event,

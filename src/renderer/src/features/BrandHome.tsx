@@ -109,7 +109,9 @@ export function BrandHome() {
 
       {/* C1：模式选择在输入卡下方（原先钉在视口右上角，离"要做的决定"最远） */}
       <div className="mode-pill-wrap">
-        <div className="mode-pill" role="radiogroup" aria-label="工作模式选择" onBlur={() => setInfoKey(null)}>
+        {/* onBlur 是冒泡的 focusout：Tab 从 pill 移进说明卡按钮时焦点仍在本组内，
+            不能关卡（否则卡先卸载、焦点落空）。只在新焦点真的离开 pill+卡整体时才收起 */}
+        <div className="mode-pill" role="radiogroup" aria-label="工作模式选择" onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setInfoKey(null) }}>
           {(['workbench', 'workflow'] as const).map((m) => (
             <button
               key={m}
