@@ -160,9 +160,15 @@ export function TaskView() {
             <b>{run.stage ? STAGE_TEXT[run.stage] : (STATUS_TEXT[run.status] ?? '已结束')}</b>
             <span>第 {run.round}/{run.maxRounds} 轮</span>
             <span className="elapsed">{elapsed}</span>
-            <Badge tone={run.reviewMode === 'human' ? 'warn' : 'info'}>
-              {run.reviewMode === 'human' ? '人工确认' : '自动审核'}
-            </Badge>
+            {/* 审核方式是"由谁审核"的元信息，不是"正在等确认"的事件状态：加"审核："前缀点名 +
+                弱化样式（灰细边框、不加底色），与左侧状态 chips（badge warn/info）区分开——
+                此前裸写"人工确认"容易被读成卡在确认门，确认门有自己的 GateCard（2026-10-25 UI 审查） */}
+            <span
+              className="stage-review-chip"
+              title={`审核方式：由${run.reviewMode === 'human' ? '人工' : '自动审核'}判断成果，不表示正在等待确认`}
+            >
+              审核：{run.reviewMode === 'human' ? '人工确认' : '自动审核'}
+            </span>
             {run.demo && <span className="demo-badge">演示模式</span>}
             <Badge tone={STATUS_BADGE[run.status] ?? 'default'}>{STATUS_TEXT[run.status] ?? run.status}</Badge>
           </div>
@@ -318,7 +324,8 @@ function TaskComposer() {
       }}
       placeholder="补充要求…（将在下一轮生效，不修改已执行步骤）"
       enterToSend
-      hint={<span>补充要求 · 下一轮生效</span>}
+      /* "下一轮生效"只在 placeholder 说一次即可，提示里再写一遍是重复（2026-10-25 UI 审查） */
+      hint={<span>补充要求</span>}
     />
   )
 }

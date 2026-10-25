@@ -12,7 +12,23 @@ import { RolePicker, type RoleKey } from './RolePicker'
 import { OutputDirChip } from '../components/OutputDir'
 import { PresetChip, STATUS_TEXT } from './WfChips'
 import { MAX_QUEUE } from '@shared/engine-transitions'
+import type { WorkflowTemplate } from '@shared/types'
+import { bridge } from '../lib/ipc'
 import { cls } from '../lib/utils'
+
+/**
+ * 剧本目标模板的占位符替换（纯函数，导出供逻辑层测试）：
+ * `{{日期}}` → 当天 YYYY-MM-DD、`{{时间}}` → HH:mm（都按本地时区）。
+ * 未知占位符原样保留（不猜、不吞）：替换错了用户在输入框里看得见、可以自己改，
+ * 静默吞掉一个 `{{项目名}}` 反而把"这条还没填"的事实藏了起来。
+ */
+export function expandTemplatePlaceholders(text: string, now: Date = new Date()): string {
+  if (!text) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`
+  return text.replace(/\{\{\s*日期\s*\}\}/g, date).replace(/\{\{\s*时间\s*\}\}/g, time)
+}
 
 export function WorkflowHome() {
   const draft = useWorkflow((s) => s.draft)
@@ -36,6 +52,17 @@ export function WorkflowHome() {
   const [pinned, setPinned] = useState(false)
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const composerWrapRef = useRef<HTMLDivElement | null>(null)
+
+  // 剧本清单：挂载时拉一次（在设置页新建后回到首页会因重挂载重新拉到）
+  const [templates, setTemplates] = useState<WorkflowTemplate[]>([])
+  useEffect(() => {
+    let alive = true
+    bridge.templates.get().then((list) => {
+      if (alive && Array.isArray(list)) setTemplates(list)
+    }).catch(() => { /* 拉不到不挡任务输入，剧本块按不存在渲染 */ })
+    return () => { alive = false }
+  }, [])
 
   const [panelOpen, setPanelOpen] = useState(false)
 
@@ -107,6 +134,37 @@ export function WorkflowHome() {
   // 引擎只有一个执行循环：跑着的时候"开始"会被占用位挡下，这时排队是唯一的提交通道
   const busy = runBusy(run)
 
+  // ---- 剧本动作 ----
+  const focusComposer = () => composerWrapRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus()
+  /** 用剧本开任务：填草稿（替换占位符）→ 套预设 → 置单次档 → 聚焦输入框。绝不自动开始——要花钱的按钮必须人来按 */
+  const applyTemplate = (t: WorkflowTemplate) => {
+    setDraft(expandTemplatePlaceholders(t.goalTemplate))
+    const wf = useWorkflow.getState()
+    if (t.presetId) wf.applyPreset(t.presetId) // 预设被删时 applyPreset 自己 toast 说明
+    if (t.planFirst) wf.setPlanNextTask(true)
+    focusComposer()
+    useUi.getState().toast(
+      t.presetId ? `已载入剧本「${t.name}」（预设已套用）：确认或补充后点「开始任务」` : `已载入剧本「${t.name}」：确认或补充后点「开始任务」`,
+      'ok'
+    )
+  }
+  /** 仅载入：只填草稿，预设与计划档都不动 */
+  const loadTemplateOnly = (t: WorkflowTemplate) => {
+    setDraft(expandTemplatePlaceholders(t.goalTemplate))
+    focusComposer()
+    useUi.getState().toast(`已载入剧本「${t.name}」的目标模板（预设与计划档未动）`, 'info')
+  }
+  const removeTemplate = async (id: string) => {
+    const next = templates.filter((x) => x.id !== id)
+    const r = await bridge.templates.set(next).catch(() => null)
+    if (!r) {
+      useUi.getState().toast('删除失败：主进程无响应', 'error')
+      return
+    }
+    setTemplates(r.list)
+    if (r.rejected.length) useUi.getState().toast(`有 ${r.rejected.length} 条剧本未通过校验：${r.rejected[0].message}`, 'warn')
+  }
+
   const demo = isDemoRun() && !!config.planner.agentId
 
   return (
@@ -116,7 +174,11 @@ export function WorkflowHome() {
         <div className="wf-title">工作流模式</div>
         <div className="wf-desc">规划、执行与审核协作完成任务。</div>
 
-        <div className="wf-composer-wrap">
+        <div className="wf-composer-wrap" ref={composerWrapRef}>
+          {/* 输入框内右下角的提示在此场景下照实改写：Composer 默认写"Enter 发送"，但这里
+              onSend 触发的是"开始任务"（整段工作流，不是发一条消息）——传 hint 覆盖默认措辞，
+              并覆盖 enterToSend=false 时的 Ctrl+Enter 分支；原先框外左下那行"Enter 开始…"
+              与框内提示信息重复、又和居中布局打架，删除（2026-10-25 UI 审查） */}
           <Composer
             value={draft}
             onChange={setDraft}
@@ -124,10 +186,8 @@ export function WorkflowHome() {
             enterToSend={enterToSend}
             placeholder="描述要完成的任务、约束与期望产物…"
             autoFocusOnMount
+            hint={enterToSend ? <span>Enter 开始 · Shift+Enter 换行</span> : <span>Ctrl+Enter 开始</span>}
           />
-          <div className="wf-supplement-tip" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span>Enter 开始（可在设置中改为 Ctrl+Enter）</span>
-          </div>
         </div>
 
         {/* 配置条：悬停 200ms 打开可选浮层；点击固定（Escape / 外部点击关闭）；互斥不叠加 */}
@@ -221,6 +281,40 @@ export function WorkflowHome() {
         {demo && (
           <div style={{ marginTop: 18 }}>
             <span className="demo-badge">当前配置为演示模式 · 无真实 Agent 也能跑通全流程</span>
+          </div>
+        )}
+
+        {/* 剧本区：在任务队列/历史之上（它产出的是"下一次任务怎么起"）。无剧本时整块不显示，
+            不留一个空标题占位。三个动作的差别要说清：开任务=填草稿+套预设+置计划档（仍不自动开始），
+            仅载入=只填草稿 */}
+        {templates.length > 0 && (
+          <div className="wf-history wf-templates">
+            <div className="wf-history-head">
+              <b>剧本（{templates.length}）</b>
+              <span>一键载入目标模板与预设；「开始任务」仍由你按下</span>
+            </div>
+            {templates.map((t) => (
+              <div key={t.id} className="wf-history-row wf-tpl-row">
+                <div className="wf-tpl-info" title={t.goalTemplate} style={{ cursor: 'default' }}>
+                  <span className="wf-tpl-name">
+                    {t.name}
+                    {t.planFirst && <em className="wf-tpl-flag">先出计划</em>}
+                  </span>
+                  <em>{t.goalTemplate.length > 40 ? t.goalTemplate.slice(0, 40) + '…' : t.goalTemplate}</em>
+                </div>
+                <div className="wf-tpl-acts">
+                  <button className="wf-tpl-btn primary" onClick={() => applyTemplate(t)}>
+                    用这个剧本开任务
+                  </button>
+                  <button className="wf-tpl-btn" onClick={() => loadTemplateOnly(t)}>
+                    仅载入
+                  </button>
+                  <button className="wf-preset-rm" title="删除剧本" aria-label="删除剧本" onClick={() => void removeTemplate(t.id)}>
+                    ×
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 

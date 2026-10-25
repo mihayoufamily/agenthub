@@ -3,9 +3,11 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
+import { useNotifications, unreadCount } from '../stores/notifications'
 import { Icon } from '../components/Icons'
 import { AgentManageCard } from '../components/AgentManageCard'
 import { Modal } from '../components/Modal'
+import { NotificationCenter } from '../components/NotificationCenter'
 import { LogoMark } from '../components/Logo'
 import { SkillCenter } from './SkillCenter'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
@@ -31,6 +33,20 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
   const openSettings = useUi((s) => s.openSettings)
   // 技能中心开关：纯本弹窗的局部状态，不进 ui store（无跨组件打开需求，少一条全局状态）
   const [skillCenterOpen, setSkillCenterOpen] = useState(false)
+  // 通知中心面板：开关 + 打开瞬间量好的 fixed 坐标（底边贴触发按钮上方）
+  const [notifOpen, setNotifOpen] = useState(false)
+  const [notifAnchor, setNotifAnchor] = useState<{ left: number; bottom: number } | null>(null)
+  const notifBtnRef = useRef<HTMLButtonElement | null>(null)
+  const unreadNtf = useNotifications((s) => unreadCount(s.items))
+  const openNotif = () => {
+    if (notifOpen) { setNotifOpen(false); return }
+    const btn = notifBtnRef.current
+    if (!btn) return
+    const r = btn.getBoundingClientRect()
+    // 底边贴按钮上方 6px；面板实际高度由 max-height + overflow 消化，不量实测高度
+    setNotifAnchor({ left: Math.max(8, r.left), bottom: window.innerHeight - r.top + 6 })
+    setNotifOpen(true)
+  }
   const [menuFor, setMenuFor] = useState<string | null>(null)
   /** 菜单 fixed 坐标：按触发按钮位置 + 剩余空间计算，避免被窗口/滚动容器裁切 */
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
@@ -267,6 +283,16 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
         <button className="foot-btn" onClick={() => useUi.getState().setSwitchHud('__switch_ask')} title="切换模式">
           <Icon name="swap" size={15} /> <span>切换模式</span>
         </button>
+        <button
+          ref={notifBtnRef}
+          className="foot-btn notif-trigger"
+          onClick={openNotif}
+          title="通知中心"
+        >
+          {/* Icons.tsx 里没有铃铛（图标集按需添加，不为单处入口扩集），先用文字占位 */}
+          <span>通知</span>
+          {unreadNtf > 0 && <span className="notif-badge">{unreadNtf > 9 ? '9+' : unreadNtf}</span>}
+        </button>
         <button className="foot-btn" onClick={() => setSkillCenterOpen(true)} title="技能中心">
           <Icon name="download" size={15} /> <span>技能中心</span>
         </button>
@@ -278,6 +304,13 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
       {/* 技能中心：Modal 组件自身 portal 到 body（aside 的入场动画 fill-mode:both 会让
           fixed 后代被困在侧栏里——真实事故，Modal 层统一修掉了），这里挂哪都行 */}
       <SkillCenter open={skillCenterOpen} onClose={() => setSkillCenterOpen(false)} />
+
+      {/* 通知中心：不是 Modal，走不到 Modal 的 portal，必须自己 createPortal——
+          本面板是 fixed 定位，直接挂在 aside 里会被侧栏入场动画的 transform 裹挟
+          （fixed 包含块问题，同上面技能中心注释里那场事故；详见 NotificationCenter.tsx 头注释） */}
+      {notifOpen && notifAnchor && (
+        <NotificationCenter anchor={notifAnchor} onClose={() => setNotifOpen(false)} />
+      )}
     </aside>
   )
 }

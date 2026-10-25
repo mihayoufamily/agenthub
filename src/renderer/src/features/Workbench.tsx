@@ -1,5 +1,5 @@
 // 工作站主界面：共享外壳（左侧栏）+ 聊天区 + 模式进入动画 + Shift+滚轮节流切换 + 空状态引导
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
@@ -53,23 +53,37 @@ export function Workbench() {
 
   const showEmpty = agents.length === 0
   const entryCause = useUi((st) => st.modeEntryCause)
+  // 进站动画（C2）：播不播在**挂载那一刻**定格，并当场把 cause 消费掉。
+  // 为什么不等播完再清位：cause 的职责是"防止下一次重挂载重播"（见 modeTransition.ts），
+  // 不是"控制大字层何时消失"。原先把清位挂在 780ms 的 DOM 定时器上，而窗口被遮挡/后台时
+  // Chromium 会把 DOM 定时器钳到秒级对齐（2026-10-25 真机实测：同一构建清位在 875~1300ms+ 间漂），
+  // 位迟迟不清，这段时间里的切会话/切任务重挂载就会拿着旧 cause 再播一遍——真机套件的
+  // "纯重挂载不再播"回归正是这个窗口被量到的。挂载即消费后，重播在状态层不可能发生；
+  // 大字层的收场降级为纯观感问题，改由本地快照 + 定时器承担，收场晚一点不影响语义。
+  const [entryShot] = useState(() => shouldPlayEntry(entryCause))
   const setEntryCause = useUi((st) => st.setModeEntryCause)
+  useEffect(() => {
+    if (!entryShot) return
+    setEntryCause(null)
+  }, [entryShot, setEntryCause])
   // 尊重"减少动态效果"：判定式与 Splash 一致（reducedMotion 或 animations===false 两个条件或运算）。
   // 不能只靠 tokens.css 那条全局压时长——那等于把合规性寄托在"大字层的基础样式恰好是透明的"上，
   // 谁哪天给它加一个可见的底样式，开关就静默失效。
   const prefs = useSettings((s) => s.prefs)
-  const playing = shouldPlayEntry(entryCause) && !(prefs?.reducedMotion || prefs?.animations === false)
+  const playing = entryShot && !(prefs?.reducedMotion || prefs?.animations === false)
+  const [entryVisible, setEntryVisible] = useState(playing)
   useEffect(() => {
-    if (!playing) return
-    // 播完清空 cause：下一次纯重挂载（切任务/切会话/重启恢复）就不会再播
-    const t = setTimeout(() => setEntryCause(null), ENTRY_TOTAL_MS)
+    // 依赖 entryVisible 而不是 playing：动画中途改"减少动态效果"会让 playing 翻转，
+    // 挂在它身上定时器会被 cleanup 清掉且不再重排，大字层就永远不退场了
+    if (!entryVisible) return
+    const t = setTimeout(() => setEntryVisible(false), ENTRY_TOTAL_MS)
     return () => clearTimeout(t)
-  }, [playing, setEntryCause])
+  }, [entryVisible])
 
   return (
     <Shell>
       {/* 模式进入大字：短暂停留后收束（CSS 动画自动完成） */}
-      {playing && <div className="wb-mode-title" data-entry="1">工作站模式</div>}
+      {entryVisible && <div className="wb-mode-title" data-entry="1">工作站模式</div>}
 
       {showEmpty ? (
         <div className="wb-main">

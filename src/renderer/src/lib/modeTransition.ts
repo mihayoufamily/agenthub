@@ -13,5 +13,8 @@ export function shouldPlayEntry(cause: unknown): cause is EntryCause {
   return typeof cause === 'string' && (ENTRY_CAUSES as readonly string[]).includes(cause)
 }
 
-/** 播完要清空 cause（否则下次重挂载仍拿着上次的 cause 再播一遍）；时长与新时间线对齐 */
+/** cause 在 Workbench 挂载消费进站时**立刻清空**（不等播完）：它的职责是防止重挂载重播，
+ *  不是控制大字层何时消失——清位若挂在定时器上，窗口被遮挡时被 Chromium 钳到秒级，
+ *  位不清的窗口期里切会话/切任务重挂载就会重播（2026-10-25 真机回归实测）。
+ *  本常量只用于大字层的收场时长，与新时间线对齐 */
 export const ENTRY_TOTAL_MS = 780

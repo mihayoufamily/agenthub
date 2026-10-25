@@ -10,6 +10,7 @@ import { navDecision } from '../shared/winnav'
 import { decideFallback, forcedCompatCrashEnabled, normalizePolicy, gpuStageAction, compatHintPending, SANDBOX_CRASH_THRESHOLD, FORCE_SANDBOX_CRASH_ENV, COMPAT_HINT_ENV, COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_GPU, COMPAT_FAIL_MESSAGE_SANDBOX, VERIFY_SWITCH } from '../shared/compat'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 import * as ledger from './ledger'
+import { consumePendingUpdate } from './updater'
 
 // 窗口状态持久化（简化：保存位置尺寸，启动时恢复并做屏幕边界校验）
 interface WindowState { x?: number; y?: number; width: number; height: number; maximized?: boolean }
@@ -171,8 +172,12 @@ async function runShotSequence(win: BrowserWindow) {
   await js('window.__ahub_debug && window.__ahub_debug.workflow()')
   await wait(1200)
   await shot('04-workflow-home')
-  // 05 演示任务运行中（第一轮规划/执行卡片流式）
-  await js('window.__ahub_debug && window.__ahub_debug.startDemoTask()')
+  // 05 演示任务运行中（第一轮规划/执行卡片流式）。
+  // startDemoTask 现在强制三角色绑演示 Agent（零真实调用；2026-10-25 事故：原先用配置里
+  // 当前绑定的真实 CLI 跑了真实调用、花了额度，且 90s 心跳把确认门拖到 06 之后才挂出）。
+  // 它返回进门前的整份工作流配置与"是否本次现补演示 Agent"：patchConfig 会落盘，
+  // 序列收尾必须原样还原，否则用户的角色绑定就被截图跑改掉了。
+  const started = await js('window.__ahub_debug && window.__ahub_debug.startDemoTask()')
   await wait(6500)
   await shot('05-task-running')
   // 06 等待人工确认门（第 1 轮审核完，含一次返工建议）
@@ -182,6 +187,17 @@ async function runShotSequence(win: BrowserWindow) {
   await js('window.__ahub_debug && window.__ahub_debug.passGate()')
   await wait(3500)
   await shot('07-delivery')
+  // 收尾还原：先回滚角色绑定再删本次现补的演示 Agent（用户的演示 Agent 不动）。
+  // 还原要在截图全部完成之后——交付卡上的角色名来自绑定，中途还原会拍到真实 Agent 的名字
+  if (started && started.prevConfig) {
+    await js(`window.__ahub_debug.restoreWorkflowConfig(${JSON.stringify(started.prevConfig)})`)
+  }
+  if (started && started.added && started.agentName) {
+    await js(`window.__ahub_debug.removeAgentByName(${JSON.stringify(started.agentName)})`)
+  }
+  if (started && started.rejected) {
+    log('startDemoTask 被拒（执行链占用中）：本次未做任何演示绑定，也无配置可还原')
+  }
   // 08 状态导出（校验截图之外的真实状态断言）
   const state = await win.webContents.executeJavaScript('JSON.stringify(window.__ahub_debug && window.__ahub_debug.state())')
   console.log(`[shots] final state: ${state}`)
@@ -527,6 +543,18 @@ function createWindow() {
 }
 
 function startApp() {
+  // 更新 pending 消费：上次「应用更新」没换成功（文件被占用）的，在这里补做——拿到单实例锁之后、
+  // 建窗口之前，此刻旧 app 目录最可能未被锁定。不放在模块最顶上（require electron 之后立刻）：
+  // 那会抢在单实例锁之前，双开竞态下会在"另一个实例还开着"时动手换目录，几乎必败还白删标记；
+  // 锁拿到再动是同一时点里最安全的位置，依然早于任何窗口与业务初始化。
+  // consumePendingUpdate 内部整体自守（成败都清标记、异常不外抛、绝不阻止启动），这里再兜一层
+  // 最外层 catch：换入逻辑的任何异常都不许影响本次启动。
+  try {
+    if (consumePendingUpdate()) return // 有 pending 已处理：本进程马上 relaunch+quit，不再往下建窗口
+  } catch (e) {
+    console.log(`[main] 消费待应用更新失败（照常启动）：${String(e)}`)
+  }
+
   app.on('second-instance', () => {
     if (mainWindow) {
       // 缩到托盘后再次双击图标：把窗口叫回来，而不是"看起来没反应"

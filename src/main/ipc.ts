@@ -6,7 +6,7 @@ import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
-import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer } from '../shared/types'
+import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer, TaskSchedule, WorkflowTemplate } from '../shared/types'
 import { configurePriceOverrides, partitionPriceOverrides } from '../shared/overrides'
 import { partitionHookRules, sanitizeHookList } from '../shared/hooks'
 import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
@@ -15,9 +15,10 @@ import { execTool, sandboxPath, type CommandApprover } from './tools'
 import * as approvals from './approvals'
 import * as mcp from './mcp'
 import * as checkpoints from './checkpoints'
+import * as scheduler from './scheduler'
 import { readConventions } from './conventions'
 import { buildRepoMap } from './repomap'
-import { checkUpdate, downloadPortable, isDownloading, updatesDir } from './updater'
+import { checkUpdate, downloadPortable, isDownloading, updatesDir, stagedStatus, applyStagedUpdate } from './updater'
 import * as ledger from './ledger'
 import { setBusy } from './lifecycle'
 import type { LedgerEntry } from './ledger'
@@ -41,6 +42,38 @@ export function workflowOutDir(getStore: () => Store): string {
 
 // Agent Skills 的 frontmatter 解析已挪到 main/market.ts（parseSkillFrontmatter，全仓唯一实现）：
 // 技能中心要扫内置技能与解包市场技能，两处都要同一套解析，留两份实现必然漂移。
+
+// ---------- 工作流剧本的形状闸门（与 scheduler.partitionSchedules 同一口径，只是更轻） ----------
+/** 读路径：滤掉手改 config.json 塞进来的 null/非对象，不让剧本列表的 .map 解引用炸掉设置页 */
+function sanitizeTemplates(raw: unknown): WorkflowTemplate[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((t): t is WorkflowTemplate => !!t && typeof t === 'object')
+}
+/** 写路径：name/goalTemplate 非空才收，其余字段补形/收窄；脏条目点名拒收（不静默丢） */
+function partitionTemplates(list: unknown): { kept: WorkflowTemplate[]; rejected: { id: string; message: string }[] } {
+  const kept: WorkflowTemplate[] = []
+  const rejected: { id: string; message: string }[] = []
+  if (!Array.isArray(list)) return { kept, rejected: [{ id: '#', message: 'templates:set 只接受数组' }] }
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i] as Partial<WorkflowTemplate> | null
+    const at = t && typeof t.id === 'string' && t.id.trim() ? t.id.trim() : `#${i}`
+    if (!t || typeof t !== 'object') { rejected.push({ id: at, message: '不是对象' }); continue }
+    const name = typeof t.name === 'string' ? t.name.trim() : ''
+    const goal = typeof t.goalTemplate === 'string' ? t.goalTemplate.trim() : ''
+    if (!name) { rejected.push({ id: at, message: '名称为空' }); continue }
+    if (!goal) { rejected.push({ id: at, message: '目标模板为空' }); continue }
+    if (kept.length >= 50) { rejected.push({ id: at, message: '已到 50 条上限，这一条没有保存' }); continue }
+    kept.push({
+      id: at.slice(0, 64),
+      name: name.slice(0, 40),
+      goalTemplate: goal.slice(0, 8000),
+      ...(typeof t.presetId === 'string' && t.presetId.trim() ? { presetId: t.presetId.trim().slice(0, 64) } : {}),
+      ...(t.planFirst === true ? { planFirst: true } : {}),
+      createdAt: typeof t.createdAt === 'number' && Number.isFinite(t.createdAt) ? t.createdAt : Date.now()
+    })
+  }
+  return { kept, rejected }
+}
 
 /** 账本采集：在事件出口统计耗时/事件数/usage/错误，done|error 时落一条脱敏记录 */
 function ledgerTap(meta: Omit<LedgerEntry, 'ts' | 'ok' | 'ms' | 'events'>) {
@@ -172,6 +205,27 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return err ? { ok: false, message: err } : { ok: true }
   })
 
+  /** 已暂存待应用的更新（staged.json）；没有则 null。横幅挂载时查一次，有就进「应用更新」态 */
+  ipcMain.handle('update:stagedStatus', () => stagedStatus())
+
+  /**
+   * 一键应用已暂存的更新：主进程立刻热交换 resources/app（只支持便携版明文目录，dev/asar 在
+   * updater 内拒绝）。成功后延迟 1.5s 再 relaunch——留时间让渲染层把"更新完成，即将重启"的
+   * 提示真正画出来；热交换失败不算异常出口：updater 已写 pending 标记，下次启动早期自动补做。
+   */
+  ipcMain.handle('update:apply', () => {
+    // 下载还在写盘时不允许换入：staged 可能正被新一轮下载重建，换进去的是半成品
+    if (isDownloading()) return { ok: false, message: '正在下载更新包，请等待完成后再应用' }
+    const r = applyStagedUpdate()
+    if (r.ok && r.relaunch) {
+      setTimeout(() => {
+        app.relaunch()
+        app.quit()
+      }, 1500)
+    }
+    return r
+  })
+
   ipcMain.handle('autostart:get', () => app.getLoginItemSettings().openAtLogin)
 
   ipcMain.handle('autostart:set', (_e, on: boolean) => {
@@ -192,6 +246,40 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
   ipcMain.handle('workflowDefaults:set', (_e, wd: AppConfig['workflowDefaults']) => getStore().setWorkflowDefaults(wd))
   ipcMain.handle('presets:set', (_e, list: AppConfig['presets']) => getStore().setPresets(list))
+
+  // ---------- 定时任务（调度内核在 main/scheduler.ts，纯计算；这里只做通道与接线） ----------
+  ipcMain.handle('schedule:list', () => scheduler.sanitizeSchedules(getStore().getConfig().taskSchedules))
+  ipcMain.handle('schedule:set', (_e, list: TaskSchedule[]) => {
+    // 形状闸门在 scheduler.partitionSchedules（逻辑层可断言）：goal 非空、kind 合法、
+    // time 为 HH:mm、weekly 的 weekday 0-6、interval ≥5；脏数据点名拒收回界面，不静默丢
+    const { kept, rejected } = scheduler.partitionSchedules(list)
+    getStore().setTaskSchedules(kept)
+    return { ok: true, list: kept, rejected }
+  })
+  ipcMain.handle('schedule:remove', (_e, id: string) => {
+    if (typeof id !== 'string' || !id.trim()) return { ok: false, message: 'id 必须是非空字符串' }
+    getStore().setTaskSchedules(scheduler.sanitizeSchedules(getStore().getConfig().taskSchedules).filter((s) => s.id !== id.trim()))
+    return { ok: true }
+  })
+
+  // ---------- 工作流剧本（templates）：轻闸门——goalTemplate 是会进提示词的文本，只拦形状不拦内容 ----------
+  ipcMain.handle('templates:get', () => sanitizeTemplates(getStore().getConfig().workflowTemplates))
+  ipcMain.handle('templates:set', (_e, list: WorkflowTemplate[]) => {
+    const { kept, rejected } = partitionTemplates(list)
+    getStore().setTemplates(kept)
+    return { ok: true, list: kept, rejected }
+  })
+
+  // 调度器接线（每 tick 现读 store 配置，设置页保存后下一拍即生效）：
+  // fire 经 scheduler:fire 推给渲染层，由 App.tsx → workflow.startScheduled 起链/排队；
+  // lastRunAt 记账由 main 侧直接写 store，不依赖渲染层回执（窗口隐藏到托盘时事件照样可达，
+  // 窗口不可用时事件丢弃——那一拍的任务按"没开成"算，如实不补）
+  scheduler.init({
+    getConfig: () => getStore().getConfig(),
+    fire: (s) => getWin()?.webContents.send('scheduler:fire', s),
+    setSchedules: (list) => getStore().setTaskSchedules(list)
+  })
+
   /**
    * 沙箱降级策略（设置 → 关于）。值域在主进程限定死，不接受界面以外的形状：
    * 这条改的是"崩溃时要不要替你关掉 Chromium 沙箱"，写进一个没定义的值等于把降级行为变成未知状态。
@@ -369,6 +457,30 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     // 这里只挡"非空字符串"这一层入口形状；路径形态/目录白名单闸门都在 store.restoreCorruptBackup
     if (typeof corruptPath !== 'string' || !corruptPath.trim()) return { ok: false, message: 'corruptPath 必须是非空字符串' }
     return getStore().restoreCorruptBackup(corruptPath)
+  })
+
+  // ---------- 整包迁移（换机导出/导入）：对话框在本侧，渲染层只发意图不带路径 ----------
+  ipcMain.handle('data:exportBundle', async () => {
+    const win = getWin()
+    if (!win) return { ok: false, message: '窗口不可用' }
+    const r = await dialog.showSaveDialog(win, {
+      title: '导出整包（换机迁移；不含 API Key）',
+      defaultPath: `agenthub-backup-${new Date().toISOString().slice(0, 10)}.zip`,
+      filters: [{ name: 'AgentHub 整包', extensions: ['zip'] }]
+    })
+    if (r.canceled || !r.filePath) return { ok: false, message: '已取消' }
+    return getStore().exportBundle(r.filePath)
+  })
+  ipcMain.handle('data:importBundle', async () => {
+    const win = getWin()
+    if (!win) return { ok: false, message: '窗口不可用' }
+    const r = await dialog.showOpenDialog(win, {
+      title: '导入整包（会覆盖/合并现有数据；导入后需重启应用）',
+      filters: [{ name: 'AgentHub 整包', extensions: ['zip'] }],
+      properties: ['openFile']
+    })
+    if (r.canceled || !r.filePaths[0]) return { ok: false, message: '已取消' }
+    return getStore().importBundle(r.filePaths[0])
   })
 
   // ---------- 凭据 ----------

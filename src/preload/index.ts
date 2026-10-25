@@ -7,14 +7,21 @@ import type {
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
   LedgerEntry, LedgerUsageRow, ConventionFile, ApprovalDecision, ApprovalRequest, ApprovalRecord,
   CheckpointManifest, CheckpointDelta, RollbackResult, FileChange, PriceOverride, HookRule, McpServer, McpProbe,
-  RejectedEntry
+  RejectedEntry, TaskSchedule, WorkflowTemplate
 } from '../shared/types'
 
 /** 更新下载事件（main -> renderer，update:event 通道）：进度 / 完成 / 失败 */
 export type UpdateDownloadEvent =
   | { type: 'progress'; got: number; total: number; pct: number }
-  | { type: 'done'; path: string; sha256: string; verified: boolean; hashNote?: string }
+  | { type: 'done'; path: string; sha256: string; verified: boolean; hashNote?: string; staged?: boolean; stagedVersion?: string; stagedNote?: string }
   | { type: 'error'; message: string }
+
+/** 已暂存待应用的更新（main -> renderer，update:stagedStatus 通道）：staged.json 的内容 */
+export interface StagedUpdate {
+  version: string
+  sha256: string
+  stagedAt: number
+}
 
 /** 损坏备份条目（store.listCorruptBackups 的返回形状） */
 export interface CorruptBackupItem {
@@ -66,6 +73,12 @@ const api = {
     download: () => ipcRenderer.invoke('update:download') as Promise<{ ok: boolean; message?: string }>,
     /** 打开下载目录（<userData>/updates） */
     openDownloadDir: () => ipcRenderer.invoke('update:openDownloadDir') as Promise<{ ok: boolean; message?: string }>,
+    /** 已暂存待应用的更新（staged.json）；没有则 null。挂载时查一次即可，有就亮「应用更新」按钮 */
+    stagedStatus: () => ipcRenderer.invoke('update:stagedStatus') as Promise<StagedUpdate | null>,
+    /** 一键应用已暂存的更新（只由用户点按钮触发；只换便携版明文 resources/app）。
+     *  ok=true 时主进程延迟片刻自行 relaunch；pending=true 表示这次没换成、下次启动自动补做 */
+    apply: () =>
+      ipcRenderer.invoke('update:apply') as Promise<{ ok: boolean; relaunch?: boolean; pending?: boolean; message?: string }>,
     /** 订阅更新下载事件（progress / done / error）；返回退订函数 */
     onUpdateEvent: (cb: (ev: UpdateDownloadEvent) => void) => {
       const handler = (_e: unknown, data: UpdateDownloadEvent) => cb(data)
@@ -76,6 +89,25 @@ const api = {
   autostart: {
     get: () => ipcRenderer.invoke('autostart:get') as Promise<boolean>,
     set: (on: boolean) => ipcRenderer.invoke('autostart:set', on) as Promise<boolean>
+  },
+  /** 定时任务：rejected = 这次保存里没被接受的条目（形状闸门在 main/scheduler.partitionSchedules，照 mcp:set 口径点名拒收） */
+  schedule: {
+    list: () => ipcRenderer.invoke('schedule:list') as Promise<TaskSchedule[]>,
+    set: (list: TaskSchedule[]) =>
+      ipcRenderer.invoke('schedule:set', list) as Promise<{ ok: boolean; list: TaskSchedule[]; rejected: RejectedEntry[] }>,
+    remove: (id: string) => ipcRenderer.invoke('schedule:remove', id) as Promise<{ ok: boolean; message?: string }>,
+    /** 定时任务到点事件（main 30 秒 tick 判定后推送）；返回退订函数 */
+    onFire: (cb: (s: TaskSchedule) => void) => {
+      const handler = (_e: unknown, data: TaskSchedule) => cb(data)
+      ipcRenderer.on('scheduler:fire', handler)
+      return () => { ipcRenderer.removeListener('scheduler:fire', handler) }
+    }
+  },
+  /** 工作流剧本（目标模板 + 预设 + 计划档的一键载入方案）；rejected 口径同 schedule.set */
+  templates: {
+    get: () => ipcRenderer.invoke('templates:get') as Promise<WorkflowTemplate[]>,
+    set: (list: WorkflowTemplate[]) =>
+      ipcRenderer.invoke('templates:set', list) as Promise<{ ok: boolean; list: WorkflowTemplate[]; rejected: RejectedEntry[] }>
   },
   config: {
     get: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),
@@ -110,11 +142,20 @@ const api = {
     list: () => ipcRenderer.invoke('run:list') as Promise<WorkflowRun[]>,
     remove: (id: string) => ipcRenderer.invoke('run:remove', id)
   },
-  /** 损坏备份（*.corrupt-<ts>）的发现与恢复；恢复会覆盖现有原文件，恢复后需重启应用 */
+  /** 损坏备份（*.corrupt-<ts>）的发现与恢复；恢复会覆盖现有原文件，恢复后需重启应用。
+   *  整包迁移（换机）：导出/导入对话框在主进程侧，渲染层只发意图。
+   *  整包刻意不含 credentials.enc——safeStorage 加密绑定原机器用户，导入后 API Key 需重填 */
   data: {
     corruptList: () => ipcRenderer.invoke('data:corruptList') as Promise<CorruptBackupItem[]>,
     corruptRestore: (corruptPath: string) =>
-      ipcRenderer.invoke('data:corruptRestore', corruptPath) as Promise<{ ok: boolean; message: string }>
+      ipcRenderer.invoke('data:corruptRestore', corruptPath) as Promise<{ ok: boolean; message: string }>,
+    exportBundle: () => ipcRenderer.invoke('data:exportBundle') as Promise<{ ok: boolean; message: string }>,
+    importBundle: () =>
+      ipcRenderer.invoke('data:importBundle') as Promise<{
+        ok: boolean
+        message: string
+        counts?: { sessions: number; runs: number; memory: number; skills: number }
+      }>
   },
   memory: {
     get: () => ipcRenderer.invoke('memory:get') as Promise<MemoryEntry[]>,

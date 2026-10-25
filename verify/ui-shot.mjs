@@ -511,6 +511,11 @@ const main = async () => {
       return { inside: r.top >= 0 && r.bottom <= window.innerHeight + 1, h: Math.round(r.height) }
     })()`)
     ok('卡片变高后菜单仍完整落在视口内（翻转判定按实际高度，不再按 82px 猜）', !!fits && fits.inside, JSON.stringify(fits))
+    // 真机留档：管理卡分区化改造（每元素自己会说话）后的展开态从未在套件里留过截图。
+    // 就地取材——上面两行刚把第一项的 ⋯ 卡片驱动到展开且完整可见的状态，直接补拍一张；
+    // 只加"文件存在"弱断言（布局对错由上面几条真断言管，这张图供人眼回归比对用）。
+    await shot('agent-manage-card')
+    ok('Agent 管理卡展开态截图已落盘（agent-manage-card.png）', existsSync(join(OUT, 'agent-manage-card.png')))
     await js(cdp, `(() => { document.body.click(); return true })()`)
     await sleep(400)
 
@@ -615,7 +620,13 @@ const main = async () => {
     await js(cdp, `(() => { document.querySelector('.mode-pill-wrap [data-mode="workbench"]')?.click(); return true })()`)
     const entryPlayed = await js(cdp, `!!document.querySelector('[data-entry="1"]')`)
     ok('切进工作站时播进入动画（大字层带 data-entry 在场）', entryPlayed === true, String(entryPlayed))
-    await sleep(1000) // 等 cause 被清掉（ENTRY_TOTAL_MS 780ms + 余量），否则下一条测的是残留
+    // 等第一遍大字退场后再测重挂载：清位与退场都靠渲染层定时器，窗口被遮挡/后台时 Chromium
+    // 会把 DOM 定时器钳到秒级对齐（2026-10-25 实测同一构建退场在 875~1300ms+ 间漂），固定
+    // sleep(1000) 会把"上一遍还没收场"误读成"重挂载又播了"——当日那次 132/1 红的就是这。
+    // 改成事件式等待（元素退场即条件就绪，8s 兜底）：判定式一字未动，变的只是测量时机——
+    // 这条断言自己声明的前置（"cause 已清空"）本来就该在量之前成立。
+    const entryGone = await waitJs(cdp, `!document.querySelector('[data-entry="1"]')`, 8000)
+    if (!entryGone) console.log('  警告  第一遍进站大字 8s 内未退场（窗口遮挡节流？），重挂载断言将按现场如实判定')
     const entryAfterRemount = await js(cdp, `(() => {
       window.__ahub_debug.workbench(); window.__ahub_debug.workbench()
       return !!document.querySelector('[data-entry="1"]')
@@ -1265,7 +1276,7 @@ const main = async () => {
     const after = await js(cdp, 'window.__ahub_debug.state()')
     // 诊断：若此处为 0，等 2.5s 再读一次——恢复说明是渲染进程重载后的水合瞬态，不恢复才是真丢状态
     const after2 = after.agents.length === before.agents.length ? after : await (async () => { await sleep(2500); return js(cdp, 'window.__ahub_debug.state()') })()
-    console.log(`  [diag] 清理后 Agent 数：即时=${after.agents.length}，2.5s 后=${after2.agents.length}，基线=${before.agents.length}`)
+    console.log(`  [diag] 清理后 Agent 数：即时=${after.agents.length}，2.5s 后=${after2.agents.length}，基线=${before.agents.length} · 名单=${after2.agents.map((a) => a.name).join('、')}`)
     ok('清理后 Agent 数回到基线', after2.agents.length === before.agents.length, `${after.agents.length} / ${after2.agents.length} vs ${before.agents.length}`)
     // 单独钉"没有残留"而不是并进上面那条计数比对：计数比对把"删多了"和"删少了"混成一个数字，
     // 残留恰好是会把下一轮基线污染掉的那一侧，值得一条点名的断言。

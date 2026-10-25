@@ -511,6 +511,13 @@ export interface AppConfig {
   }
   /** 工作流预设（角色 + 模型方案，一键套用） */
   presets?: WorkflowPreset[]
+  /**
+   * 定时任务（主进程调度，见 TaskSchedule）。可选字段零迁移：老配置没有它就是"没配过"，
+   * 读取侧 `?? []` 兜底即可——schemaVersion 不动，不需要 v3→v4 的迁移规则。
+   */
+  taskSchedules?: TaskSchedule[]
+  /** 工作流剧本（一键载入目标模板，见 WorkflowTemplate）；可选字段零迁移，同上 */
+  workflowTemplates?: WorkflowTemplate[]
   /** Skill 提示包（Markdown 可复用；聊天引用注入，设置页管理） */
   skills?: Skill[]
   /** 工具前后 Hook（用户在设置里配置；开启即等于让 AgentHub 替你执行这些命令） */
@@ -524,6 +531,47 @@ export interface AppConfig {
    * 带填写日期，界面据此说明金额是按哪份数据折算的。
    */
   priceOverrides?: PriceOverride[]
+}
+
+/**
+ * 定时任务：到点由主进程调度器（main/scheduler.ts）自动开一条工作流任务。
+ * 边界（UI 文案与注释同一口径）：只在应用运行时（含托盘后台）触发；应用没开着就跳过，不补跑。
+ * 当天内晚开（如 09:00 的任务 10:00 才打开应用）仍会触发一次——due 判定是"当天已过点且今天没跑过"，
+ * 隔天才算错过。
+ */
+export interface TaskSchedule {
+  id: string
+  name: string
+  goal: string
+  kind: 'daily' | 'weekly' | 'interval'
+  /** 'HH:mm'（daily/weekly 用，本地时区；interval 忽略此字段） */
+  time?: string
+  /** 0=周日…6=周六（weekly 用；与 Date.getDay() 同一口径） */
+  weekday?: number
+  /** interval 用，分钟，≥5（下限挡"每 1 分钟烧一次钱"的误配） */
+  intervalMinutes?: number
+  enabled: boolean
+  /** 触发时按单次档先出计划（起链后照常挂计划批准门，批准前不执行） */
+  planFirst?: boolean
+  createdAt: number
+  /** 上次触发时间（调度器写回）；due 判定与"不补跑"都以它为界 */
+  lastRunAt?: number
+}
+
+/**
+ * 工作流剧本：把"目标模板 + 预设 + 计划档"打包成一条可一键载入的方案。
+ * 应用时只填草稿、套预设、置单次档，绝不自动开始——要花钱的按钮必须人来按。
+ */
+export interface WorkflowTemplate {
+  id: string
+  name: string
+  /** 目标模板原文；支持占位符 {{日期}} / {{时间}}（应用时替换，见 WorkflowHome 的纯函数） */
+  goalTemplate: string
+  /** 应用时套用的工作流预设 id（Grep 现有 applyPreset 逻辑复用；缺省不动预设） */
+  presetId?: string
+  /** 应用时置"本任务先出计划"单次档 */
+  planFirst?: boolean
+  createdAt: number
 }
 
 /** 自定义单价覆盖条目（元 / 1M tokens） */

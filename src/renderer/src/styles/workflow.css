@@ -527,6 +527,19 @@
 .skillplan-entry { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 2px 0; }
 .skillplan-entry .skillplan-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .skillplan-entry .skillplan-meta { color: var(--text-3); font-size: 11px; display: inline-flex; align-items: center; gap: 3px; }
+
+/* ---- 任务顶栏"审核方式"小 chip（2026-10-25 UI 审查） ---- */
+/* 审核方式是"由谁审核"的元信息而非事件状态：弱化一档（灰字、细边框、无底色），
+   与同一行加底色的状态 badge（warn/info）区分，避免执行中被读成"正在等待确认" */
+.wf-topbar .stage-info .stage-review-chip {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  line-height: 1.6;
+}
 /* 展开体占满整行：折叠条是 flex 横排，明细换行铺开 */
 
 /* SkillCenter「工作流绑定」矩阵：行 = 技能，列 = 三角色 */
@@ -559,4 +572,58 @@
   font-weight: 400;
   color: var(--text-2);
 }
+
+/* ============ 工作流剧本（WorkflowHome 的剧本区，纯追加段） ============ */
+/* 行结构沿用 .wf-history-row（列表骨架不动），只补剧本行自己的名字/动作排布 */
+.wf-tpl-row { display: flex; align-items: center; gap: 10px; }
+.wf-tpl-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wf-tpl-info .wf-tpl-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text);
+}
+/* "先出计划"小标：计划档改变的是整个任务的执行方式，载入前必须看得见它会被带上 */
+.wf-tpl-flag {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 1.6;
+}
+.wf-tpl-info em {
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-tpl-acts { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.wf-tpl-btn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wf-tpl-btn:hover { color: var(--text); border-color: var(--text-3); }
+/* 主动作（用剧本开任务）按"会花钱"的语义强调一档：边框走品牌色，不做实底填充——
+   它点完并不开始任务，只是填草稿，不该长得比「开始任务」还重 */
+.wf-tpl-btn.primary { color: var(--text); border-color: var(--brand-yellow, #d6a419); }
 .wf-skill-matrix-note { font-size: 11.5px; color: var(--text-3); line-height: 1.6; padding: 8px 2px 2px; }

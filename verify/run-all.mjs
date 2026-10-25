@@ -62,7 +62,7 @@ const SUITES = [
   // 82 → 83 多的是"显式定视口 960×640 下介绍卡完整落在视口内"那一条（Ruling T1-e 的落点）；
   // 变异自证跑过：把 .mi-note 文案改回上一轮长版本 → 该条红（bottom=661 / vh=640，裁 21px）、82 PASS / 1 FAIL，
   // 还原后 83 PASS / 0 FAIL（bottom=636）。所以这个数字是量出来的，不是估的。
-  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 133, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出（量前先收掉 hover 浮层）、首页模式选择、批次 F 计划批准门与目录对照、计划态开关入口与单次开关、点存才落盘、按意见重出计划、空计划双层拒批准、剪贴板失败如实报错、双点批准不起第二条链、链在跑时拒第二提交、计划轮不跑用户 Hook（批准后恢复，同 run 内互为对照）' },
+  { name: 'ui', tier: 'gui', script: 'ui-shot.mjs', min: 134, what: '界面真机：对话栏模型与费用、思考折叠、产物落盘(by=tool/app)、任务列表、预设、窄窗口无溢出（量前先收掉 hover 浮层）、首页模式选择、批次 F 计划批准门与目录对照、计划态开关入口与单次开关、点存才落盘、按意见重出计划、空计划双层拒批准、剪贴板失败如实报错、双点批准不起第二条链、链在跑时拒第二提交、计划轮不跑用户 Hook（批准后恢复，同 run 内互为对照）+ Agent 管理卡展开截图（134 = 133 + 2026-10-25 新增的 agent-manage-card.png）' },
   { name: 'approval', tier: 'gui', script: 'approval-shot.mjs', min: 94, what: '命令审批真机：没批准不执行、拒绝/本次/始终、危险形态仍要问、历史进设置' },
   { name: 'cli-e2e', tier: 'gui', script: 'cli-e2e.mjs', min: 10, what: 'CLI 适配器经真实 IPC 的行为' },
   { name: 'cli-shot', tier: 'gui', script: 'cli-shot.mjs', min: 4, what: '本机 CLI 面板截图（5 个条目与实测状态）', gate: false },

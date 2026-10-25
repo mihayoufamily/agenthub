@@ -2560,9 +2560,13 @@ console.log('\n[动画] 进入工作站的大字层由状态位驱动（重挂�
   ok('Ctrl+M 那条路标成 hotkey（白名单三值是真的，不是装饰）',
     /requestModeSwitch\([^\n]*'hotkey'\)/.test(readSrcSafe('src/renderer/src/App.tsx').text))
   const wb = readSrcSafe('src/renderer/src/features/Workbench.tsx').text
-  ok('大字层不再无条件渲染（改由 shouldPlayEntry 判定，且播完清 cause）',
-    wb.includes('shouldPlayEntry(entryCause)') && wb.includes('{playing && <div className="wb-mode-title"') &&
+  // 2026-10-25 升级：判定从"渲染期 shouldPlayEntry"改为"挂载那一刻 useState 快照定格 + 立即消费
+  // cause（setEntryCause(null)）"——真机实测发现 DOM 定时器收场会被窗口遮挡钳到秒级，位不清的
+  // 窗口期里重挂载会重播；快照+当场消费让这在状态层不可能发生。收场闸 entryVisible 挂本地定时器。
+  ok('大字层不再无条件渲染（挂载即 shouldPlayEntry 快照定格 + 当场清 cause，收场由 entryVisible 闸）',
+    wb.includes('useState(() => shouldPlayEntry(entryCause))') &&
       wb.includes('setEntryCause(null)') &&
+      wb.includes('{entryVisible && <div className="wb-mode-title"') &&
       !/^\s*<div className="wb-mode-title">工作站模式<\/div>$/m.test(wb), wb.slice(0, 60))
   ok('shift+滚轮切 Agent 的纯文本 HUD 死代码已删（只有 ModeSwitch 读 switchHud，且只认 __switch_ 前缀）',
     !wb.includes('已切换：'))

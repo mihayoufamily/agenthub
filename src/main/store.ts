@@ -1,8 +1,10 @@
 import { app, safeStorage } from 'electron'
 import { migrateV0toV1, migrateV1toV2, migrateV2toV3, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
-import { join, dirname, basename } from 'node:path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync, renameSync, copyFileSync, readdirSync } from 'node:fs'
+import { join, dirname, basename, relative } from 'node:path'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync, renameSync, copyFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
+import { createZip, extractZip } from './zip'
 
 /** 迁移链要处理的原始配置形状：可能有未知键，也可能缺字段，一切以"保留"为先 */
 type RawCfg = Partial<AppConfig> & Record<string, unknown>
@@ -190,6 +192,20 @@ export class Store {
     this.writeJson(this.dirs.config, cfg)
   }
 
+  /** 定时任务整表（lastRunAt 记账也走这里，scheduler.ts 每次触发后写回） */
+  setTaskSchedules(list: AppConfig['taskSchedules']) {
+    const cfg = this.getConfig()
+    cfg.taskSchedules = list
+    this.writeJson(this.dirs.config, cfg)
+  }
+
+  /** 工作流剧本整表（与 setPresets 同一条"读整份 config、改一个键、写回"路径） */
+  setTemplates(list: AppConfig['workflowTemplates']) {
+    const cfg = this.getConfig()
+    cfg.workflowTemplates = list
+    this.writeJson(this.dirs.config, cfg)
+  }
+
   /** 自定义单价覆盖：随 config 一起导出/导入，换机器不用重抄一遍价格 */
   setPriceOverrides(list: AppConfig['priceOverrides']) {
     const cfg = this.getConfig()
@@ -355,6 +371,189 @@ export class Store {
 
   removeSkill(id: string) {
     this.writeJson(this.dirs.skills, this.getSkills().filter((s) => s.id !== id))
+  }
+
+  // ---------- 整包迁移（换机导出/导入；与"配置导入/导出"的区别是连会话/任务/记忆一起带走） ----------
+  /** 整包大小上限：会话与任务记录可能很大，超限如实拒绝而不是产出一份没人打得开的包 */
+  private static readonly BUNDLE_MAX_BYTES = 200 * 1024 * 1024
+  /** 记忆条数上限：与渲染层 settings.ts 的 MAX_MEMORY 同一条规则，合并后照旧截最近 300 条 */
+  private static readonly MEMORY_MAX = 300
+
+  /**
+   * 打包整包到 savePath（对话框在 ipc 侧已选好）。包里含：config.json、memory.json、skills.json、
+   * approvals.json、sessions/ 全部、runs/ 全部。
+   * **刻意排除 credentials.enc**：safeStorage 加密绑定原机器的 Windows 用户，换机解不开，
+   * 打进包只会给收包人一个永远解不开的文件——API Key 不随包迁移，导入后需重填
+   * （与"配置导出不含 Key"同一口径）。logs/ 是本机排障信息，不进包。
+   * 条目名用相对路径（'config.json'、'sessions/<file>'），createZip/extractZip 的约定见 main/zip.ts。
+   */
+  exportBundle(savePath: string): { ok: boolean; message: string } {
+    if (typeof savePath !== 'string' || !savePath.trim()) return { ok: false, message: '保存路径为空' }
+    type BundleEntry = { name: string; data: Buffer }
+    const entries: BundleEntry[] = []
+    // 根目录四份 JSON：不存在就跳过（新装机器可能还没有 memory/skills），不为凑齐造假文件
+    for (const f of ['config.json', 'memory.json', 'skills.json', 'approvals.json']) {
+      const p = join(this.rootDir, f)
+      if (existsSync(p)) entries.push({ name: f, data: readFileSync(p) })
+    }
+    const collectDir = (dir: string, prefix: string) => {
+      try {
+        for (const f of readdirSync(dir) as string[]) {
+          if (!f.endsWith('.json')) continue
+          const p = join(dir, f)
+          if (!statSync(p).isFile()) continue
+          entries.push({ name: `${prefix}/${f}`, data: readFileSync(p) })
+        }
+      } catch { /* 目录读不到（不存在/被占用）就少打这部分：导出尽力而为，回执里不含它 */ }
+    }
+    collectDir(this.dirs.sessions, 'sessions')
+    collectDir(this.dirs.runs, 'runs')
+    const total = entries.reduce((n, e) => n + e.data.length, 0)
+    if (total > Store.BUNDLE_MAX_BYTES) {
+      return { ok: false, message: `整包大小 ${(total / 1024 / 1024).toFixed(0)}MB，超过 200MB 上限，已停止导出（请清理旧任务记录后再试）` }
+    }
+    if (!entries.some((e) => e.name === 'config.json')) {
+      return { ok: false, message: '导出失败：config.json 不存在，本包不会是可导入的整包' }
+    }
+    try {
+      writeFileSync(savePath, createZip(entries))
+      return {
+        ok: true,
+        message: `已导出 ${entries.length} 个文件到 ${savePath}。API Key 不随包迁移（系统加密绑定原机器），导入后需重填`
+      }
+    } catch (e) {
+      return { ok: false, message: `导出失败：${(e as Error).message}` }
+    }
+  }
+
+  /**
+   * 导入整包（zipPath 来自 openDialog）。五类数据各有策略：
+   *  - config.json = 替换（复用 importConfig 的迁移链与 hasKey 重置；覆盖前先留档 config.pre-import-<时间戳>.json，
+   *    与"损坏保留"同款机制——替换式导入必须留退路）；
+   *  - sessions/、runs/ = 按文件名合并（id 即文件名，同名覆盖、新号新增，天然去重；文件名过 safeFileId 闸门，
+   *    与本仓 saveSessions/saveRun 同一条"渲染层可控 ID 不拼进任意路径"的红线）；
+   *  - memory.json = 合并（按条目 id 去重取并集，超 300 条截最近的）；
+   *  - skills.json = 合并（按 skill id，同 id 用导入的覆盖——用户明确导入就是要它）；
+   *  - approvals.json = 替换（白名单/MCP 信任是机器无关的决策记录，整体替换最可预期；config 备份已覆盖回退需求）。
+   * 全部落盘的是**磁盘文件**，运行中已读进内存的 store 实例不会自动重读——重启应用才生效，回执里如实说明。
+   */
+  importBundle(zipPath: string): { ok: boolean; message: string; counts?: { sessions: number; runs: number; memory: number; skills: number } } {
+    if (typeof zipPath !== 'string' || !zipPath.trim()) return { ok: false, message: 'zip 路径为空' }
+    if (!existsSync(zipPath)) return { ok: false, message: `文件不存在：${zipPath}` }
+    // 解到独立临时目录（zip-slip 防护在 extractZip 内：词法拒 `..`/盘符/绝对路径 + 解析后前缀复核）
+    const tmp = mkdtempSync(join(tmpdir(), 'agenthub-import-'))
+    try {
+      const zipBuf = readFileSync(zipPath)
+      const { files, skipped } = extractZip(zipBuf, tmp)
+      // skipped 里可能有恶意条目（zip-slip / 加密 / CRC 不符）：有 config.json 就继续，否则如实拒绝。
+      // 不因个别脏条目拒收整包——但也不能假装什么都没发生，回执里点出数量。
+      const relOf = (abs: string) => relative(tmp, abs).replace(/\\/g, '/')
+      const byRel = new Map<string, string>()
+      for (const f of files) byRel.set(relOf(f), f)
+      const configPath = byRel.get('config.json')
+      if (!configPath) {
+        const note = skipped.length ? `（另有 ${skipped.length} 个条目被拒收）` : ''
+        return { ok: false, message: `不是 AgentHub 整包：包里没有 config.json${note}` }
+      }
+      // config.json 必须能解析成对象才认（整包身份校验的最小门槛；迁移与归一化交给 importConfig 的既有链）
+      let configText: string
+      try {
+        configText = readFileSync(configPath, 'utf-8')
+        const parsed = JSON.parse(configText)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('不是 JSON 对象')
+      } catch {
+        return { ok: false, message: '不是 AgentHub 整包：config.json 无法解析' }
+      }
+      const counts = { sessions: 0, runs: 0, memory: 0, skills: 0 }
+
+      // --- config：替换（先留档再导入） ---
+      try {
+        if (existsSync(this.dirs.config)) copyFileSync(this.dirs.config, `${this.dirs.config}.pre-import-${Date.now()}`)
+      } catch { /* 留档挪不动（被占用等）不挡导入本身：importConfig 的原子写仍在 */ }
+      const cfgRes = this.importConfig(configText)
+      if (!cfgRes.ok) return { ok: false, message: `导入失败（config）：${cfgRes.message}` }
+
+      // --- sessions/、runs/：按文件名合并 ---
+      const mergeDir = (prefix: string, dest: string): number => {
+        let n = 0
+        for (const [rel, abs] of byRel) {
+          // 只收单层 <id>.json：子目录结构不是本仓任何落盘路径产生的，来路不明的一律不收
+          if (!rel.startsWith(`${prefix}/`) || !rel.endsWith('.json')) continue
+          if (rel.slice(prefix.length + 1).includes('/')) continue
+          const id = basename(rel).slice(0, -'.json'.length)
+          if (!safeFileId(id)) continue
+          try {
+            copyFileSync(abs, join(dest, `${id}.json`))
+            n += 1
+          } catch { /* 单个文件复制失败不中断整包：回执里的数字是真实收下的数 */ }
+        }
+        return n
+      }
+      counts.sessions = mergeDir('sessions', this.dirs.sessions)
+      counts.runs = mergeDir('runs', this.dirs.runs)
+
+      // --- memory：按条目 id 合并（导入的覆盖同 id），超上限截最近 ---
+      const memPath = byRel.get('memory.json')
+      if (memPath) {
+        try {
+          const incoming = JSON.parse(readFileSync(memPath, 'utf-8')) as unknown
+          if (Array.isArray(incoming)) {
+            const valid = incoming.filter((m): m is MemoryEntry => !!m && typeof m === 'object' && typeof (m as MemoryEntry).id === 'string')
+            const map = new Map(this.getMemory().map((m) => [m.id, m]))
+            for (const m of valid) map.set(m.id, m)
+            const merged = [...map.values()]
+              .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+              .slice(-Store.MEMORY_MAX)
+            this.setMemory(merged)
+            counts.memory = valid.length
+          }
+        } catch { /* memory.json 坏了不影响其它类：少合这一类，回执数字如实反映 */ }
+      }
+
+      // --- skills：按 skill id 合并，同 id 用导入的覆盖 ---
+      const skillsPath = byRel.get('skills.json')
+      if (skillsPath) {
+        try {
+          const incoming = JSON.parse(readFileSync(skillsPath, 'utf-8')) as unknown
+          if (Array.isArray(incoming)) {
+            const valid = incoming.filter((s): s is Skill => !!s && typeof s === 'object' && typeof (s as Skill).id === 'string')
+            const map = new Map(this.getSkills().map((s) => [s.id, s]))
+            for (const s of valid) map.set(s.id, s)
+            this.writeJson(this.dirs.skills, [...map.values()])
+            counts.skills = valid.length
+          }
+        } catch { /* 同 memory：单类损坏不拖累整包 */ }
+      }
+
+      // --- approvals：整体替换（原子写同 approvals.ts 的 tmp+rename 口径） ---
+      const approvalsPath = byRel.get('approvals.json')
+      if (approvalsPath) {
+        try {
+          const text = readFileSync(approvalsPath, 'utf-8')
+          const parsed = JSON.parse(text)
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const dest = join(this.rootDir, 'approvals.json')
+            const tmpFile = `${dest}.tmp`
+            writeFileSync(tmpFile, JSON.stringify(parsed, null, 2), 'utf-8')
+            renameSync(tmpFile, dest)
+          }
+        } catch { /* 审批文件不合也不拖累整包：白名单保持现状（原文件没被碰过） */ }
+      }
+
+      const skippedNote = skipped.length ? `；${skipped.length} 个异常条目被拒收` : ''
+      return {
+        ok: true,
+        counts,
+        message:
+          `导入完成：会话 ${counts.sessions} 个、任务 ${counts.runs} 条、记忆 ${counts.memory} 条、技能 ${counts.skills} 个；` +
+          `审批白名单已替换${skippedNote}。API Key 不随包迁移，导入后需重填。需要重启应用生效。`
+      }
+    } catch (e) {
+      return { ok: false, message: `导入失败：${(e as Error).message}` }
+    } finally {
+      // 临时目录清不干净不算失败（Windows 上文件句柄未释放时 rm 会 EBUSY）：best-effort
+      try { rmSync(tmp, { recursive: true, force: true }) } catch { /* 留在 %TEMP% 下次自清 */ }
+    }
   }
 
   // ---------- 凭据（safeStorage 加密，绝不进日志/导出） ----------

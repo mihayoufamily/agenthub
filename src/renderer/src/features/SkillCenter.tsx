@@ -10,7 +10,7 @@ import { useUi } from '../stores/ui'
 import { useAgents } from '../stores/agents'
 import { useWorkflow } from '../stores/workflow'
 import { Modal } from '../components/Modal'
-import { Button, Badge } from '../components/primitives'
+import { Button, Badge, Switch } from '../components/primitives'
 import { cls, fmtSize, fmtTime } from '../lib/utils'
 
 /* 生效范围行里 mode 的短文案（面板空间小，用短版；完整解释在 shared 的 SKILL_MODE_HINTS） */
@@ -48,7 +48,8 @@ export function SkillUsagePanel({ skill }: { skill: Skill }) {
           ))}
         </div>
       ) : null}
-      <div className="skill-usage-note">{SKILL_TIMING_NOTE}</div>
+      {/* 时机一句话不再放在面板里：分区说明（设置页）/列表顶部（技能中心）各说一次就够，
+          此前面板每张卡带一句、3 张卡 = 4 次重复（2026-10-25 UI 审查） */}
     </div>
   )
 }
@@ -287,6 +288,9 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
 
         {tab === 'installed' && (
           <div>
+            {/* 分区级"何时生效"只在这一处（列表顶部，先读说明再看卡片）：不再靠每张卡下方的
+                SkillUsagePanel 各带一句——那会让 3 张卡 = 4 次同文案（2026-10-25 UI 审查） */}
+            {skills !== null && skills.length > 0 && <div className="skill-center-hint">{SKILL_TIMING_NOTE}</div>}
             {(skills === null) && <div className="skill-center-empty">加载中…</div>}
             {installedEmpty && <div className="skill-center-empty">还没有安装任何技能；去官方内置或技能市场看看</div>}
             {skills?.map((sk) => {
@@ -296,9 +300,6 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
               return (
                 <div key={sk.id}>
                   <div className="agent-manage-row" style={on ? undefined : { opacity: 0.55 }}>
-                    <label className="skill-switch" title={on ? '已启用：可被引用' : '已禁用：不出现在引用列表'}>
-                      <input type="checkbox" checked={on} onChange={() => void toggleEnabled(sk)} />
-                    </label>
                     <div className="info">
                       <div className="nm">
                         {sk.name}
@@ -315,6 +316,11 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
                     <Button variant="ghost" style={{ height: 26 }} onClick={() => void exportPack(sk)}>
                       导出 .zip
                     </Button>
+                    {/* 启用开关从左侧 checkbox 改为行尾（右上角）Switch：checkbox 的"选中"观感
+                        与 Agent 管理卡"勾选=绑定"的语义相反，Switch 是无歧义的开关（2026-10-25 UI 审查） */}
+                    <span title={on ? '已启用：可被引用' : '已禁用：不出现在引用列表'}>
+                      <Switch on={on} onChange={() => void toggleEnabled(sk)} label={`启用 Skill ${sk.name}`} />
+                    </span>
                   </div>
                   {/* 生效范围面板：绑定关系（Agent 卡 / 工作流角色）在面板内部订阅 store，
                       在别处改了绑定，切回技能中心即自动反映 */}

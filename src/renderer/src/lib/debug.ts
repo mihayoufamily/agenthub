@@ -1,7 +1,7 @@
 // 开发验证钩子：由截图驱动脚本（main 的 --shots 模式）经 executeJavaScript 调用
 // 仅暴露显式界面动作与状态读取，不含任何敏感操作
 import { useUi } from '../stores/ui'
-import { useWorkflow } from '../stores/workflow'
+import { useWorkflow, runBusy } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
 import { useSessions } from '../stores/sessions'
 import { useSettings } from '../stores/settings'
@@ -67,11 +67,45 @@ export function installDebugHooks() {
     // 设置页入口只有一个名字：openSettings(section?)。
     // （评审 Minor ㉘：这里原本还并存一个 `settings: () => openSettings()` 别名，语义完全相同，
     //   让"打开设置"在验证脚本里看起来有两种动作。修复波 B 已把 4 处调用统一到 openSettings 并删掉别名。）
-    // 启动一次演示任务（使用当前配置；默认为种子演示 Agent）
+    // 启动一次演示任务：**强制三角色绑定演示 Agent**（零真实调用、时序可控）。
+    // 2026-10-25 实测事故：这条入口原先只 setDraft + start()，三角色用的是配置里**当前绑定**——
+    // 开发机上绑着 CodeBuddy/Codex，--shots 截图序列于是真跑了真实 CLI 调用（花了真额度），
+    // 且真实执行阶段被 90 秒心跳拖着，走到 06 截图时确认门还没挂出来、07 与 06 几乎同画面。
+    // 演示链路（demo 适配器）内容脚本化、产物不落盘，天然满足"截图序列只要界面形态"的诉求；
+    // patchConfig 会落盘，所以进门前快照整份配置，序列收尾（main/index.ts 拿返回值）原样还原。
     startDemoTask: async (goal = '构建一个登录页面：包含邮箱密码校验、错误提示与设计规范') => {
+      const wf0 = useWorkflow.getState()
+      // 与 start() 同一道闸放在**一切副作用之前**：链在跑/已占位时这次提交本来就会被 start() 拒掉，
+      // 演示绑定（现补 Agent、改三角色绑定）一件都不能发生——ui-shot 7c 的"链在跑时提交第二个任务"
+      // 就拿这条入口当占用探针（2026-10-25 实测：探针调用把演示 Agent 和角色绑定都改了，清理后多出一台）。
+      // 这里查 wf0.run 的快照、下面到 start() 之间无 await，与 start() 自己的防重复提交同序。
+      if (runBusy(wf0.run) || wf0._started) return { rejected: true }
+      const store = useAgents.getState()
+      let demo = store.agents.find((a) => a.isDemo === true)
+      // 机器上一台演示 Agent 都没有时现补一台（正常开发机有开机种下的两台，不会走到这）；
+      // added 标记交还给序列：收尾时只有本次现补的才删，用户自己的演示 Agent 绝不能动
+      const added = !demo
+      if (!demo) {
+        store.addDemoAgent()
+        demo = useAgents.getState().agents.find((a) => a.isDemo === true)
+      }
+      if (!demo) throw new Error('演示 Agent 创建失败，无法启动演示任务')
+      const prevConfig = { ...useWorkflow.getState().config }
+      const mk = () => ({ agentId: demo!.id, agentName: demo!.name, model: demo!.model })
+      // reviewMode=human + confirmEveryRound=true：第 1 轮审核后必停人工确认门，06 才有得拍；
+      // planFirst 显式关掉：序列的 05/06 预期是"规划→执行→审核卡"，计划批准门会把任务停在执行前
+      useWorkflow.getState().patchConfig({
+        planner: mk(),
+        executor: mk(),
+        reviewer: mk(),
+        reviewMode: 'human',
+        confirmEveryRound: true,
+        planFirst: false
+      })
       const wf = useWorkflow.getState()
       wf.setDraft(goal)
       await wf.start()
+      return { agentId: demo.id, agentName: demo.name, added, prevConfig }
     },
     // 真实 CLI 闭环验证：添加指定 CLI Agent 并绑定三角色，启动一个真实工作流任务
     // reviewMode=human + confirmEveryRound=true：第 1 轮审核后必停人工确认门，便于验证脚本驱动 passGate；

@@ -4,7 +4,7 @@ import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useWorkflow, runBusy } from '../stores/workflow'
-import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe, RejectedEntry } from '@shared/types'
+import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe, RejectedEntry, TaskSchedule, WorkflowTemplate } from '@shared/types'
 import { validateHook, HOOK_COMMAND_MAX_LENGTH, HOOK_RULES_MAX } from '@shared/hooks'
 import { MCP_SHAPE_REJECT_MESSAGE, MCP_HTTP_URL_REJECT_MESSAGE, MCP_SERVERS_MAX, validHttpUrl } from '@shared/mcp-list'
 import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
@@ -349,17 +349,18 @@ function SkillsSection() {
         return (
           <div key={sk.id}>
             <div className="agent-manage-row" style={on ? undefined : { opacity: 0.55 }}>
-              <label className="skill-switch" title={on ? '已启用：可被引用，未引用时也会以一行清单告知模型' : '已禁用：不出现在引用列表，也不会被注入'}>
-                <input type="checkbox" checked={on} onChange={() => void toggleEnabled(sk)} />
-              </label>
-              <div className="info">
+              <div
+                className="info"
+                /* 本机安装根路径只进 hover tooltip：可见文本里印 D:\… 绝对路径既泄漏本地目录
+                   结构又挤占元信息行（2026-10-25 UI 审查）；附带文件数跟路径一起挪进 tooltip */
+                title={sk.dir ? `安装位置：${sk.dir}${sk.files?.length ? `（附带 ${sk.files.length} 个文件）` : ''}` : undefined}
+              >
                 <div className="nm">
                   {sk.name}
                   {sk.format === 'agentskills' && <span className="skill-tag" title="来自 SKILL.md 的标准技能包">标准</span>}
                 </div>
                 <div className="md">
                   {sk.desc || '（无简介）'} · {sk.content.length} 字 · {fmtTime(sk.updatedAt ?? sk.createdAt)}
-                  {sk.dir ? ` · ${sk.dir}${sk.files?.length ? `（附带 ${sk.files.length} 个文件）` : ''}` : ''}
                 </div>
               </div>
               <Button variant="ghost" style={{ height: 26 }} onClick={() => openEdit(sk)}>编辑</Button>
@@ -368,6 +369,11 @@ function SkillsSection() {
                 useUi.getState().toast(`已删除 Skill：${sk.name}`, 'ok')
                 reload()
               }}>删除</Button>
+              {/* 启用开关从左侧 checkbox 改为行尾（右上角）Switch：checkbox 的"选中"观感
+                  与 Agent 管理卡"勾选=绑定"的语义相反，Switch 是无歧义的开关（2026-10-25 UI 审查） */}
+              <span title={on ? '已启用：可被引用，未引用时也会以一行清单告知模型' : '已禁用：不出现在引用列表，也不会被注入'}>
+                <Switch on={on} onChange={() => void toggleEnabled(sk)} label={`启用 Skill ${sk.name}`} />
+              </span>
             </div>
             {/* 与技能中心同一份生效范围面板（组件内自订阅 store，绑定一改即刷新） */}
             <SkillUsagePanel skill={sk} />
@@ -977,39 +983,335 @@ function WorkflowSection() {
     void bridge.artifacts.dir().then(setEffDir)
   }, [config.outputDir])
   return (
+    <>
+      <div className="set-group">
+        <Row label="默认审核方式" desc="新任务沿用的审核方式">
+          <div className="seg">
+            <button className={config.reviewMode === 'auto' ? 'active' : ''} onClick={() => patch({ reviewMode: 'auto' })}>自动审核</button>
+            <button className={config.reviewMode === 'human' ? 'active' : ''} onClick={() => patch({ reviewMode: 'human' })}>人工确认</button>
+          </div>
+        </Row>
+        <Row label="每轮审核后人工确认" desc="关闭时仅在最终交付前确认">
+          <Switch label="每轮确认" on={config.confirmEveryRound} onChange={(v) => patch({ confirmEveryRound: v })} />
+        </Row>
+        <Row label="最大返工轮数" desc="达到上限保留成果并等待你的决定">
+          <input type="number" min={1} max={10} value={config.maxRounds} style={{ width: 70, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)' }}
+            onChange={(e) => patch({ maxRounds: Math.max(1, Math.min(10, Number(e.target.value) || 1)) })} />
+        </Row>
+        <Row label="任务超时（分钟）" desc="超时停止任务，记录保留">
+          <input type="number" min={1} max={720} value={config.timeoutMin} style={{ width: 70, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)' }}
+            onChange={(e) => patch({ timeoutMin: Math.max(1, Math.min(720, Number(e.target.value) || 30)) })} />
+        </Row>
+        <Row label="产物目录" desc="执行 Agent 已授权文件工具时，本次任务的工作根目录临时改为该目录（只换目录，不提升访问级别）；未授权时由 AgentHub 把成果写成文本产物">
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 340 }}>
+            <input
+              value={config.outputDir ?? ''}
+              placeholder={effDir || '文档目录/AgentHub-artifacts'}
+              title={effDir || ''}
+              onChange={(e) => patch({ outputDir: e.target.value })}
+              style={{ flex: 1, minWidth: 0, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 8px' }}
+            />
+            <Button variant="ghost" style={{ height: 30 }} onClick={async () => {
+              const dir = await bridge.tools.pickDir()
+              if (dir) patch({ outputDir: dir })
+            }}>选择</Button>
+          </div>
+        </Row>
+      </div>
+      <ScheduleManager />
+      <TemplateManager />
+    </>
+  )
+}
+
+/* ---- 工作流 · 定时任务 ---- */
+const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
+/** 频率的人话（列表展示用）：每天 09:00 / 每周一 09:00 / 每 30 分钟 */
+function scheduleFreqText(s: TaskSchedule): string {
+  if (s.kind === 'interval') return `每 ${s.intervalMinutes ?? '?'} 分钟`
+  const t = s.time ?? '--:--'
+  return s.kind === 'weekly' ? `每周${WEEKDAY_CN[s.weekday ?? 0]} ${t}` : `每天 ${t}`
+}
+
+function ScheduleManager() {
+  const [list, setList] = useState<TaskSchedule[]>([])
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState('')
+  const [goal, setGoal] = useState('')
+  const [kind, setKind] = useState<'daily' | 'weekly' | 'interval'>('daily')
+  const [time, setTime] = useState('09:00')
+  const [weekday, setWeekday] = useState(1)
+  const [intervalMinutes, setIntervalMinutes] = useState(30)
+  const [planFirst, setPlanFirst] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    bridge.schedule.list().then((l) => {
+      if (alive) setList(Array.isArray(l) ? l : [])
+    }).catch(() => { /* 拉不到按空表渲染，保存时会再暴露真实问题 */ })
+    return () => { alive = false }
+  }, [])
+
+  /** 整表提交：形状闸门在主进程（scheduler.partitionSchedules），这里按 returned list 收敛本地状态 */
+  const save = async (next: TaskSchedule[]): Promise<TaskSchedule[] | null> => {
+    const r = await bridge.schedule.set(next).catch(() => null)
+    if (!r) {
+      useUi.getState().toast('保存失败：主进程无响应', 'error')
+      return null
+    }
+    setList(r.list)
+    if (r.rejected.length) useUi.getState().toast(`${r.rejected.length} 条定时任务未通过校验：${r.rejected[0].id} ${r.rejected[0].message}`, 'warn')
+    return r.list
+  }
+
+  const submit = async () => {
+    // 客户端预检只为主进程同一口径的校验少跑一趟往返；最终判定在 scheduler.partitionSchedules
+    if (!name.trim()) { useUi.getState().toast('给定时任务起个名字', 'warn'); return }
+    if (!goal.trim()) { useUi.getState().toast('任务目标不能为空', 'warn'); return }
+    if (kind !== 'interval' && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(time.trim())) { useUi.getState().toast('时间格式应为 HH:mm（如 09:00）', 'warn'); return }
+    if (kind === 'interval' && !(Number.isFinite(intervalMinutes) && intervalMinutes >= 5)) { useUi.getState().toast('间隔分钟数需 ≥5', 'warn'); return }
+    const entry: TaskSchedule = {
+      id: uid('sched'),
+      name: name.trim().slice(0, 40),
+      goal: goal.trim(),
+      kind,
+      enabled: true,
+      ...(kind !== 'interval' ? { time: time.trim() } : {}),
+      ...(kind === 'weekly' ? { weekday } : {}),
+      ...(kind === 'interval' ? { intervalMinutes } : {}),
+      ...(planFirst ? { planFirst: true } : {}),
+      createdAt: Date.now()
+    }
+    const next = await save([...list, entry])
+    if (next?.some((s) => s.id === entry.id)) {
+      // 主进程确认收下才收表单：被拒的话表单留着，用户能直接改
+      setEditing(false)
+      setName('')
+      setGoal('')
+      setPlanFirst(false)
+    }
+  }
+
+  return (
     <div className="set-group">
-      <Row label="默认审核方式" desc="新任务沿用的审核方式">
-        <div className="seg">
-          <button className={config.reviewMode === 'auto' ? 'active' : ''} onClick={() => patch({ reviewMode: 'auto' })}>自动审核</button>
-          <button className={config.reviewMode === 'human' ? 'active' : ''} onClick={() => patch({ reviewMode: 'human' })}>人工确认</button>
+      <div className="group-title">定时任务</div>
+      {/* 边界如实写（与 main/scheduler.ts 注释同一口径）：不补跑 */}
+      <div className="desc" style={{ lineHeight: 1.8, marginBottom: 6 }}>
+        定时任务只在应用运行时（含托盘后台）触发；应用没开着就跳过，不补跑。
+      </div>
+      {list.length === 0 && !editing && <div className="desc" style={{ padding: '2px 0 8px' }}>还没有定时任务。</div>}
+      {list.map((s) => (
+        <div key={s.id} className="mem-row" title={s.goal}>
+          <span className="txt txt-ellipsis" style={{ minWidth: 0 }}>
+            <b>{s.name}</b>
+            <span style={{ color: 'var(--text-3)' }}> · {scheduleFreqText(s)} · {s.goal.length > 30 ? s.goal.slice(0, 30) + '…' : s.goal}</span>
+          </span>
+          <span className="acts">
+            <Switch label="启用" on={s.enabled} onChange={(v) => void save(list.map((x) => (x.id === s.id ? { ...x, enabled: v } : x)))} />
+            <Button variant="ghost" style={{ height: 24, padding: '0 8px' }} onClick={() => void save(list.filter((x) => x.id !== s.id))}>
+              删除
+            </Button>
+          </span>
         </div>
-      </Row>
-      <Row label="每轮审核后人工确认" desc="关闭时仅在最终交付前确认">
-        <Switch label="每轮确认" on={config.confirmEveryRound} onChange={(v) => patch({ confirmEveryRound: v })} />
-      </Row>
-      <Row label="最大返工轮数" desc="达到上限保留成果并等待你的决定">
-        <input type="number" min={1} max={10} value={config.maxRounds} style={{ width: 70, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)' }}
-          onChange={(e) => patch({ maxRounds: Math.max(1, Math.min(10, Number(e.target.value) || 1)) })} />
-      </Row>
-      <Row label="任务超时（分钟）" desc="超时停止任务，记录保留">
-        <input type="number" min={1} max={720} value={config.timeoutMin} style={{ width: 70, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)' }}
-          onChange={(e) => patch({ timeoutMin: Math.max(1, Math.min(720, Number(e.target.value) || 30)) })} />
-      </Row>
-      <Row label="产物目录" desc="执行 Agent 已授权文件工具时，本次任务的工作根目录临时改为该目录（只换目录，不提升访问级别）；未授权时由 AgentHub 把成果写成文本产物">
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 340 }}>
-          <input
-            value={config.outputDir ?? ''}
-            placeholder={effDir || '文档目录/AgentHub-artifacts'}
-            title={effDir || ''}
-            onChange={(e) => patch({ outputDir: e.target.value })}
-            style={{ flex: 1, minWidth: 0, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 8px' }}
-          />
-          <Button variant="ghost" style={{ height: 30 }} onClick={async () => {
-            const dir = await bridge.tools.pickDir()
-            if (dir) patch({ outputDir: dir })
-          }}>选择</Button>
+      ))}
+      {!editing && (
+        <div style={{ paddingTop: 4 }}>
+          <Button variant="secondary" style={{ height: 28 }} onClick={() => setEditing(true)}>新建</Button>
         </div>
-      </Row>
+      )}
+      {editing && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 0', borderTop: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input value={name} placeholder="名称（最多 40 字）" onChange={(e) => setName(e.target.value)}
+              style={{ width: 180, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 8px' }} />
+            <div className="seg">
+              <button className={kind === 'daily' ? 'active' : ''} onClick={() => setKind('daily')}>每天</button>
+              <button className={kind === 'weekly' ? 'active' : ''} onClick={() => setKind('weekly')}>每周</button>
+              <button className={kind === 'interval' ? 'active' : ''} onClick={() => setKind('interval')}>按间隔</button>
+            </div>
+            {kind !== 'interval' && (
+              <input type="time" value={time} onChange={(e) => setTime(e.target.value)}
+                style={{ height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 6px' }} />
+            )}
+            {kind === 'weekly' && (
+              <select value={weekday} onChange={(e) => setWeekday(Number(e.target.value))}
+                style={{ height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 6px' }}>
+                {WEEKDAY_CN.map((w, i) => (
+                  <option key={i} value={i}>周{w}</option>
+                ))}
+              </select>
+            )}
+            {kind === 'interval' && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12.5, color: 'var(--text-2)' }}>
+                每 <input type="number" min={5} max={1440} value={intervalMinutes} onChange={(e) => setIntervalMinutes(Number(e.target.value))}
+                  style={{ width: 64, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 6px' }} /> 分钟
+              </span>
+            )}
+          </div>
+          <textarea value={goal} placeholder="任务目标（到点自动按它开始工作流任务）" rows={3}
+            onChange={(e) => setGoal(e.target.value)}
+            style={{ width: '100%', boxSizing: 'border-box', borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '6px 8px', fontSize: 12.5, resize: 'vertical' }} />
+          <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+            <Switch label="触发时先出计划" on={planFirst} onChange={setPlanFirst} />
+            <span style={{ fontSize: 11.5, color: 'var(--text-3)' }}>开启后到点先跑一轮只读规划、停在批准门等你批准</span>
+            <span style={{ flex: 1 }} />
+            <Button variant="ghost" style={{ height: 28 }} onClick={() => setEditing(false)}>取消</Button>
+            <Button variant="primary" style={{ height: 28 }} onClick={() => void submit()}>保存</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ---- 工作流 · 剧本 ---- */
+function TemplateManager() {
+  const presets = useWorkflow((s) => s.presets)
+  const draft = useWorkflow((s) => s.draft)
+  const config = useWorkflow((s) => s.config)
+  const planNextTask = useWorkflow((s) => s.planNextTask)
+  const [list, setList] = useState<WorkflowTemplate[]>([])
+  const [editing, setEditing] = useState(false)
+  // 「从当前配置保存」的第二步：先亮名字输入框（Electron 渲染层没有 window.prompt，内联输入替代）
+  const [savingFromConfig, setSavingFromConfig] = useState(false)
+  const [fromConfigName, setFromConfigName] = useState('')
+  const [name, setName] = useState('')
+  const [goalTemplate, setGoalTemplate] = useState('')
+  const [presetId, setPresetId] = useState('')
+  const [planFirst, setPlanFirst] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    bridge.templates.get().then((l) => {
+      if (alive) setList(Array.isArray(l) ? l : [])
+    }).catch(() => { /* 同 ScheduleManager：按空表渲染 */ })
+    return () => { alive = false }
+  }, [])
+
+  const save = async (next: WorkflowTemplate[]): Promise<WorkflowTemplate[] | null> => {
+    const r = await bridge.templates.set(next).catch(() => null)
+    if (!r) {
+      useUi.getState().toast('保存失败：主进程无响应', 'error')
+      return null
+    }
+    setList(r.list)
+    if (r.rejected.length) useUi.getState().toast(`${r.rejected.length} 条剧本未通过校验：${r.rejected[0].id} ${r.rejected[0].message}`, 'warn')
+    return r.list
+  }
+
+  const submit = async () => {
+    if (!name.trim()) { useUi.getState().toast('给剧本起个名字', 'warn'); return }
+    if (!goalTemplate.trim()) { useUi.getState().toast('目标模板不能为空', 'warn'); return }
+    const entry: WorkflowTemplate = {
+      id: uid('tpl'),
+      name: name.trim().slice(0, 40),
+      goalTemplate: goalTemplate.trim(),
+      ...(presetId ? { presetId } : {}),
+      ...(planFirst ? { planFirst: true } : {}),
+      createdAt: Date.now()
+    }
+    const next = await save([...list, entry])
+    if (next?.some((t) => t.id === entry.id)) {
+      setEditing(false)
+      setName('')
+      setGoalTemplate('')
+      setPresetId('')
+      setPlanFirst(false)
+    }
+  }
+
+  /** 从当前配置保存：当前草稿 + 与三角色完全匹配的预设 + 计划态单次档现状，打包成新剧本 */
+  const saveFromConfig = async () => {
+    const nm = fromConfigName.trim().slice(0, 40)
+    if (!nm) { useUi.getState().toast('给剧本起个名字', 'warn'); return }
+    if (!draft.trim()) { useUi.getState().toast('当前草稿是空的，没有可保存的目标模板', 'warn'); return }
+    // 当前预设没有单独的"已选 id"记录，按"三角色的 Agent 与模型覆盖逐一相等"反查；
+    // 反查不到就存成不带预设的剧本（应用时不动预设），不猜一个近似的
+    const roleMatch = (r: { agentId: string; modelOverride?: string }, p: { agentId: string; model?: string }) =>
+      r.agentId === p.agentId && (r.modelOverride ?? '') === (p.model ?? '')
+    const matched = presets.find((p) => roleMatch(config.planner, p.planner) && roleMatch(config.executor, p.executor) && roleMatch(config.reviewer, p.reviewer))
+    const entry: WorkflowTemplate = {
+      id: uid('tpl'),
+      name: nm,
+      goalTemplate: draft,
+      ...(matched ? { presetId: matched.id } : {}),
+      ...(planNextTask ? { planFirst: true } : {}),
+      createdAt: Date.now()
+    }
+    const next = await save([...list, entry])
+    if (next?.some((t) => t.id === entry.id)) {
+      setSavingFromConfig(false)
+      setFromConfigName('')
+      useUi.getState().toast(matched ? `已保存剧本「${nm}」（关联预设 ${matched.name}）` : `已保存剧本「${nm}」（当前三角色没有匹配的预设，不关联）`, 'ok')
+    }
+  }
+
+  return (
+    <div className="set-group">
+      <div className="group-title">剧本</div>
+      <div className="desc" style={{ lineHeight: 1.8, marginBottom: 6 }}>
+        剧本把"目标模板 + 预设 + 计划档"打包成一条；在工作流首页一键载入后由你确认再开始（不会自动开始）。
+        模板支持占位符 <code>{'{{日期}}'}</code> 与 <code>{'{{时间}}'}</code>，载入时替换为当天日期与时间。
+      </div>
+      {list.length === 0 && !editing && !savingFromConfig && <div className="desc" style={{ padding: '2px 0 8px' }}>还没有剧本。</div>}
+      {list.map((t) => {
+        const p = t.presetId ? presets.find((x) => x.id === t.presetId) : undefined
+        return (
+          <div key={t.id} className="mem-row" title={t.goalTemplate}>
+            <span className="txt txt-ellipsis" style={{ minWidth: 0 }}>
+              <b>{t.name}</b>
+              <span style={{ color: 'var(--text-3)' }}>
+                {' '}· {t.goalTemplate.length > 30 ? t.goalTemplate.slice(0, 30) + '…' : t.goalTemplate}
+                {p ? ` · 预设：${p.name}` : ' · 不关联预设'}{t.planFirst ? ' · 先出计划' : ''}
+              </span>
+            </span>
+            <span className="acts">
+              <Button variant="ghost" style={{ height: 24, padding: '0 8px' }} onClick={() => void save(list.filter((x) => x.id !== t.id))}>
+                删除
+              </Button>
+            </span>
+          </div>
+        )
+      })}
+      {!editing && !savingFromConfig && (
+        <div style={{ display: 'flex', gap: 8, paddingTop: 4 }}>
+          <Button variant="secondary" style={{ height: 28 }} onClick={() => setEditing(true)}>新建剧本</Button>
+          <Button variant="secondary" style={{ height: 28 }} onClick={() => { setSavingFromConfig(true); setFromConfigName('') }}>从当前配置保存</Button>
+        </div>
+      )}
+      {savingFromConfig && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--border)' }}>
+          <input value={fromConfigName} autoFocus placeholder="剧本名称（最多 40 字）" onChange={(e) => setFromConfigName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void saveFromConfig() }}
+            style={{ flex: 1, minWidth: 0, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 8px' }} />
+          <Button variant="ghost" style={{ height: 28 }} onClick={() => setSavingFromConfig(false)}>取消</Button>
+          <Button variant="primary" style={{ height: 28 }} onClick={() => void saveFromConfig()}>保存</Button>
+        </div>
+      )}
+      {editing && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 0', borderTop: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input value={name} placeholder="剧本名称（最多 40 字）" onChange={(e) => setName(e.target.value)}
+              style={{ width: 200, height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 8px' }} />
+            <select value={presetId} onChange={(e) => setPresetId(e.target.value)}
+              style={{ height: 30, borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '0 6px' }}>
+              <option value="">不关联预设</option>
+              {presets.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <Switch label="应用时先出计划" on={planFirst} onChange={setPlanFirst} />
+          </div>
+          <textarea value={goalTemplate} rows={4}
+            placeholder={'目标模板，载入时填进输入框；支持 {{日期}} / {{时间}} 占位符'}
+            onChange={(e) => setGoalTemplate(e.target.value)}
+            style={{ width: '100%', boxSizing: 'border-box', borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--surface)', padding: '6px 8px', fontSize: 12.5, resize: 'vertical' }} />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button variant="ghost" style={{ height: 28 }} onClick={() => setEditing(false)}>取消</Button>
+            <Button variant="primary" style={{ height: 28 }} onClick={() => void submit()}>保存</Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1111,6 +1413,22 @@ function DataSection() {
       setCorruptLoaded(true)
     })
   }
+  // 整包迁移（换机）：导入是"替换配置 + 合并数据"的批量写操作，确认门与"清空任务记录"同款——
+  // 不能点一下就落盘。导出/导入共用一个 busy 位：两颗按钮互斥期间一起置灰。
+  const [bundleBusy, setBundleBusy] = useState(false)
+  const runBundle = async (kind: 'export' | 'import') => {
+    if (kind === 'import') {
+      if (!window.confirm('导入整包将：替换当前配置（自动留档 config.pre-import-<时间戳>.json）、合并会话/任务/记忆/技能、替换审批白名单。\n\nAPI Key 不随包迁移，导入后需重填；导入后需重启应用生效。确定继续？')) return
+    }
+    setBundleBusy(true)
+    try {
+      const r = kind === 'export' ? await bridge.data.exportBundle() : await bridge.data.importBundle()
+      if (!r) { useUi.getState().toast('整包迁移失败：主进程无响应', 'error'); return }
+      useUi.getState().toast(r.message, r.ok ? 'ok' : 'error')
+    } finally {
+      setBundleBusy(false)
+    }
+  }
   return (
     <div>
       <div className="set-group">
@@ -1156,6 +1474,34 @@ function DataSection() {
         <Row label="配置导入 / 导出" desc="含 Agent、角色配置与偏好；API Key 不导出，导入后需重新填写">
           <Button variant="secondary" style={{ height: 28 }} onClick={() => void settings.exportConfig()}>导出</Button>
           <Button variant="secondary" style={{ height: 28 }} onClick={() => void settings.importConfig()}>导入</Button>
+        </Row>
+        {/* 整包迁移（换机）：与上面"配置导入/导出"的区别是连会话/任务/记忆/技能一起带走。
+            打包可能耗时数秒，busy 期间两颗按钮一起置灰，防双击开出两份包/两次导入 */}
+        <Row
+          label="导出整包（换机）"
+          desc="打包配置、会话、任务记录、长期记忆、技能与审批白名单为一个 zip；API Key 不在包里（系统加密绑定原机器，换机解不开），导入后需重填；日志不进包"
+        >
+          <Button
+            variant="secondary"
+            style={{ height: 28 }}
+            disabled={bundleBusy}
+            onClick={() => void runBundle('export')}
+          >
+            导出整包
+          </Button>
+        </Row>
+        <Row
+          label="导入整包"
+          desc="导入前自动备份当前配置（config.pre-import-<时间戳>.json）；会话/任务/记忆/技能按 id 合并（同名覆盖），配置与审批白名单整体替换；API Key 不随包迁移，导入后需重填并重启应用生效"
+        >
+          <Button
+            variant="secondary"
+            style={{ height: 28 }}
+            disabled={bundleBusy}
+            onClick={() => void runBundle('import')}
+          >
+            导入整包
+          </Button>
         </Row>
         <Row label="会话与任务记录导出" desc="把工作流任务记录导出为 Markdown">
           <Button variant="secondary" style={{ height: 28 }} onClick={() => void settings.exportSessionRecord()}>导出记录</Button>

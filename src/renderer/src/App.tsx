@@ -4,6 +4,7 @@ import { useUi } from './stores/ui'
 import { useSettings } from './stores/settings'
 import { useAgents } from './stores/agents'
 import { useWorkflow, runBusy } from './stores/workflow'
+import { useNotifications } from './stores/notifications'
 import { HOTKEY_DEFAULTS, type HotkeyAction } from '@shared/types'
 import { matchKeyBinding, validateKeyBinding } from './lib/utils'
 import { bridge } from './lib/ipc'
@@ -53,6 +54,18 @@ interface DlDone {
   sha256: string
   verified: boolean
   hashNote?: string
+  /** 暂存结果：true 表示包已解包就绪、横幅进「应用更新」态；false/缺省看 stagedNote */
+  staged?: boolean
+  stagedVersion?: string
+  /** 未暂存的原因（哈希没比对上 / 版本不比当前新 / 解包失败） */
+  stagedNote?: string
+}
+
+/** 已暂存待应用的更新（update:stagedStatus 返回 / done 事件带出；与 preload 的 StagedUpdate 同形） */
+interface StagedUpdate {
+  version: string
+  sha256: string
+  stagedAt: number
 }
 
 function fmtBytes(n: number): string {
@@ -62,10 +75,21 @@ function fmtBytes(n: number): string {
 }
 
 /** 新版本提示横幅（非模态：顶部居中，不阻塞任何操作，可忽略）。
- *  下载状态由 App 订阅 update:event 维护，这里只按事实渲染三种形态：空闲 / 下载中 / 已完成 */
-function UpdateBanner({ dl, dlDone, onAskDownload, onDismiss }: { dl: DlProgress | null; dlDone: DlDone | null; onAskDownload: () => void; onDismiss: () => void }) {
+ *  下载状态由 App 订阅 update:event 维护，这里按事实渲染四种形态：空闲 / 下载中 / 已就绪待应用 / 已完成。
+ *  「应用更新」只换便携版的明文 resources/app（不动 AgentHub.exe 与 Electron 运行时），且只由这个
+ *  按钮触发——绝不自动换入；NSIS 安装版（asar）不走一键换入。 */
+function UpdateBanner({ dl, dlDone, staged, onAskDownload, onApply, onDismiss }: {
+  dl: DlProgress | null
+  dlDone: DlDone | null
+  staged: StagedUpdate | null
+  onAskDownload: () => void
+  onApply: () => void
+  onDismiss: () => void
+}) {
   const b = useUi((s) => s.updateBanner)
-  if (!b) return null
+  // 已暂存待应用的更新即使横幅本体被忽略过也要亮出来：staged.json 是"新包已经在本机"的事实，
+  // 藏着它用户就找不到「应用更新」入口了
+  if (!b && !staged) return null
   return (
     <div className="update-banner">
       {dl ? (
@@ -77,18 +101,26 @@ function UpdateBanner({ dl, dlDone, onAskDownload, onDismiss }: { dl: DlProgress
             <div style={{ width: `${Math.max(2, dl.pct)}%`, height: '100%', background: '#7ad48a' }} />
           </div>
         </>
+      ) : staged ? (
+        <>
+          <span className="ub-text" title={staged.sha256 ? `SHA-256 ${staged.sha256}` : '已暂存待应用'}>
+            新版本 {staged.version} 已下载就绪（只换 resources/app，重启生效）
+          </span>
+          <button className="ub-btn" onClick={onApply}>应用更新（重启生效）</button>
+        </>
       ) : dlDone ? (
         <>
           <span className="ub-text" title={dlDone.sha256}>
             便携包已下载 · SHA-256 {dlDone.verified ? '与发布说明一致' : dlDone.hashNote ? '发布说明里没找到哈希，仅显示计算值' : '与发布说明不一致，请勿使用'}
             {' '}（{dlDone.sha256.slice(0, 12)}…）
+            {dlDone.stagedNote ? ` · ${dlDone.stagedNote}` : ''}
           </span>
           <button className="ub-btn" onClick={() => void bridge.update.openDownloadDir()}>打开所在文件夹</button>
         </>
       ) : (
         <>
-          <span className="ub-text">发现新版本 {b.version}</span>
-          <button className="ub-btn" onClick={() => void bridge.app.openExternal(b.url)}>前往下载</button>
+          <span className="ub-text">发现新版本 {b?.version}</span>
+          <button className="ub-btn" onClick={() => { if (b) void bridge.app.openExternal(b.url) }}>前往下载</button>
           <button className="ub-btn" onClick={onAskDownload}>下载便携包</button>
         </>
       )}
@@ -103,11 +135,13 @@ export function App() {
   const appInfo = useSettings((s) => s.appInfo)
   const [ready, setReady] = useState(false)
   const [fatal, setFatal] = useState<string | null>(null)
-  // 便携包下载：确认弹窗 / 进度 / 完成结果（横幅按这三种状态渲染，事件来自主进程 update:event）
+  // 便携包下载：确认弹窗 / 进度 / 完成结果（横幅按这几种状态渲染，事件来自主进程 update:event）
   const [askDl, setAskDl] = useState(false)
   const [dlAsset, setDlAsset] = useState<{ name: string; size: number } | null>(null)
   const [dl, setDl] = useState<DlProgress | null>(null)
   const [dlDone, setDlDone] = useState<DlDone | null>(null)
+  // 已暂存待应用的更新（staged.json）：本次会话下载就绪或上次会话留下的事实
+  const [staged, setStaged] = useState<StagedUpdate | null>(null)
 
   // 更新下载事件订阅：挂载时订阅、卸载时清理（onUpdateEvent 返回退订函数）
   useEffect(() => {
@@ -119,10 +153,38 @@ export function App() {
       if (ev.type === 'done') {
         setDl(null)
         setDlDone(ev)
+        // 暂存成功：横幅直接进「应用更新」态（stagedAt 界面不展示，用当下时间补齐形状即可）
+        if (ev.staged && ev.stagedVersion) {
+          setStaged({ version: ev.stagedVersion, sha256: ev.sha256, stagedAt: Date.now() })
+        } else {
+          setStaged(null)
+        }
         return
       }
       setDl(null)
       useUi.getState().toast(`更新包下载失败：${ev.message}`, 'error')
+    })
+  }, [])
+
+  // 挂载时查一次暂存状态：上次会话下载并暂存过、还没应用的，横幅直接亮「应用更新」按钮
+  useEffect(() => {
+    bridge.update.stagedStatus().then((s) => {
+      if (s) setStaged(s)
+    }).catch(() => { /* 查询失败按无暂存处理，不打扰 */ })
+  }, [])
+
+  // 定时任务触发（main 每 30 秒 tick 判定到点后经 scheduler:fire 推来）：与 update:event 同一
+  // 订阅先例——挂载订阅、卸载退订。这里只转发给 startScheduled（忙闲判定/排队/起链都在那边），
+  // App 不感知调度细节；无论当前在哪个屏幕都能接到（工作流后台触发不要求用户停在首页）
+  useEffect(() => {
+    return bridge.schedule.onFire((schedule) => {
+      // 通知中心留痕：系统通知可能因窗口聚焦被跳过，这里的记录是"确定存在"的
+      useNotifications.getState().push({
+        kind: 'schedule',
+        title: `定时任务已触发：${schedule.name}`,
+        body: schedule.goal.slice(0, 50)
+      })
+      useWorkflow.getState().startScheduled(schedule)
     })
   }, [])
 
@@ -145,6 +207,20 @@ export function App() {
       if (!r.ok) {
         setDl(null)
         useUi.getState().toast(r.message ?? '下载未能开始', 'error')
+      }
+    })
+  }
+
+  const applyUpdate = () => {
+    void bridge.update.apply().then((r) => {
+      if (r.ok && r.relaunch) {
+        // 主进程延迟 1.5s 自行 relaunch（给这条提示留显示时间），这里不重复触发重启
+        useUi.getState().toast('更新完成，即将重启生效', 'ok')
+      } else if (r.pending) {
+        // 文件被占用没能热交换：主进程已写待启动标记、下次启动自动补做——如实告知，不粉饰成已更新
+        useUi.getState().toast(r.message ?? '文件被占用，将在下次启动时自动应用', 'warn')
+      } else {
+        useUi.getState().toast(r.message ?? '应用更新失败', 'error')
       }
     })
   }
@@ -314,12 +390,16 @@ export function App() {
       <UpdateBanner
         dl={dl}
         dlDone={dlDone}
+        staged={staged}
         onAskDownload={askDownload}
+        onApply={applyUpdate}
         onDismiss={() => {
-          // 关横幅时连同下载状态一起清：否则下次横幅再出现会闪回上一轮的"已下载"结论
+          // 关横幅时连同下载/暂存状态一起清：否则下次横幅再出现会闪回上一轮的"已下载"结论
+          // （暂存事实本身还在 staged.json 里，下次启动会再亮出来）
           useUi.getState().setUpdateBanner(null)
           setDl(null)
           setDlDone(null)
+          setStaged(null)
         }}
       />
       <Modal

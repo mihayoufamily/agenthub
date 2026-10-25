@@ -5,7 +5,8 @@
 import { create } from 'zustand'
 import type {
   WorkflowRun, WorkflowConfig, WorkflowRoleConfig, RoleCard, Stage, ReviewGate,
-  Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole, Skill, RunSkillEntry
+  Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole, Skill, RunSkillEntry,
+  TaskSchedule
 } from '@shared/types'
 import { unionSkillIds, partitionSkillsForInjection } from '@shared/skills-union'
 import { dirDelta } from '@shared/dir-delta'
@@ -20,6 +21,7 @@ import { matchFileRef } from '@shared/acceptance'
 import { memoryBlockFor } from '@shared/retrieval'
 import { uid, chunkText, sleep, clamp, safeName } from '../lib/utils'
 import { useUi } from './ui'
+import { useNotifications } from './notifications'
 import { useSettings } from './settings'
 import { useAgents } from './agents'
 import {
@@ -116,6 +118,12 @@ interface WorkflowState {
   queueCurrent: () => void
   /** 从队列移除一条（首页队列条的逐条删除） */
   removeQueued: (index: number) => void
+  /**
+   * 定时任务的触发接入口（main 调度器 scheduler:fire → App.tsx → 这里）。
+   * 复用 start(queued) 这条队列入口：忙时经 enqueue 排队（与手动"排入队列"同一份上限与语义），
+   * 闲时直接开。目标在主进程侧已定格（schedule.goal），这里不读 draft、不动草稿。
+   */
+  startScheduled: (schedule: TaskSchedule) => void
 }
 
 /** 当前进行中的真实模型请求（stop 时取消） */
@@ -217,6 +225,9 @@ function announce(run: WorkflowRun) {
       ? '回到 AgentHub 通过确认门，或填返工意见'
       : '在左侧「工作流」里点开查看结果与产物'
   void bridge.app.notify(title, body)
+  // 同一事实进通知中心（渲染层内存态）：系统通知弹不弹由主进程按窗口焦点裁决（聚焦时跳过），
+  // 通知中心则无论窗口是否聚焦都留痕——用户回来后有地方翻"刚才跑完了什么"。
+  useNotifications.getState().push({ kind: 'task', title, body: run.goal.slice(0, 50), runId: run.id })
 }
 
 /**
@@ -1656,6 +1667,34 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
   },
 
   removeQueued: (index) => set((s) => ({ queue: s.queue.filter((_, i) => i !== index) })),
+
+  startScheduled: (schedule) => {
+    const goal = (schedule?.goal ?? '').trim()
+    if (!goal) {
+      useUi.getState().toast('定时任务的目标为空，无法开始（请到设置里检查这条定时任务）', 'warn')
+      return
+    }
+    // 与手动 queueCurrent 同形状：只带目标与入队那一刻定格的计划态单次档（不带附件——
+    // 定时任务没有附件栏可勾，附件正文无从谈起）
+    const item: QueuedTask = {
+      goal,
+      queuedAt: Date.now(),
+      ...(schedule.planFirst === true ? { planNextTask: true } : {})
+    }
+    // 忙时自动排队（复用队列语义与上限），闲时直接开；start 自身的校验失败会 toast 具体原因
+    if (runBusy(get().run) || get()._started) {
+      const r = enqueue(get().queue, item)
+      if (r.rejected) {
+        useUi.getState().toast(`定时任务「${schedule.name}」排不进队列：${r.rejected}`, 'warn')
+        return
+      }
+      set({ queue: r.queue })
+      useUi.getState().toast(`定时任务「${schedule.name}」已排入队列：当前任务结束后自动开始`, 'info')
+      return
+    }
+    useUi.getState().toast(`定时任务「${schedule.name}」已开始`, 'ok')
+    void get().start(item)
+  },
 
   exportRun: async () => {
     const run = get().run
