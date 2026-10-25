@@ -210,6 +210,8 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
               setRemoveTarget(menuFor)
               setMenuFor(null)
             }}
+            // 卡内"打开技能中心"直接开本侧栏挂的弹层（Modal 已 portal，从哪触发都一样）
+            onOpenSkillCenter={() => setSkillCenterOpen(true)}
           />
         </div>
       )}

@@ -123,3 +123,13 @@ export function skillToggleToast(enabled: boolean, usageCount: number): string {
   }
   return `已启用：下一次对话起按各绑定处的模式注入${n > 0 ? `（共 ${n} 处）` : '（当前没有绑定处，去 Agent 管理卡绑定或在输入框引用）'}`
 }
+
+/**
+ * 技能来源的显示标签（Agent 管理卡 / 技能中心的徽章共用，防两处各写一份）。
+ * key 与 Skill.source（'local' | 'builtin' | 'market'）一一对应；未知来源回退显示原值。
+ */
+export const SKILL_SOURCE_LABELS: Record<string, string> = {
+  local: '本地',
+  builtin: '内置',
+  market: '市场'
+}

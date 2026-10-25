@@ -4,7 +4,7 @@
 // 不引入新的全局 store（stores 本批次禁改，且 settings store 里本就没有 skills 状态）。
 import React, { useCallback, useEffect, useState } from 'react'
 import type { Skill } from '@shared/types'
-import { skillUsages, SKILL_TIMING_NOTE } from '@shared/skill-usages'
+import { skillUsages, SKILL_TIMING_NOTE, SKILL_SOURCE_LABELS } from '@shared/skill-usages'
 import { bridge, market, type RegistryItem } from '../lib/ipc'
 import { useUi } from '../stores/ui'
 import { useAgents } from '../stores/agents'
@@ -61,7 +61,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'market', label: '技能市场' }
 ]
 
-const SOURCE_TEXT: Record<string, string> = { local: '本地', builtin: '内置', market: '市场' }
+// 来源标签在 shared（Agent 管理卡的技能徽章与这里共用一份，不许各写一份）
 
 /** 语义化版本逐段比较：非数字段按 0 处理（够用于"官方发的 v1.2.3"这种口径） */
 function verCmp(a: string, b: string): number {
@@ -225,7 +225,7 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
                     <div className="info">
                       <div className="nm">
                         {sk.name}
-                        <span className={cls('skill-center-src', `skill-center-src-${src}`)}>{SOURCE_TEXT[src]}</span>
+                        <span className={cls('skill-center-src', `skill-center-src-${src}`)}>{SKILL_SOURCE_LABELS[src] ?? src}</span>
                       </div>
                       <div className="md">
                         {sk.desc || '（无简介）'}

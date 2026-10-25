@@ -629,3 +629,33 @@
 .skill-usage-note { font-size: 11px; color: var(--text-3); line-height: 1.6; }
 /* ConfigPanel 角色绑定区是 flex-wrap 行内布局：小字独占一行排在技能清单之后 */
 .skill-usage-note-inline { flex-basis: 100%; }
+
+/* ---- Agent 管理卡分区化（2026-10-25）：头部身份 / 常驻提示词 / 技能 / 操作 ---- */
+.ac-head { display: flex; align-items: center; gap: 8px; padding: 2px 0 8px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+.ac-head-text { min-width: 0; }
+.ac-head-name { font-weight: 700; font-size: 13.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-head-sub { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 分区标题：文字 + 弹性细线 + 右侧徽章槽，把四个异质元素在视觉上分开 */
+.ac-sec { margin-top: 10px; }
+.ac-sec-title { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-3); margin-bottom: 6px; }
+.ac-sec-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.ac-sec-extra { display: flex; gap: 6px; align-items: center; }
+.ac-badge { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); white-space: nowrap; }
+.ac-saved { color: var(--ok); background: var(--ok-bg); font-weight: 600; }
+/* 常驻提示词：textarea 可纵向拖高，字数/说明一行 */
+.agent-card textarea { resize: vertical; min-height: 96px; }
+.ac-sec-note { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-3); margin-top: 4px; }
+.ac-charcount { white-space: nowrap; }
+/* 技能项：勾选 + 名称 + 来源徽章 + 版本 + 停用警告，放不下自动换行 */
+.ac-skill-item { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 3px 0; }
+.ac-skill-item .ac-skill-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-src-badge { font-size: 10px; padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); white-space: nowrap; }
+.skill-src-badge.src-market { color: var(--warn); background: var(--warn-bg); }
+.skill-src-badge.src-builtin { color: var(--ok); background: var(--ok-bg); }
+.ac-skill-ver { font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
+.ac-skill-item.off .ac-skill-name { color: var(--text-3); }
+.ac-skill-off { font-size: 10.5px; color: var(--warn); white-space: nowrap; cursor: help; }
+.ac-open-skillcenter { margin-top: 6px; background: none; border: none; padding: 2px 0; color: var(--brand-yellow); font-size: 12px; cursor: pointer; text-align: left; }
+.ac-open-skillcenter:hover { text-decoration: underline; }
+/* 操作区：与配置内容隔开一条线，危险项靠右 */
+.ac-actions { display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding-top: 8px; margin-top: 12px; }

@@ -3213,6 +3213,37 @@ console.log('\n[SK] 技能生效范围（skillUsages 事实清单 + 文案常量
   ok('绊线：AgentManageCard 源码引用 SKILL_MODE_HINTS（不许手抄模式解释）',
     cardSrc.error === null && cardSrc.text.includes('SKILL_MODE_HINTS'),
     cardSrc.error ?? '未引用')
+  // 管理卡分区化（2026-10-25）的元素守护：头部身份 / 保存可见 / 技能项徽章 / 技能中心入口，
+  // 全部打在源码上（真机几何归 ui 层）；"systemPrompt 唯一编辑入口"的既有断言在 [Z3] 段，不受影响。
+  ok('绊线：AgentManageCard 有头部身份区（状态点 + 名字 + 摘要，点开 ⋯ 先知道在改谁）',
+    cardSrc.error === null &&
+      cardSrc.text.includes('data-agent-card-head') &&
+      cardSrc.text.includes('<StatusDot') &&
+      cardSrc.text.includes('ac-head-name'),
+    cardSrc.error ?? '缺头部元素')
+  ok('绊线：AgentManageCard 的保存状态可见（已保存徽章 + 未保存标记 + 字数）',
+    cardSrc.error === null &&
+      cardSrc.text.includes('ac-saved') && cardSrc.text.includes('已保存') &&
+      cardSrc.text.includes('未保存') && cardSrc.text.includes('ac-charcount'),
+    cardSrc.error ?? '缺保存状态元素')
+  ok('绊线：AgentManageCard 技能项带来源徽章与停用原因（来源标签走 shared，不许手抄）',
+    cardSrc.error === null &&
+      cardSrc.text.includes('SKILL_SOURCE_LABELS') && cardSrc.text.includes('skill-src-badge') &&
+      cardSrc.text.includes('ac-skill-ver') && cardSrc.text.includes('已停用'),
+    cardSrc.error ?? '缺技能项元素')
+  ok('绊线：AgentManageCard 有打开技能中心的入口（空态不再是死文案）',
+    cardSrc.error === null && cardSrc.text.includes('ac-open-skillcenter') && cardSrc.text.includes('onOpenSkillCenter'),
+    cardSrc.error ?? '缺入口')
+  ok('SKILL_SOURCE_LABELS 三个来源的标签齐全（AgentManageCard 与 SkillCenter 共用一份）',
+    su.SKILL_SOURCE_LABELS?.local === '本地' && su.SKILL_SOURCE_LABELS?.builtin === '内置' && su.SKILL_SOURCE_LABELS?.market === '市场',
+    JSON.stringify(su.SKILL_SOURCE_LABELS))
+  ok('绊线：SkillCenter 的来源标签走 shared 常量（本地字面量副本必须消失）',
+    (() => {
+      const sc = readSrcSafe('src/renderer/src/features/SkillCenter.tsx')
+      return sc.error === null && sc.text.includes('SKILL_SOURCE_LABELS') &&
+        !/const SOURCE_TEXT[^=]*=/.test(sc.text)
+    })(),
+    'SkillCenter 里还有 SOURCE_TEXT 字面量或没引用 shared 常量')
   ok('SKILL_MODE_HINTS 两个键的文案齐全且非空',
     typeof su.SKILL_MODE_HINTS?.auto === 'string' && su.SKILL_MODE_HINTS.auto.length > 0 &&
       typeof su.SKILL_MODE_HINTS?.reference === 'string' && su.SKILL_MODE_HINTS.reference.length > 0,
