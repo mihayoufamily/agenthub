@@ -267,6 +267,9 @@ const api = {
       ipcRenderer.invoke('tools:exec', grant, tool, argsJson, checkpointId) as Promise<{
         ok: boolean; output: string; writtenPath?: string; change?: FileChange
       }>,
+    /** 内置工具清单（只读展示）：与发给模型的同一份定义；flags 按面板当前开关状态传 */
+    defs: (flags: { allowCommands?: boolean; allowWeb?: boolean }) =>
+      ipcRenderer.invoke('tools:defs', flags) as Promise<{ name: string; desc: string }[]>,
     pickDir: () => ipcRenderer.invoke('dialog:pickDir') as Promise<string | null>
   },
   /** 模型回复图片代理（image:fetch）：主进程按 web_fetch 同口径做 SSRF 守卫后下载并转

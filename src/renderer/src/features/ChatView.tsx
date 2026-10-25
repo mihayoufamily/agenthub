@@ -904,6 +904,9 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   // MCP：server 列表是全局的，这里只做"这个 Agent 能用哪几个"的勾选
   const [mcpList, setMcpList] = useState<McpServer[]>([])
   const [mcpIds, setMcpIds] = useState<string[]>(agent.tools?.mcpServerIds ?? [])
+  // 工具清单（折叠区）：懒加载——展开或命令/联网开关变化时，向主进程要一份与发给模型同一份的清单
+  const [listOpen, setListOpen] = useState(false)
+  const [toolList, setToolList] = useState<{ name: string; desc: string }[] | null>(null)
   useEffect(() => {
     void bridge.mcp.list().then(setMcpList)
   }, [])
@@ -916,6 +919,16 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
       alive = false
     }
   }, [agent.id])
+  useEffect(() => {
+    if (!listOpen) return
+    let alive = true
+    void bridge.tools.defs({ allowCommands, allowWeb }).then((r) => {
+      if (alive) setToolList(r)
+    })
+    return () => {
+      alive = false
+    }
+  }, [listOpen, allowCommands, allowWeb])
 
   const save = () => {
     if (!enabled) {
@@ -1134,6 +1147,35 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
                 </div>
               </span>
             </label>
+            {/* 工具清单折叠区：内容来自 tools:defs（主进程同一份 toolDefs），展开才拉取 */}
+            <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '6px 12px' }} data-testid="tool-list-block">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ height: 26, fontSize: 12, width: '100%', justifyContent: 'flex-start', border: 'none' }}
+                aria-expanded={listOpen}
+                data-testid="tool-list-toggle"
+                onClick={() => setListOpen(!listOpen)}
+              >
+                {listOpen ? '▾' : '▸'} 工具清单{toolList ? `（${toolList.length} 个）` : ''}——这个 Agent 将获得哪些工具
+              </button>
+              {listOpen && (
+                <div style={{ marginTop: 6 }}>
+                  {!toolList && <div style={{ fontSize: 12, color: 'var(--text-3)' }}>加载中…</div>}
+                  {toolList?.map((t) => (
+                    <div key={t.name} style={{ display: 'flex', gap: 8, padding: '3px 0', fontSize: 12, lineHeight: 1.5 }}>
+                      <code style={{ minWidth: 110, wordBreak: 'break-all' }}>{t.name}</code>
+                      <span style={{ color: 'var(--text-3)', flex: 1 }}>{t.desc}</span>
+                    </div>
+                  ))}
+                  {mcpIds.length > 0 && (
+                    <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 6, lineHeight: 1.5 }}>
+                      另有已勾选 MCP 的工具在对话时并入（{mcpIds.map((id) => mcpList.find((s) => s.id === id)?.name ?? id).join('、')}）。
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6 }}>
               {fullAccess
                 ? '完全访问：文件读写/删除/移动不限目录；命令不限工作目录；删除仍走系统回收站；工具调用轮数上限 16 轮。搜索/查找类工具仍以上方目录为范围（避免全盘扫描）。'

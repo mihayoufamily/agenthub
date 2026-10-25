@@ -3575,5 +3575,29 @@ console.log('\n[BM] 内置 MCP 基础组与默认工具授权')
     spBM.error ?? 'SettingsPage 缺内置只读行或提交剥离')
 }
 
+// ---------- [TL] 工具面板的"工具清单"折叠区（tools:defs 单一真相 + 折叠交互在场） ----------
+console.log('\n[TL] 工具清单折叠区（tools:defs）')
+{
+  const toolsMod = await import('../out/main/tools.js')
+  const all = toolsMod.toolDefs(true, true)
+  const names = all.map((d) => d.function.name)
+  ok('toolDefs(true,true) 共 11 个工具（文件 8 + 命令 1 + 联网 2）——清单展示的同一份真相',
+    names.length === 11 && ['read_file', 'write_file', 'list_dir', 'delete_file', 'move', 'search_files', 'glob_files', 'replace_in_file', 'run_command', 'web_fetch', 'web_search'].every((n) => names.includes(n)),
+    JSON.stringify(names))
+  const ipcTL = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：tools:defs 通道用同一份 toolDefs（界面看到的=模型拿到的，不在渲染层另抄清单）',
+    ipcTL.error === null && ipcTL.text.includes("'tools:defs'") && ipcTL.text.includes('toolDefs('),
+    ipcTL.error ?? '缺 tools:defs / toolDefs')
+  const preTL = readSrcSafe('src/preload/index.ts')
+  ok('绊线：preload 暴露 tools.defs（渲染层唯一入口）',
+    preTL.error === null && preTL.text.includes("invoke('tools:defs'"),
+    preTL.error ?? 'preload 缺 tools:defs')
+  const cvTL = readSrcSafe('src/renderer/src/features/ChatView.tsx')
+  ok('绊线：工具面板有可折叠清单（aria-expanded 开关 + bridge.tools.defs 拉取 + MCP 并入提示）',
+    cvTL.error === null && cvTL.text.includes('data-testid="tool-list-toggle"') && cvTL.text.includes('aria-expanded={listOpen}') &&
+      cvTL.text.includes('bridge.tools.defs') && cvTL.text.includes('对话时并入'),
+    cvTL.error ?? 'ToolsGrantModal 缺折叠清单')
+}
+
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

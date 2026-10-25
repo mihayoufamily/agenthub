@@ -11,7 +11,7 @@ import { configurePriceOverrides, partitionPriceOverrides } from '../shared/over
 import { partitionHookRules, sanitizeHookList } from '../shared/hooks'
 import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
 import { normalizePolicy, VERIFY_SWITCH } from '../shared/compat'
-import { execTool, sandboxPath, isNonPublicHost, safeWebUrl, type CommandApprover } from './tools'
+import { execTool, toolDefs, sandboxPath, isNonPublicHost, safeWebUrl, type CommandApprover } from './tools'
 import { isValidImageSrc, isRemoteImageSrc } from '../shared/message-images'
 import * as approvals from './approvals'
 import * as mcp from './mcp'
@@ -844,6 +844,12 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   // ---------- 工具层（沙箱执行） ----------
+  // 工具清单（只读展示）：与发给模型的同一份 toolDefs——授权面板里"看到的"与模型"拿到的"永远一致，
+  // 不在渲染层再抄一份清单（两份必然漂移）。flags 取面板当前的开关状态。
+  ipcMain.handle('tools:defs', (_e, flags: { allowCommands?: boolean; allowWeb?: boolean }) =>
+    (toolDefs(!!flags?.allowCommands, !!flags?.allowWeb) as { function: { name: string; description?: string } }[])
+      .map((d) => ({ name: d.function.name, desc: String(d.function.description ?? '').split('\n')[0].slice(0, 140) }))
+  )
   // 这条直调入口只存在于验证态：与 config:importJson 同一道闸门（argv 带 --ahub-verify 才注册）、同一先例。
   // 原因：它接受渲染层自构造的 grant，`{dir:'C:\\', access:'full'}` 即全盘读写——与 model:chat
   // "grant 从存储配置解析、不接受渲染层自构造（否则渲染层可自我提权）"的原则直接冲突。

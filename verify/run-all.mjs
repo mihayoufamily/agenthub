@@ -60,7 +60,9 @@ const SUITES = [
   // buildDefaultTools 默认值形状、mcp 闸门拒伪造 builtin 条目（提交与读侧双防线）、
   // BuiltinMcpClient 进程内集成（3 工具/时区换算/非法时区/记忆往返/函数表命名路由）、
   // 接线绊线（ipc 装配与免信任分流、agents 默认工具、SettingsPage 只读行）。
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 701, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围与工作流技能管理（skillUsages/时机文案/三写入口/开工快照）+ 模型回复图片渲染（[MI]：解析器/围栏免疫/SSRF 守卫在场）' },
+  // fixes 705：2026-10-26 工具清单轮实测（705 PASS / 0 FAIL）。701 → 705 的 4 条是 [TL] 段：
+  // toolDefs 全量 11 工具的行为断言 + tools:defs 通道/preload/工具面板折叠区三条绊线（单一真相：界面看到的=模型拿到的）。
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 705, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围与工作流技能管理（skillUsages/时机文案/三写入口/开工快照）+ 模型回复图片渲染（[MI]：解析器/围栏免疫/SSRF 守卫在场）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 59, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态、技能注入层序、上一任务上下文都真跑过）' },
   // engine 28 / mcp-transport 31：2026-10-25 功能波轮实测（28 PASS / 31 PASS / 0 FAIL，各自独立脚本可单跑）。
   { name: 'engine', tier: 'logic', script: 'engine-check.mjs', min: 28, what: '引擎纯函数快照：六个竞态序列（清门/快照还原/续跑推断/队列出入/终态口径）+ 计划审计常量' },
