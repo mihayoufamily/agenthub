@@ -38,7 +38,10 @@ export function useSmoothText(full: string, enabled: boolean): string {
         shownRef.current = Math.min(target, shownRef.current + (speed * dt) / 1000)
         setShown(fullRef.current.slice(0, Math.floor(shownRef.current)))
       }
-      if (shownRef.current < target) raf = requestAnimationFrame(tick)
+      // 只要 enabled 就持续转：delta 到达只更新 fullRef，没有别的东西会重启这个循环——
+      // 若在这里"追平就停"，下一块 delta 到达时没人拉起循环，显示层会卡死在旧切片上
+      // （2026-10-25 真实事故：气泡全程转圈、结束瞬间全文蹦出，打字机一次都没跑过）
+      raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
