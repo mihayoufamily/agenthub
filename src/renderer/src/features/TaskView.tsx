@@ -417,10 +417,12 @@ function AcceptanceList({ run }: { run: WorkflowRun }) {
 
 function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
   // 流式柔和输出（与工作站气泡同一节奏）：hooks 必须在 delivery 早退之前——
-  // 交付卡不用卡片正文流式（它读 run 级内容），enabled=false 即直通
+  // 交付卡不用卡片正文流式（它读 run 级内容），enabled=false 即直通。
+  // 排空期（流已结束、积压还在播）也保持淡入边缘开启——一整块到达场景的动画窗口全在这里
   const reducedMotion = useSettings((s) => s.prefs?.reducedMotion === true)
   const smoothOn = card.status === 'streaming' && !reducedMotion
   const shownConclusion = useSmoothText(card.conclusion, smoothOn)
+  const revealEdge = smoothOn || shownConclusion.length < card.conclusion.length
   if (card.role === 'delivery') {
     return <DeliveryCard run={run} />
   }
@@ -454,7 +456,7 @@ function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
             <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
           ) : (
             <>
-              <FadeTail text={shownConclusion} enabled={smoothOn} />
+              <FadeTail text={shownConclusion} enabled={revealEdge} />
               {card.status === 'streaming' && <span className="caret" />}
             </>
           )}

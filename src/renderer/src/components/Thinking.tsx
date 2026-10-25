@@ -8,16 +8,17 @@ import { useSettings } from '../stores/settings'
 export function ThinkingText({ text, streaming }: { text: string; streaming?: boolean }) {
   const [showRest, setShowRest] = useState(false)
   const reducedMotion = useSettings((s) => s.prefs?.reducedMotion === true)
-  // 流式期间柔和逐字揭示（与聊天气泡同一节奏）；"减少动态效果"用户直接看原文
+  // 流式期间柔和逐字揭示（与聊天气泡同一节奏）；排空期（一整块到达场景）保持边缘动画
   const smoothOn = streaming === true && !reducedMotion
   const shown = useSmoothText(text, smoothOn)
+  const revealEdge = smoothOn || shown.length < text.length
   const d = useMemo(() => digestThinking(text), [text])
-  // 流式期间不过筛：用户正在看它实时生长，裁剪会造成"内容跳变"
+  // 流式期间不过滤：用户正在看它实时生长，裁剪会造成"内容跳变"
   const filtered = !streaming && d.restCount > 0 && !showRest
   return (
     <div className="thinking-view">
       <div className="tv-body">
-        <FadeTail text={filtered ? d.keepText : shown} enabled={smoothOn} />
+        <FadeTail text={filtered ? d.keepText : shown} enabled={revealEdge} />
       </div>
       {d.restCount > 0 && !streaming && (
         <button className="link-btn" onClick={() => setShowRest((v) => !v)}>

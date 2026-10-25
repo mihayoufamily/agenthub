@@ -4,14 +4,17 @@ import { useEffect, useRef, useState } from 'react'
 
 /**
  * @param full    底层完整文本（随流式 delta 增长）
- * @param enabled 仅对流式中的消息开启；关闭时直接返回全文（流结束/减少动态效果/历史消息）
+ * @param enabled 流式进行中（动画主窗口）。**流结束后积压仍会播完**——CLI 类 harness
+ *                （如 CodeBuddy）的正文是结束前一整块到达的，若动画窗口绑死在 streaming
+ *                标志上，窗口与文本存在的时间窗完全不重叠，打字机永远瞬弹
+ *                （2026-10-25 用户三轮实测的叠加根因）。排空期的"淡入边缘"由调用方用
+ *                `shown.length < full.length` 推导（本 hook 返回值就是 shown）。
  * @returns 当前应显示的文本切片
  *
- * 速率设计：基础 10 字/秒（用户拍定的"一秒10个字"），落后越多转越快
- * （保证缓冲既不无限堆积、也不突然整段蹦出），上限 700 字/秒——
- * 即使网络一次吐一大段，追平过程仍然连续可读。揭示边缘的逐字淡入由 FadeTail 组件负责（本 hook 只管节奏）。
- * rAF 循环读 ref 而不是依赖重跑：delta 每个 chunk 到达都会变 full，依赖数组若含 full 会
- * 每块重启一次循环；ref 方式下循环只在 enabled 翻转时启停，帧内永远读最新值。
+ * 生命周期：effect 依赖 [enabled]——流式中循环常转（delta 只更新 ref，无需重启）；
+ * 流结束（enabled 翻 false）时若仍有积压，循环继续把积压播完再自停；
+ * 追平自停后，下一个 delta 靠 enabled 翻转（流开始）拉起新循环。
+ * 速率：基础 10 字/秒（用户拍定），落后越多越快（上限 700），缓冲永不无限堆积。
  */
 export function useSmoothText(full: string, enabled: boolean): string {
   const [shown, setShown] = useState(() => (enabled ? '' : full))
@@ -20,13 +23,12 @@ export function useSmoothText(full: string, enabled: boolean): string {
   fullRef.current = full
 
   useEffect(() => {
-    // 关闭（流结束/减少动态效果）且没有积压：立即补满。
-    // 有积压时**继续播完**——CLI 类 harness（如 CodeBuddy）的正文是结束前一整块到达的，
-    // 若只认 streaming 窗口，动画窗口和文本存在的时间窗完全不重叠，打字机永远瞬弹
-    // （2026-10-25 用户实测"几十个字还是一瞬间弹出来"的真实根因）。
+    // 关闭且没有积压：无事可做（shown 已是全文）
     if (!enabled && shownRef.current >= fullRef.current.length) {
-      shownRef.current = fullRef.current.length
-      setShown(fullRef.current)
+      if (shownRef.current !== fullRef.current.length) {
+        shownRef.current = fullRef.current.length
+        setShown(fullRef.current)
+      }
       return
     }
     let raf = 0
@@ -41,8 +43,9 @@ export function useSmoothText(full: string, enabled: boolean): string {
         shownRef.current = Math.min(target, shownRef.current + (speed * dt) / 1000)
         setShown(fullRef.current.slice(0, Math.floor(shownRef.current)))
       }
-      // 只要 enabled 就持续转（delta 到达只更新 fullRef，没人会重启循环）；
-      // enabled 关掉后把积压播完再停——停的条件是"追平且已关闭"
+      // enabled 中常转（delta 随时可能到达）；关闭后把积压播完再自停。
+      // "追平就停"只允许发生在 enabled=false 的分支——enabled 中自停会让后续 delta
+      // 无人拉起循环（2026-10-25 卡死事故的根因）
       if (behind > 0 || enabled) raf = requestAnimationFrame(tick)
       else {
         shownRef.current = target
@@ -53,8 +56,7 @@ export function useSmoothText(full: string, enabled: boolean): string {
     return () => cancelAnimationFrame(raf)
   }, [enabled])
 
-  // 返回 shown（而非 enabled ? shown : full）：流结束把 enabled 翻 false 的瞬间，
-  // 积压可能还没播完——这时若直接切回 full 就瞬弹（2026-10-25 用户实测的真实原因）。
-  // shown 的同步由 effect 全权负责：未动过=全文、动画中=逐字切片、排空后=补满的全文。
+  // 返回 shown（永远不是 full 直通）：排空期间 enabled 已是 false，
+  // 若这里切回 full 就瞬弹。shown 的同步由 effect 全权负责。
   return shown
 }

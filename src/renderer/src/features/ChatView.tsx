@@ -414,10 +414,13 @@ function ContextUsageBar({
  *  无内联回调），内容没变的行可整行跳过重绘。 */
 const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentName: string; agentColor: string }) {
   // 流式柔和输出：只对"正在流式的助手消息"开启打字机层（完整原文已在 store 里，这里只管显示节奏）；
-  // "减少动态效果"用户直接看原文——动效偏好优先于手感
+  // "减少动态效果"用户直接看原文——动效偏好优先于手感。
+  // revealEdge 在排空期（流已结束、积压还在播）也保持开启——CodeBuddy 一整块到达的场景，
+  // 动画窗口全在排空期，这是用户能"看见"堆叠的唯一窗口
   const reducedMotion = useSettings((s) => s.prefs?.reducedMotion === true)
   const smoothOn = msg.role === 'assistant' && msg.streaming === true && !reducedMotion
   const shownText = useSmoothText(msg.text, smoothOn)
+  const revealEdge = smoothOn || (msg.role === 'assistant' && !reducedMotion && shownText.length < msg.text.length)
   if (msg.role === 'user') {
     return (
       <div className="msg user">
@@ -458,7 +461,7 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }
               <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
             ) : (
               <>
-                <MessageBody text={shownText} revealEdge={smoothOn} />
+                <MessageBody text={shownText} revealEdge={revealEdge} />
                 {msg.streaming && <span className="caret" />}
               </>
             )}
