@@ -44,3 +44,16 @@ export type RegistryItem = NonNullable<Awaited<ReturnType<typeof bridge.market.r
 
 /** 技能中心市场通道：preload 已落地，这里只是给渲染层一个稳定入口 */
 export const market = bridge.market
+
+// ---------------------------------------------------------------------------
+// 模型回复图片（image:fetch）：preload 契约已落地，这里给渲染层一个稳定入口。
+// 分工（如实标注）：主进程通道负责 SSRF 守卫、image/* 校验、5MB 上限与 LRU 缓存；
+// "该 Agent 是否开了联网（allowWeb）"的把关在渲染层——ModelImage 的 allowRemoteImages
+// prop 由调用方从 agent 配置传入，通道本身不收 agentId（渲染层传的 agentId 不可信）。
+// ---------------------------------------------------------------------------
+
+/** image:fetch 的返回形状（preload 声明的类型化镜像，供渲染层组件引用） */
+export type ImageFetchResult = { ok: boolean; dataUrl?: string; mime?: string; bytes?: number; message?: string }
+
+/** 远程图片代理通道：bridge.images 的稳定入口 */
+export const images = bridge.images

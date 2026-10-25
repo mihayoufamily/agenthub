@@ -3308,5 +3308,96 @@ console.log('\n[SK] 技能生效范围（skillUsages 事实清单 + 文案常量
     tvSrc.error === null && tvSrc.text.includes('skillPlan'), tvSrc.error ?? '缺 skillPlan')
 }
 
+// ---------- [MI] 渲染模型回复中的图片（shared 解析器纯函数 + 渲染层/主进程绊线） ----------
+// 学 [K2] 风格的独立段：行为面全部落在 out/shared/message-images.js（纯 node 可断言，
+// 不经 GUI、不真联网）；渲染层与主进程的接线用源码绊线钉住（同 [Z] 段口径）。
+console.log('\n[MI] 模型回复图片：parseMessageSegments 分段与边界 / image:fetch 守卫在场')
+{
+  let mi = null
+  try {
+    mi = await import('../out/shared/message-images.js')
+  } catch (e) {
+    ok('out/shared/message-images.js 存在（编译产物）', false, String(e && e.message))
+  }
+  if (mi) {
+    const p = mi.parseMessageSegments
+    const dump = (t) => JSON.stringify(p(t))
+    ok('纯文本原样分段（不重排、不吞字）',
+      dump('你好，今天天气不错') === JSON.stringify([{ kind: 'text', content: '你好，今天天气不错' }]),
+      dump('你好，今天天气不错'))
+    ok('标准图片（alt + data URL）解析：text/image/text 三段、origin=data、content 保真原文',
+      (() => {
+        const segs = p('看![示意图](data:image/png;base64,AAA)好了')
+        return segs.length === 3 && segs[1].kind === 'image' && segs[1].alt === '示意图' &&
+          segs[1].origin === 'data' && segs[1].src === 'data:image/png;base64,AAA' &&
+          segs[1].content === '![示意图](data:image/png;base64,AAA)'
+      })(), dump('看![示意图](data:image/png;base64,AAA)好了'))
+    ok('https 图片 + 空 alt + src 两端空白容忍（![](url) 很常见）',
+      (() => {
+        const segs = p('![](  https://a.com/b.png  )')
+        return segs.length === 1 && segs[0].kind === 'image' && segs[0].alt === '' &&
+          segs[0].origin === 'remote' && segs[0].src === 'https://a.com/b.png'
+      })(), dump('![](  https://a.com/b.png  )'))
+    ok('一行多图都解析（图与图之间的文字各成 text 段）',
+      (() => {
+        const segs = p('看![a](https://x/a.png)和![b](https://x/b.png)这两张')
+        return JSON.stringify(segs.map((s) => s.kind)) === JSON.stringify(['text', 'image', 'text', 'image', 'text']) &&
+          segs[1].src === 'https://x/a.png' && segs[3].src === 'https://x/b.png'
+      })(), dump('看![a](https://x/a.png)和![b](https://x/b.png)这两张'))
+    // 关键安全断言：围栏内的 ![x](…) 是示例代码不是图，解析成 <img> 会改写代码语义
+    ok('代码围栏内的图片语法不解析（整段按 code 段保留字面）',
+      (() => {
+        const segs = p('看这个\n```\n![x](https://x/a.png)\n```\n完')
+        return segs.length === 3 && segs[0].kind === 'text' && segs[1].kind === 'code' &&
+          segs[2].kind === 'text' && segs[1].content.includes('![x](https://x/a.png)')
+      })(), dump('看这个\n```\n![x](https://x/a.png)\n```\n完'))
+    ok('残缺语法按原文保留（流式中间态 ![...](… 不吞字、不渲染半张图）',
+      dump('看![x](https://x/a.png') === JSON.stringify([{ kind: 'text', content: '看![x](https://x/a.png' }]),
+      dump('看![x](https://x/a.png'))
+    ok('非图片协议不解析（ftp / 本地路径整段按原文，防误伤）',
+      (() => {
+        const t = '![x](ftp://x/a.png) 和 ![y](/local/path.png)'
+        const segs = p(t)
+        return segs.length === 1 && segs[0].kind === 'text' && segs[0].content === t
+      })(), dump('![x](ftp://x/a.png) 和 ![y](/local/path.png)'))
+    ok('脏输入不抛：null / 非字符串 / 空串一律空数组（消息文本来自接口流，形状不作保证）',
+      (() => {
+        try {
+          return p(null).length === 0 && p(42).length === 0 && p({}).length === 0 && p(undefined).length === 0 && p('').length === 0
+        } catch { return false }
+      })(), '脏入参抛了异常')
+    ok('isValidImageSrc 边界：data:image/* 与 http(s) 过，data:text、ftp、相对路径、空串拒',
+      mi.isValidImageSrc('data:image/png;base64,AAA') && mi.isValidImageSrc('https://a.com/b.png') &&
+        mi.isValidImageSrc('http://a.com/b.png') && !mi.isValidImageSrc('data:text/html,x') &&
+        !mi.isValidImageSrc('ftp://x/a.png') && !mi.isValidImageSrc('/local/path.png') &&
+        !mi.isValidImageSrc('') && !mi.isValidImageSrc(undefined),
+      '边界判定与契约不符')
+    ok('isRemoteImageSrc 边界：仅 http(s) 为真（data: 图不需要走下载通道）',
+      mi.isRemoteImageSrc('https://a.com/b.png') && mi.isRemoteImageSrc('http://a.com/b.png') &&
+        !mi.isRemoteImageSrc('data:image/png;base64,AAA') && !mi.isRemoteImageSrc('') &&
+        !mi.isRemoteImageSrc(undefined),
+      '边界判定与契约不符')
+  }
+
+  // 绊线（源码级，同 [Z] 段口径）：接线断了这四条立刻红，行为的另一半由真机套件覆盖
+  const cvSrcMI = readSrcSafe('src/renderer/src/features/ChatView.tsx')
+  ok('绊线：MessageBody 源码引用 parseMessageSegments（分段唯一真相，不许在组件里再 split 一份）',
+    cvSrcMI.error === null && cvSrcMI.text.includes('parseMessageSegments') &&
+      cvSrcMI.text.includes('allowRemoteImages') && cvSrcMI.text.includes('allowWeb'),
+    cvSrcMI.error ?? '缺 parseMessageSegments / allowRemoteImages / allowWeb')
+  const tvSrcMI = readSrcSafe('src/renderer/src/features/TaskView.tsx')
+  ok('绊线：TaskView 卡片结论改用 MessageBody（卡片与气泡同一渲染口径）',
+    tvSrcMI.error === null && tvSrcMI.text.includes('<MessageBody'), tvSrcMI.error ?? 'TaskView 未引用 MessageBody')
+  const ipcSrcMI = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：image:fetch 通道含 isNonPublicHost 与 5MB 上限（SSRF 守卫在场，不许裸奔下载）',
+    ipcSrcMI.error === null && ipcSrcMI.text.includes("'image:fetch'") &&
+      ipcSrcMI.text.includes('isNonPublicHost') && /IMG_MAX_BYTES\s*=\s*5 \* 1024 \* 1024/.test(ipcSrcMI.text),
+    ipcSrcMI.error ?? '缺 image:fetch / isNonPublicHost / IMG_MAX_BYTES')
+  const preloadSrcMI = readSrcSafe('src/preload/index.ts')
+  ok('绊线：preload 暴露 images.fetch（渲染层唯一入口，不经手明文以外的下载细节）',
+    preloadSrcMI.error === null && preloadSrcMI.text.includes("invoke('image:fetch'"),
+    preloadSrcMI.error ?? 'preload 缺 image:fetch 调用')
+}
+
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

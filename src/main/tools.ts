@@ -136,8 +136,10 @@ export function isNonPublicHost(hostname: string): boolean {
  * 所以校验通过之后、Chromium 连接层自己再解析一次之前，仍存在一次重新解析的机会——
  * 一个解析期间只在**第二跳**给出内网地址的恶意权威 DNS 仍可能把连接带进内网。本层能做的
  * （全地址校验 + 跳转后按最终地址复核 + 响应体不外传）都已就位，窗口只剩这一条窄缝。
+ * 导出仅为复用：ipc.ts 的 image:fetch（模型回复图片代理）与 web_fetch 走同一份 SSRF
+ * 判定（isNonPublicHost + DNS 全地址复核），留两份实现必然漂移。
  */
-async function safeWebUrl(raw: unknown): Promise<string | null> {
+export async function safeWebUrl(raw: unknown): Promise<string | null> {
   if (typeof raw !== 'string' || !raw.trim()) return null
   let u: URL
   try { u = new URL(raw.trim()) } catch { return null }

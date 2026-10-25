@@ -20,6 +20,8 @@ import { digestThinking } from '../lib/thinking'
 import { useSmoothText } from '../lib/smoothText'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
 import { contextWindowOf, estimateTokens, estimateCost, fmtCost, visionOf } from '@shared/pricing'
+// 模型回复图片：分段解析与地址判定在 shared（渲染层与主进程 image:fetch 通道同一份口径）
+import { parseMessageSegments, isRemoteImageSrc } from '@shared/message-images'
 // 工具卡里回显 Hook 命令走与设置页**同一个**显示口径（修复波 A · 项 6）：
 // 命令里可能带 token，而这张卡同样会被截图/分享——spec A5 关心的正是这一点。
 import { redactCommandForDisplay } from '@shared/approvals'
@@ -265,7 +267,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
             </button>
           )}
           {messages.slice(-visibleCount).map((m) => (
-            <MessageRow key={m.id} msg={m} agentName={agent.name} agentColor={colorOf(agent.id)} />
+            <MessageRow key={m.id} msg={m} agentName={agent.name} agentColor={colorOf(agent.id)} allowRemoteImages={!!agent.tools?.allowWeb} />
           ))}
         </div>
       </div>
@@ -411,8 +413,8 @@ function ContextUsageBar({
 
 /** memo：流式期间 store 每个 delta 都会重渲染 ChatView，整张消息列表跟着重跑。
  *  props 全是稳定值（msg 引用 store 只在该条变化时替换，agentName/agentColor 是字符串，
- *  无内联回调），内容没变的行可整行跳过重绘。 */
-const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentName: string; agentColor: string }) {
+ *  allowRemoteImages 是布尔，无内联回调），内容没变的行可整行跳过重绘。 */
+const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor, allowRemoteImages }: { msg: ChatMessage; agentName: string; agentColor: string; allowRemoteImages: boolean }) {
   // 流式柔和输出：只对"正在流式的助手消息"开启打字机层（完整原文已在 store 里，这里只管显示节奏）；
   // "减少动态效果"用户直接看原文——动效偏好优先于手感。
   // revealEdge 在排空期（流已结束、积压还在播）也保持开启——CodeBuddy 一整块到达的场景，
@@ -461,7 +463,7 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }
               <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
             ) : (
               <>
-                <MessageBody text={shownText} revealEdge={revealEdge} />
+                <MessageBody text={shownText} revealEdge={revealEdge} allowRemoteImages={allowRemoteImages} />
                 {msg.streaming && <span className="caret" />}
               </>
             )}
@@ -586,33 +588,118 @@ function SessionPanel({ list, activeId, anchorRef, onSwitch, onNew, onRename, on
   )
 }
 
-/** 文本 + ```代码块``` 渲染（代码块带复制按钮，不横向撑破）；
- *  revealEdge：流式揭示边缘的逐字淡入（只作用于最后一段纯文本——揭示边缘永远在那里） */
-export function MessageBody({ text, revealEdge }: { text: string; revealEdge?: boolean }) {
-  const parts = text.split(/```/g)
-  const lastTextPart = revealEdge ? parts.reduce((acc, p, i) => (i % 2 !== 1 ? i : acc), -1) : -1
+/** ---------- 模型回复图片（ModelImage） ----------
+ *  data: 来源直接 <img>（已是内嵌数据，无网络行为）；remote 走主进程 image:fetch 代理
+ *  （SSRF 守卫与上限在通道侧，见 ipc.ts 的注释）。渲染层再做一层结果缓存（url → 结果）：
+ *  同一张图渲染多次不重复走通道；失败结果也缓存住，避免每帧重试把通道打成重试风暴。
+ *  allowRemoteImages=false（该 Agent 未开联网）时远程图渲染为占位块，原链接可复制——
+ *  把关在渲染层是如实取舍：通道侧没有可信 agentId（渲染层传什么就是什么），
+ *  与其在主进程做一道"假授权校验"，不如把边界写明。 */
+type RemoteImageState = { state: 'loading' } | { state: 'ok'; dataUrl: string } | { state: 'fail'; message: string }
+const remoteImageCache = new Map<string, RemoteImageState>()
+const remoteImagePending = new Map<string, Promise<RemoteImageState>>()
+
+function loadRemoteImage(src: string): Promise<RemoteImageState> {
+  const pending = remoteImagePending.get(src)
+  if (pending) return pending
+  const p = bridge.images
+    .fetch(src)
+    .then((r): RemoteImageState => {
+      const st: RemoteImageState = r.ok && r.dataUrl ? { state: 'ok', dataUrl: r.dataUrl } : { state: 'fail', message: r.message ?? '下载失败' }
+      remoteImageCache.set(src, st)
+      return st
+    })
+    .catch((e): RemoteImageState => {
+      const st: RemoteImageState = { state: 'fail', message: (e as Error)?.message ?? '下载失败' }
+      remoteImageCache.set(src, st)
+      return st
+    })
+  remoteImagePending.set(src, p.finally(() => { remoteImagePending.delete(src) }))
+  return remoteImagePending.get(src)!
+}
+
+/** 图片占位块：alt + 一行原因 + 原链接可复制（不给"图片坏了"这种没有出路的死块） */
+function ImagePlaceholder({ alt, note, src }: { alt?: string; note: string; src: string }) {
+  return (
+    <div style={{ margin: '6px 0', padding: '8px 10px', borderRadius: 'var(--r-sm)', border: '1px dashed var(--border)', fontSize: 12, lineHeight: 1.6 }}>
+      <div style={{ color: 'var(--text-2)' }}>{alt || '（模型给出的图片）'}</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', color: 'var(--text-3)' }}>
+        <span>{note}</span>
+        <button className="link-btn" onClick={() => void navigator.clipboard.writeText(src)}>复制链接</button>
+      </div>
+    </div>
+  )
+}
+
+const MODEL_IMG_STYLE: React.CSSProperties = { maxWidth: '100%', borderRadius: 8, margin: '6px 0', display: 'block' }
+
+export function ModelImage({ src, alt, allowRemoteImages }: { src: string; alt?: string; allowRemoteImages?: boolean }) {
+  const remote = isRemoteImageSrc(src)
+  const [state, setState] = useState<RemoteImageState>(() => remoteImageCache.get(src) ?? { state: 'loading' })
+  useEffect(() => {
+    if (!remote || !allowRemoteImages) return
+    const cur = remoteImageCache.get(src)
+    if (cur) { setState(cur); return }
+    setState({ state: 'loading' })
+    let alive = true
+    void loadRemoteImage(src).then((st) => { if (alive) setState(st) })
+    return () => { alive = false }
+  }, [src, remote, allowRemoteImages])
+  if (!remote) {
+    // data: 图：内嵌数据直接渲染（isValidImageSrc 已在解析层保证非 remote 即 data:image/）
+    return <img src={src} alt={alt ?? ''} style={MODEL_IMG_STYLE} loading="lazy" />
+  }
+  if (!allowRemoteImages) {
+    return <ImagePlaceholder alt={alt} note="远程图片未加载（该 Agent 未开启联网）" src={src} />
+  }
+  if (state.state === 'loading') {
+    return <div style={{ margin: '6px 0', fontSize: 12, color: 'var(--text-3)' }}>图片加载中…</div>
+  }
+  if (state.state === 'fail') {
+    return <ImagePlaceholder alt={alt} note={state.message} src={src} />
+  }
+  return (
+    <img
+      src={state.dataUrl}
+      alt={alt ?? ''}
+      style={{ ...MODEL_IMG_STYLE, cursor: 'pointer' }}
+      loading="lazy"
+      title="点击在浏览器中打开原图"
+      onClick={() => void bridge.app.openExternal(src)}
+    />
+  )
+}
+
+/** 文本 + ```代码块``` + ![图片]() 渲染（代码块带复制按钮，不横向撑破）；
+ *  分段交给 shared 的 parseMessageSegments（与旧 split(/```/g) 结构同构：奇数段代码、
+ *  偶数段文本，文本里再解析图片；围栏内的图片语法不解析）。
+ *  revealEdge：流式揭示边缘的逐字淡入，落在**最后一个 text 段**上——与解析器对齐后，
+ *  回复可能以图片收尾（最后一段是 image），那时边缘退到它前面最后一个文本段即可；
+ *  图片本身不参与打字机节奏（一次性渲染，data URL 逐字揭示只会看到半个 base64 串）。 */
+export function MessageBody({ text, revealEdge, allowRemoteImages }: { text: string; revealEdge?: boolean; allowRemoteImages?: boolean }) {
+  const segs = parseMessageSegments(text)
+  const lastTextSeg = revealEdge ? segs.reduce((acc, s, i) => (s.kind === 'text' ? i : acc), -1) : -1
   return (
     <>
-      {parts.map((p, i) => {
-        if (i % 2 !== 1) {
-          return (
-            <React.Fragment key={i}>
-              {i === lastTextPart ? <FadeTail text={p} enabled={revealEdge} /> : p}
-            </React.Fragment>
-          )
+      {segs.map((seg, i) => {
+        if (seg.kind === 'text') {
+          return i === lastTextSeg
+            ? <FadeTail key={i} text={seg.content} enabled={revealEdge} />
+            : <React.Fragment key={i}>{seg.content}</React.Fragment>
         }
-        // 复制与显示用同一份剥过语言行的文本：原先复制的是原文，比屏幕上多一行语言标识
-        // （无语言块则是多一个空行），粘出来就对不上所见
-        const body = p.replace(/^\w*\n/, '')
+        if (seg.kind === 'image') {
+          return <ModelImage key={i} src={seg.src ?? ''} alt={seg.alt} allowRemoteImages={allowRemoteImages} />
+        }
+        // content 已在解析层剥过语言行：复制与显示用同一份文本（无语言块则是多一个空行的旧账已清）
         return (
           <div key={i} className="codeblock" style={{ margin: '8px 0' }}>
             <button
               className="copy"
-              onClick={() => void navigator.clipboard.writeText(body)}
+              onClick={() => void navigator.clipboard.writeText(seg.content)}
             >
               复制
             </button>
-            {body}
+            {seg.content}
           </div>
         )
       })}

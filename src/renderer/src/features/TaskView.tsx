@@ -1,6 +1,6 @@
 // 工作流任务视图：顶部任务状态条 + 角色卡片流 + 人工确认门 + 交付卡片 + 底部补充输入
 import React, { useEffect, useRef, useState } from 'react'
-import type { RoleCard as RoleCardType, WorkflowRun, Stage } from '@shared/types'
+import type { RoleCard as RoleCardType, WorkflowRun, WorkflowConfig, Stage } from '@shared/types'
 import { useWorkflow } from '../stores/workflow'
 import { useUi } from '../stores/ui'
 import { Icon } from '../components/Icons'
@@ -15,7 +15,10 @@ import { SKILL_SOURCE_LABELS } from '@shared/skill-usages'
 import { hasExitCard, planAuditOf, type PlanCliDelta } from '@shared/engine-transitions'
 import { pickUnregistered, unregisteredNote } from '@shared/delivery-dir'
 import { useSmoothText } from '../lib/smoothText'
-import { FadeTail } from '../components/FadeTail'
+// 卡片结论复用气泡的 MessageBody（分段渲染代码块与图片）：卡片与气泡同一渲染口径，
+// 模型在两种视图下给出的图/代码长一个样
+import { MessageBody } from './ChatView'
+import { useAgents } from '../stores/agents'
 import { useSettings } from '../stores/settings'
 import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls, safeName } from '../lib/utils'
@@ -217,7 +220,7 @@ export function TaskView() {
         <div className="wf-cards">
           <div className="wf-user-msg">{run.goal}</div>
           {run.cards.map((c) => (
-            <CardRenderer key={c.id} card={c} run={run} />
+            <CardRenderer key={c.id} card={c} run={run} config={config} />
           ))}
           {run.gate && run.status === 'waiting_user' && <GateCard run={run} />}
           {run.status === 'rework_limit' && <ReworkLimitCard run={run} />}
@@ -415,7 +418,13 @@ function AcceptanceList({ run }: { run: WorkflowRun }) {
   )
 }
 
-function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
+function CardRenderer({ card, run, config }: { card: RoleCardType; run: WorkflowRun; config: WorkflowConfig }) {
+  // 卡片结论里的远程图片也要看该 Agent 的联网授权（allowWeb）：卡片上只有 agentName，
+  // 最近便的取法是按角色从工作流配置拿 agentId 再查 Agent。角色换过人的旧任务以当前
+  // 配置为准——这是"最近便"的如实取舍，不假装能追溯历史快照（run 上没拍 agentId 快照）
+  const agents = useAgents((s) => s.agents)
+  const roleAgentId = card.role === 'planner' || card.role === 'executor' || card.role === 'reviewer' ? config[card.role]?.agentId : undefined
+  const allowRemoteImages = !run.demo && !!agents.find((a) => a.id === roleAgentId)?.tools?.allowWeb
   // 流式柔和输出（与工作站气泡同一节奏）：hooks 必须在 delivery 早退之前——
   // 交付卡不用卡片正文流式（它读 run 级内容），enabled=false 即直通。
   // 排空期（流已结束、积压还在播）也保持淡入边缘开启——一整块到达场景的动画窗口全在这里
@@ -456,7 +465,8 @@ function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
             <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
           ) : (
             <>
-              <FadeTail text={shownConclusion} enabled={revealEdge} />
+              {/* revealEdge 直传 MessageBody：淡入边缘落在最后一个 text 段（结论以图收尾时同理） */}
+              <MessageBody text={shownConclusion} revealEdge={revealEdge} allowRemoteImages={allowRemoteImages} />
               {card.status === 'streaming' && <span className="caret" />}
             </>
           )}

@@ -11,7 +11,8 @@ import { configurePriceOverrides, partitionPriceOverrides } from '../shared/over
 import { partitionHookRules, sanitizeHookList } from '../shared/hooks'
 import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
 import { normalizePolicy, VERIFY_SWITCH } from '../shared/compat'
-import { execTool, sandboxPath, type CommandApprover } from './tools'
+import { execTool, sandboxPath, isNonPublicHost, safeWebUrl, type CommandApprover } from './tools'
+import { isValidImageSrc, isRemoteImageSrc } from '../shared/message-images'
 import * as approvals from './approvals'
 import * as mcp from './mcp'
 import * as checkpoints from './checkpoints'
@@ -839,6 +840,109 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       })
     })
   }
+
+  // ---------- 模型回复图片代理（image:fetch） ----------
+  /**
+   * 渲染模型回复中的远程图片：主进程代为 GET 并转 base64 data URL（渲染进程自身不带外网权限）。
+   * 信任边界（如实写，不装糊涂）：tools:exec 的教训是"渲染层自构造 grant"，那条通道因此只在
+   * 验证态注册。本通道不收 grant、不执行任何东西、不落盘——只做"下载一张图转 data URL"，风险
+   * 等级完全不同，所以常态注册。**allowWeb（该 Agent 是否开启联网）的校验留在渲染层**
+   * （MessageBody 的 allowRemoteImages prop，由调用方从 agent 配置取）：通道侧没有可信的
+   * agentId——渲染层传什么就是什么，照单全收等于把授权判定又交回给被授权方（同一个洞）。
+   * 这层能守住的是平台级底线：① 只收 http(s) 图片链接（data: 图不需要下载）；② SSRF 守卫与
+   * web_fetch 同一份实现（isNonPublicHost 第一跳直判 + safeWebUrl 的 DNS 全地址复核与跳转后
+   * 复核）；③ 响应必须 image/* 且 ≤5MB；④ 逐块限量读取，超大响应不会撑爆主进程。
+   */
+  const IMG_MAX_BYTES = 5 * 1024 * 1024
+  const IMG_TIMEOUT_MS = 15_000
+  const IMG_UA = 'AgentHub-Updater' // UA 同 updater（更新器已用此标识与 GitHub 通信）
+  /**
+   * 进程内 LRU 缓存（键 = url）：同一张图渲染多次不重复下载。
+   * 只存内存不落盘——图片是"回复的一次渲染"，重启后重拉是可接受的语义，落盘反而要把
+   * "模型给过的外链"变成持久数据。条数 ≤24 / 总量 ≤24MB，超限从最旧端淘汰。
+   */
+  const imgCache = new Map<string, { dataUrl: string; mime: string; bytes: number }>()
+  const IMG_CACHE_MAX_ENTRIES = 24
+  const IMG_CACHE_MAX_BYTES = 24 * 1024 * 1024
+  let imgCacheBytes = 0
+  const imgCachePut = (url: string, entry: { dataUrl: string; mime: string; bytes: number }) => {
+    const old = imgCache.get(url)
+    if (old) { imgCacheBytes -= old.bytes; imgCache.delete(url) }
+    imgCache.set(url, entry)
+    imgCacheBytes += entry.bytes
+    while ((imgCache.size > IMG_CACHE_MAX_ENTRIES || imgCacheBytes > IMG_CACHE_MAX_BYTES) && imgCache.size > 0) {
+      const oldest = imgCache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      imgCacheBytes -= imgCache.get(oldest)!.bytes
+      imgCache.delete(oldest)
+    }
+  }
+  /** 二进制版限量读取（tools.ts 的 readBodyCapped 是文本口径且未导出，这里是图片字节流的最小实现） */
+  const readImageCapped = async (res: Response, limit: number): Promise<Buffer | null> => {
+    if (!res.body) return null
+    const reader = res.body.getReader()
+    const chunks: Uint8Array[] = []
+    let len = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) return Buffer.concat(chunks.map((c) => Buffer.from(c)), len)
+      if (!value) continue
+      if (len + value.length > limit) {
+        void reader.cancel().catch(() => { /* 已放弃剩余内容 */ })
+        return null
+      }
+      chunks.push(value)
+      len += value.length
+    }
+  }
+  ipcMain.handle('image:fetch', async (_e, rawUrl: unknown) => {
+    if (typeof rawUrl !== 'string' || !rawUrl.trim()) return { ok: false, message: '链接为空' }
+    const url = rawUrl.trim()
+    if (!isValidImageSrc(url) || !isRemoteImageSrc(url)) {
+      return { ok: false, message: '只代理 http(s) 图片链接（data: 图无需下载）' }
+    }
+    const hit = imgCache.get(url)
+    if (hit) return { ok: true, dataUrl: hit.dataUrl, mime: hit.mime, bytes: hit.bytes }
+    // 第一跳 hostname 直判：命中内网/环回给点名文案，让"模型指内网"这件事对用户可见
+    try {
+      if (isNonPublicHost(new URL(url).hostname)) {
+        return { ok: false, message: '拒绝：模型给出的地址指向内网/本机（SSRF 已拦截）' }
+      }
+    } catch {
+      return { ok: false, message: '链接无法解析' }
+    }
+    // DNS 复核与 web_fetch 同一份 safeWebUrl：all:true 拿全部地址，任一命中内网即拒
+    const checked = await safeWebUrl(url)
+    if (!checked) return { ok: false, message: '拒绝：模型给出的地址指向内网，或域名解析失败（SSRF 已拦截）' }
+    const { net } = require('electron') as typeof import('electron')
+    try {
+      const res = await net.fetch(checked, {
+        redirect: 'follow',
+        signal: AbortSignal.timeout(IMG_TIMEOUT_MS),
+        headers: { 'User-Agent': IMG_UA, Accept: 'image/*' }
+      })
+      // 跳转后按最终落点复核（与 webGet 同口径）：跳进内网的响应体不返回给渲染层
+      if (!(await safeWebUrl(res.url || checked))) {
+        return { ok: false, message: '拒绝：跳转后指向内网/本机（SSRF 已拦截，图片未返回）' }
+      }
+      if (!res.ok) return { ok: false, message: `HTTP ${res.status} ${res.statusText}` }
+      const mime = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+      if (!mime.startsWith('image/')) {
+        return { ok: false, message: `响应不是图片（Content-Type: ${mime || '未知'}）` }
+      }
+      const declared = Number(res.headers.get('content-length') ?? 0)
+      if (Number.isFinite(declared) && declared > IMG_MAX_BYTES) {
+        return { ok: false, message: '图片超过 5MB 上限，未下载' }
+      }
+      const buf = await readImageCapped(res, IMG_MAX_BYTES)
+      if (!buf || buf.length === 0) return { ok: false, message: '图片超过 5MB 上限，或响应为空' }
+      const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+      imgCachePut(url, { dataUrl, mime, bytes: buf.length })
+      return { ok: true, dataUrl, mime, bytes: buf.length }
+    } catch (e) {
+      return { ok: false, message: `下载失败：${(e as Error)?.message ?? '未知网络错误'}` }
+    }
+  })
 
   // ---------- 改动检查点（回滚） ----------
   ipcMain.handle('checkpoint:manifest', async (_e, id: string) => {

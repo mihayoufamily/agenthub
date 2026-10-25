@@ -262,6 +262,13 @@ const api = {
       }>,
     pickDir: () => ipcRenderer.invoke('dialog:pickDir') as Promise<string | null>
   },
+  /** 模型回复图片代理（image:fetch）：主进程按 web_fetch 同口径做 SSRF 守卫后下载并转
+   *  base64 data URL；只收 http(s) 图片链接，响应必须 image/* 且 ≤5MB，进程内 LRU 缓存。
+   *  allowWeb（该 Agent 是否开启联网）的把关在渲染层（ModelImage 的 allowRemoteImages prop） */
+  images: {
+    fetch: (url: string) =>
+      ipcRenderer.invoke('image:fetch', url) as Promise<{ ok: boolean; dataUrl?: string; mime?: string; bytes?: number; message?: string }>
+  },
   artifacts: {
     /** 当前生效的工作流产物目录（用户在执行设置里选的；未选为主进程默认值） */
     dir: () => ipcRenderer.invoke('artifact:dir') as Promise<string>,    /** 由 AgentHub 落盘一篇文本产物：固定写入工作流产物目录，渲染层只能给文件名 */
