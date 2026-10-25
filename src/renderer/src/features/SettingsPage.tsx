@@ -727,10 +727,13 @@ function McpSection() {
   useEffect(load, [])
 
   const save = async (next: McpServer[]) => {
-    const r = await bridge.mcp.set(next)
-    setList(r.list)
+    // 内置条目只读：提交整表时剥掉（主进程闸门对伪造 builtin 也会点名拒收），回显时再拼回最前
+    const builtin = next.filter((s) => s.builtin === 'basic')
+    const r = await bridge.mcp.set(next.filter((s) => s.builtin !== 'basic'))
+    const merged = [...builtin, ...r.list]
+    setList(merged)
     setRejected(r.rejected ?? [])
-    return r.list
+    return merged
   }
 
   const patch = (id: string, p: Partial<McpServer>) => {
@@ -846,6 +849,24 @@ function McpSection() {
       {list.map((s) => {
         const p = probes[s.id]
         const users = usedBy(s.id)
+        // 内置基础组：只读行——不可删改、不可停用，也没有信任一说（进程内实现，随应用发布）
+        if (s.builtin === 'basic') {
+          return (
+            <div key={s.id} data-mcp-row data-mcp-builtin style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <b style={{ fontSize: 13 }}>{s.name}</b>
+                <Badge tone="ok">内置 · 随应用更新</Badge>
+                <Badge tone="ok">进程内实现，无需信任</Badge>
+                {users.length > 0 && <span style={{ fontSize: 11.5, color: 'var(--text-3)' }}>被 {users.join('、')} 勾选</span>}
+                <span style={{ flex: 1 }} />
+                <Button variant="ghost" onClick={() => void probe(s)} disabled={busy === s.id}>{busy === s.id ? '连接中…' : '连接并查看工具'}</Button>
+              </div>
+              <code style={{ display: 'block', fontSize: 11.5, marginTop: 4, wordBreak: 'break-all', color: 'var(--text-2)' }}>
+                now（当前时间/时区换算）· memory_save（存跨会话要点）· memory_list（查长期记忆）——在 Agent 的「文件/命令工具」面板勾选启用
+              </code>
+            </div>
+          )
+        }
         return (
           <div key={s.id} data-mcp-row style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

@@ -10,7 +10,7 @@
  * 信任标记存在主进程 approvals.json，渲染层改不动，免得配置通道变成"自我授权"。
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import type { McpServer, McpProbe } from '../shared/types'
+import type { McpServer, McpProbe, MemoryEntry } from '../shared/types'
 import { cmdUnsafeReason, needsComspec } from '../shared/argv'
 import { validHttpUrl } from '../shared/mcp-list'
 
@@ -159,7 +159,9 @@ export class McpClient {
   protected constructor(readonly server: McpServer, private timeoutMs: number) {}
 
   static async connect(server: McpServer): Promise<{ client: McpClient; info: { title?: string; version?: string } }> {
-    // 分流点：http 记录交给 HttpMcpClient（返回类型是 McpClient 的子类，调用方类型零改动）
+    // 分流点一：内置组交给 BuiltinMcpClient（进程内实现，零子进程，免信任弹窗）
+    if (server.builtin === 'basic') return BuiltinMcpClient.connect(server)
+    // 分流点二：http 记录交给 HttpMcpClient（返回类型是 McpClient 的子类，调用方类型零改动）
     if (server.transport === 'http') return HttpMcpClient.connect(server)
     const c = new McpClient(server, server.timeoutMs && server.timeoutMs > 0 ? server.timeoutMs : DEFAULT_TIMEOUT)
     c.start()
@@ -536,10 +538,150 @@ function httpDisplay(s: McpServer): string {
  * 「实际执行」预览同口径）；http 没有命令行，等价物是目标地址（httpDisplay）。
  */
 export function trustCommand(s: McpServer): string {
+  if (s.builtin === 'basic') return '（内置：随应用发布的进程内实现，不经外部进程，无需信任确认）'
   if (s.transport === 'http') return httpDisplay(s)
   return s.launch?.bin
     ? JSON.stringify([s.launch.bin, ...(Array.isArray(s.launch.args) ? s.launch.args : [])])
     : `${(s.command ?? '').trim()}${s.legacyInvalid ? '（已停用，v0.4.0 不再用旧单命令启动）' : ''}`
+}
+
+// ---------- 内置基础组（builtin-basic）：进程内实现，零子进程，随应用发布 ----------
+//
+// 信任口径：与内置工具（execTool）同级——代码随应用发布、不经外部进程、不需要首次连接确认。
+// 这份"免信任"只认主进程合成的 BUILTIN_MCP_BASIC 常量：配置/提交里出现 builtin 字段的
+// 条目会被 shared/mcp-list 的闸门剥掉或点名拒收，渲染层伪造不出这个身份。
+// 工具循环、Hook、计划态整组禁用等既有管线对它照常生效（走 McpClient 同一形状）。
+
+/** 内置基础组的虚拟配置：mcp:list 合成清单用。command 字段是只读说明，不参与任何启动逻辑 */
+export const BUILTIN_MCP_BASIC: McpServer = {
+  id: 'builtin-basic',
+  name: '内置基础（时间 · 记忆）',
+  builtin: 'basic',
+  command: '（内置：随应用提供，无需配置）',
+  enabled: true
+}
+
+/** 长期记忆存取注入：ipc 装配时绑定 store，逻辑层测试注入内存 fake。读写都是同步小操作 */
+let memoryAccess: { get: () => MemoryEntry[]; add: (text: string, kind: MemoryEntry['kind']) => MemoryEntry } | null = null
+export function bindBuiltinMemory(access: { get: () => MemoryEntry[]; add: (text: string, kind: MemoryEntry['kind']) => MemoryEntry }) {
+  memoryAccess = access
+}
+
+const BUILTIN_BASIC_TOOLS: McpToolInfo[] = [
+  {
+    name: 'now',
+    description: '获取当前日期与时间（模型自己不知道现在几点——凡涉时效性、日程、时间计算的问题先调它）。可选传 IANA 时区名换算（如 Asia/Shanghai、America/New_York），format 可选 date/time/datetime',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timezone: { type: 'string', description: 'IANA 时区名；缺省用本机时区' },
+        format: { type: 'string', enum: ['datetime', 'date', 'time'], description: '缺省 datetime' }
+      }
+    }
+  },
+  {
+    name: 'memory_save',
+    description: '把跨会话需要记住的要点存入长期记忆：用户的目标、偏好、约束、关键决定、重要事实。每条一句话，宁短勿长',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '要记住的要点，一句话' },
+        kind: { type: 'string', enum: ['goal', 'constraint', 'decision', 'summary'], description: '缺省 summary' }
+      },
+      required: ['text']
+    }
+  },
+  {
+    name: 'memory_list',
+    description: '检索跨会话积累的长期记忆（用户目标/偏好/约定/决定）。回答涉及用户背景的问题前先查一次',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        keyword: { type: 'string', description: '关键词过滤（不区分大小写）；缺省返回全部' },
+        limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50' }
+      }
+    }
+  }
+]
+
+const MEMORY_KINDS: MemoryEntry['kind'][] = ['goal', 'constraint', 'decision', 'progress', 'review', 'confirm', 'summary']
+
+/** tools/call 的进程内分发。返回 MCP result 形状，走与 stdio/http 同一份 toolOutputFrom 解析 */
+function builtinCall(params: { name?: string; arguments?: Record<string, unknown> }): { content: { type: 'text'; text: string }[]; isError?: boolean } {
+  const name = String(params?.name ?? '')
+  const args = params?.arguments ?? {}
+  const reply = (text: string, isError = false): { content: { type: 'text'; text: string }[]; isError?: boolean } =>
+    ({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) })
+  try {
+    if (name === 'now') {
+      const tz = typeof args.timezone === 'string' && args.timezone.trim() ? args.timezone.trim() : undefined
+      const fmt = args.format === 'date' || args.format === 'time' ? args.format : 'datetime'
+      const opts: Intl.DateTimeFormatOptions =
+        fmt === 'date'
+          ? { year: 'numeric', month: '2-digit', day: '2-digit', ...(tz ? { timeZone: tz } : {}) }
+          : fmt === 'time'
+            ? { hour: '2-digit', minute: '2-digit', second: '2-digit', ...(tz ? { timeZone: tz } : {}) }
+            : { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', ...(tz ? { timeZone: tz } : {}) }
+      // 非法时区名会让 Intl 抛 RangeError——被外层 catch 如实报给模型，不猜着纠正
+      const zone = tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone
+      return reply(`当前时间（${zone}）：${new Intl.DateTimeFormat('zh-CN', opts).format(new Date())}\nUTC：${new Date().toISOString()}`)
+    }
+    if (name === 'memory_save') {
+      const text = typeof args.text === 'string' ? args.text.trim() : ''
+      if (!text) return reply('text 不能为空：要记住的要点（一句话）', true)
+      if (text.length > 500) return reply('单条记忆太长（上限 500 字），请拆成要点再存', true)
+      const kind = MEMORY_KINDS.includes(args.kind as MemoryEntry['kind']) ? (args.kind as MemoryEntry['kind']) : 'summary'
+      if (!memoryAccess) return reply('长期记忆存储尚未初始化（应用装配未完成）', true)
+      const entry = memoryAccess.add(text, kind)
+      return reply(`已记住（${entry.kind} · ${entry.id}）：${text}`)
+    }
+    if (name === 'memory_list') {
+      if (!memoryAccess) return reply('长期记忆存储尚未初始化（应用装配未完成）', true)
+      const kw = typeof args.keyword === 'string' ? args.keyword.trim().toLowerCase() : ''
+      const limit = Math.min(Math.max(Number(args.limit) || 10, 1), 50)
+      const all = memoryAccess.get()
+      const hits = (kw ? all.filter((m) => (m.text ?? '').toLowerCase().includes(kw)) : [...all]).slice(-limit).reverse()
+      return reply(hits.length ? hits.map((m) => `[${m.kind}] ${m.text}`).join('\n') : kw ? `（没有包含「${kw}」的长期记忆）` : '（长期记忆还是空的）')
+    }
+    return reply(`内置基础组没有这个工具：${name}`, true)
+  } catch (e) {
+    return reply(`内置工具执行失败：${(e as Error).message}`, true)
+  }
+}
+
+/** 内置基础组客户端：request 直接进程内分发，initialize/tools/list/tools/call 全部同步即可完成 */
+export class BuiltinMcpClient extends McpClient {
+  private constructor(server: McpServer) {
+    // 第二个参数是 stdio 的默认超时，内置路径没有网络与进程等待，用不上
+    super(server, 0)
+  }
+
+  static async connect(server: McpServer): Promise<{ client: BuiltinMcpClient; info: { title?: string; version?: string } }> {
+    return { client: new BuiltinMcpClient(server), info: { title: 'AgentHub 内置基础组', version: '1.0' } }
+  }
+
+  protected override request(method: string, params?: unknown): Promise<unknown> {
+    if (method === 'initialize') {
+      return Promise.resolve({
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: { title: 'AgentHub 内置基础组', name: 'builtin-basic', version: '1.0' }
+      })
+    }
+    if (method === 'tools/list') return Promise.resolve({ tools: BUILTIN_BASIC_TOOLS })
+    if (method === 'tools/call') return Promise.resolve(builtinCall(params as { name?: string; arguments?: Record<string, unknown> }))
+    // 与 mock server 同口径：未实现的方法如实报错（tools-only 子集，不接 prompts/resources）
+    return Promise.reject(new Error(`内置基础组未实现方法：${method}`))
+  }
+
+  /** 进程内没有可泄漏的后台资源：close 只翻状态位（running 断言用同一口径） */
+  override get running() {
+    return !this.closed
+  }
+
+  override close() {
+    this.closed = true
+  }
 }
 
 

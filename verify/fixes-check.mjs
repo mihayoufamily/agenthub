@@ -3502,5 +3502,78 @@ console.log('\n[OM] 官方模型服务：parseOfficialModelsIndex 闸门 / offic
     oaSrcOM.error ?? 'testConnection 不读错误正文')
 }
 
+// ---------- [BM] 内置 MCP 基础组（进程内）+ 新 Agent 默认工具 ----------
+// 行为面：out/shared/default-tools.js（纯函数）+ out/main/mcp.js 的 BuiltinMcpClient
+// （进程内实现，纯 node 可连可调，注入内存 fake 做记忆往返）；接线用源码绊线钉住。
+console.log('\n[BM] 内置 MCP 基础组与默认工具授权')
+{
+  const dt = await import('../out/shared/default-tools.js')
+  ok('buildDefaultTools：沙箱 + 联网默认开，命令不默认开（allowCommands 缺席）',
+    (() => {
+      const t = dt.buildDefaultTools('D:\\ws\\测试 Agent')
+      return t.access === 'sandbox' && t.allowWeb === true && t.allowCommands === undefined && !t.commandPolicy && t.dir === 'D:\\ws\\测试 Agent'
+    })(), JSON.stringify(dt.buildDefaultTools('D:\\x')))
+
+  const mlist = await import('../out/shared/mcp-list.js')
+  {
+    const forged = { id: 'evil', name: '假内置', command: 'node x.js', builtin: 'basic' }
+    const r = mlist.partitionMcpServers([forged, { id: 'ok1', name: '正常', command: 'node x.js' }])
+    ok('mcp:set 闸门点名拒收伪造 builtin 条目（内置身份=免信任，不能从提交进来）',
+      r.kept.some((s) => s.id === 'ok1') && !r.kept.some((s) => s.id === 'evil') &&
+        r.rejected.some((e) => e.id === 'evil' && /内置/.test(e.message)), JSON.stringify(r))
+    ok('sanitizeMcpList 把存储里带 builtin 字段的条目剥掉（读侧同一条防线）',
+      mlist.sanitizeMcpList([forged, { id: 'ok2', name: '正常', command: 'node x.js' }]).every((s) => s.id !== 'evil'))
+  }
+
+  const mcpMod = await import('../out/main/mcp.js')
+  const mem = []
+  mcpMod.bindBuiltinMemory({
+    get: () => mem,
+    add: (text, kind) => { const e = { id: 'mem_t1', kind, text, ts: 1, editable: true }; mem.push(e); return e }
+  })
+  const conn = await mcpMod.McpClient.connect(mcpMod.BUILTIN_MCP_BASIC)
+  const client = conn.client
+  try {
+    const tools = await client.listTools()
+    ok('内置组列出 3 个工具（now / memory_save / memory_list）',
+      tools.length === 3 && ['now', 'memory_save', 'memory_list'].every((n) => tools.some((t) => t.name === n)),
+      JSON.stringify(tools.map((t) => t.name)))
+    const now1 = await client.callTool('now', {})
+    ok('now 返回当前时间（本机时区名 + UTC 对照）', now1.ok && /当前时间/.test(now1.output) && /UTC/.test(now1.output), now1.output)
+    const now2 = await client.callTool('now', { timezone: 'Asia/Tokyo' })
+    ok('now 换算指定 IANA 时区（Asia/Tokyo）', now2.ok && /Asia\/Tokyo/.test(now2.output), now2.output)
+    const badTz = await client.callTool('now', { timezone: '不是/时区' })
+    ok('非法时区名如实报错（isError，不猜着纠正）', !badTz.ok, badTz.output)
+    const sv = await client.callTool('memory_save', { text: '用户偏好简洁回复', kind: 'constraint' })
+    ok('memory_save 经注入存储落一条（kind 收窄）', sv.ok && mem.length === 1 && mem[0].kind === 'constraint', sv.output)
+    const ls = await client.callTool('memory_list', {})
+    ok('memory_list 读回刚存的条目', ls.ok && ls.output.includes('用户偏好简洁回复'), ls.output)
+    const empty = await client.callTool('memory_save', { text: '' })
+    ok('空文本记忆拒收（isError）', !empty.ok, empty.output)
+    const defs = mcpMod.mcpToolDefs([{ client, tools }])
+    ok('内置工具进 OpenAI 函数表，命名 mcp__builtin-basic__* 且路由可反查',
+      defs.defs.some((d) => d.function?.name === 'mcp__builtin-basic__now') && !!defs.routes['mcp__builtin-basic__now'],
+      JSON.stringify(defs.defs.map((d) => d.function?.name)))
+  } finally {
+    client.close()
+  }
+
+  // 接线绊线：装配/分流/免信任/只读渲染/默认工具注入，断任何一条立刻红
+  const ipcBM = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：ipc 装配绑定记忆存储、mcp:list 合成内置条目、信任弹窗对 builtin 分流',
+    ipcBM.error === null && ipcBM.text.includes('bindBuiltinMemory(') &&
+      ipcBM.text.includes('[mcp.BUILTIN_MCP_BASIC, ...sanitizeMcpList') &&
+      ipcBM.text.includes("s.builtin !== 'basic' && !approvals.isMcpTrusted"),
+    ipcBM.error ?? '缺 bindBuiltinMemory / 合成清单 / builtin 信任分流')
+  const agBM = readSrcSafe('src/renderer/src/stores/agents.ts')
+  ok('绊线：新建模型 Agent 注入默认工具（buildDefaultTools + ensureWorkspaceDir，失败降级纯对话）',
+    agBM.error === null && agBM.text.includes('buildDefaultTools') && agBM.text.includes('ensureWorkspaceDir'),
+    agBM.error ?? 'agents.ts 缺默认工具注入')
+  const spBM = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
+  ok('绊线：设置页内置行只读（data-mcp-builtin）且提交整表时剥掉内置条目',
+    spBM.error === null && spBM.text.includes('data-mcp-builtin') && spBM.text.includes("s.builtin !== 'basic'"),
+    spBM.error ?? 'SettingsPage 缺内置只读行或提交剥离')
+}
+
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

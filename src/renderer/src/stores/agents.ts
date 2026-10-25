@@ -1,6 +1,7 @@
 // Agent 管理：列表、顺序、状态、未读、发现扫描、连接
 import { create } from 'zustand'
 import type { AgentConfig, ScanResultItem, CustomModelConfig, CliName } from '@shared/types'
+import { buildDefaultTools } from '@shared/default-tools'
 import { bridge } from '../lib/ipc'
 import { uid } from '../lib/utils'
 import { useUi } from './ui'
@@ -117,6 +118,10 @@ export const useAgents = create<AgentsState>()((set, get) => ({
       }
     }
     await bridge.credentials.save(keyId, apiKey)
+    // 默认工具授权（2026-10-26 拍板：文件+联网，命令默认关）：沙箱根取自动创建的专属工作区；
+    // 目录拿不到（磁盘满/权限）就静默降级为纯对话，添加流程不因此失败
+    const ws = await bridge.app.ensureWorkspaceDir(cfg.provider || cfg.modelId).catch(() => null)
+    const defaultTools = ws && ws.ok && ws.path ? buildDefaultTools(ws.path) : undefined
     const agent: AgentConfig = {
       id: uid('agent'),
       name: cfg.provider || cfg.modelId,
@@ -125,6 +130,7 @@ export const useAgents = create<AgentsState>()((set, get) => ({
       model: cfg.modelId,
       status: 'available',
       modelConfig: { ...testCfg, hasKey: true },
+      ...(defaultTools ? { tools: defaultTools } : {}),
       addedAt: Date.now()
     }
     set((s) => ({ agents: [...s.agents, agent], colors: { ...s.colors, [agent.id]: DEMO_COLORS[get().agents.length % DEMO_COLORS.length] } }))

@@ -32,7 +32,11 @@ export interface AgentConfig {
   modelConfig?: CustomModelConfig
   /** 本机 CLI 配置（kind === 'cli' 时有效）；凭据由 CLI 自身管理，AgentHub 不保存任何密钥 */
   cliConfig?: CliAgentConfig
-  /** 文件/命令工具授权（kind === 'model' 时可选）：开启即授权在 dir 内读写；未开启 = 纯对话无文件能力 */
+  /**
+   * 文件/命令工具授权（kind === 'model' 时可选）：开启即授权在 dir 内读写。
+   * 2026-10-26 起**新建**的模型 Agent 默认带一份安全默认值（shared/default-tools.buildDefaultTools：
+   * 沙箱工作区 + 联网，命令仍默认关）；已存在的 Agent 不回填，未开启的老 Agent 仍是纯对话。
+   */
   tools?: ToolGrant
   /** 演示模式数据 */
   isDemo?: boolean
@@ -772,6 +776,12 @@ export interface McpServer {
   timeoutMs?: number
   /** transport 为 http 但 url 缺失/非法：已停用，等用户重填（判定口径见 shared/mcp-list.stampMcpLegacy） */
   httpInvalid?: boolean
+  /**
+   * 内置组标记（值固定 'basic'）：内置 server 由主进程合成提供，进程内实现、零子进程，
+   * 与内置工具同级信任（不需要首次连接确认）。带此字段的条目不落用户配置——
+   * mcp:set 的闸门会把伪造内置条目的提交点名拒收（防渲染层借"内置"身份绕信任弹窗）。
+   */
+  builtin?: 'basic'
   createdAt?: number
 }
 

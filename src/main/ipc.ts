@@ -6,7 +6,7 @@ import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
 import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
-import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer, TaskSchedule, WorkflowTemplate } from '../shared/types'
+import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer, TaskSchedule, WorkflowTemplate, MemoryEntry } from '../shared/types'
 import { configurePriceOverrides, partitionPriceOverrides } from '../shared/overrides'
 import { partitionHookRules, sanitizeHookList } from '../shared/hooks'
 import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
@@ -158,6 +158,19 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // dev 时是仓库根/builtin-skills，两种形态都对。存储访问收窄成两个动作注入，见 market.ts。
   market.init(join(app.getAppPath(), 'builtin-skills'), app.getPath('userData'))
   officialModels.initOfficialModels(app.getPath('userData'))
+  // 内置 MCP 基础组的记忆工具绑定到既有长期记忆存储（memory.json，与 memory:get/set 同一份）
+  mcp.bindBuiltinMemory({
+    get: () => getStore().getMemory(),
+    add: (text, kind) => {
+      const list = getStore().getMemory()
+      const entry: MemoryEntry = {
+        id: `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        kind, text, ts: Date.now(), editable: true
+      }
+      getStore().setMemory([...list, entry])
+      return entry
+    }
+  })
   market.bindStore({ getSkills: () => getStore().getSkills(), saveSkill: (s) => getStore().saveSkill(s) })
 
   ipcMain.handle('app:info', () => ({
@@ -355,7 +368,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- MCP server（tools-only，stdio） ----------
   // mcp:list 只放行形状正确的记录（sanitizeMcpList 可断言）：迁移层刻意把脏元素原样透传，
   // 手改 config.json 的 null 不该活到渲染层被解引用炸掉设置页/ChatView。
-  ipcMain.handle('mcp:list', () => sanitizeMcpList(getStore().getConfig().mcpServers))
+  // 内置基础组由主进程合成在最前（只读；sanitize 会剥掉存储里任何伪造 builtin 字段的条目）。
+  ipcMain.handle('mcp:list', () => [mcp.BUILTIN_MCP_BASIC, ...sanitizeMcpList(getStore().getConfig().mcpServers)])
   ipcMain.handle('mcp:set', (_e, list: McpServer[]) => {
     // 闸门抽到 shared/mcp-list.partitionMcpServers（逻辑层可断言）：形状判定 + 条数上限 + 补形打标，
     // 被拒的条目一律点名回界面（rejected），不再由 .slice 静默丢掉第 21 条。
@@ -604,7 +618,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     // 标成停用，这里按 enabled !== false 直接跳过：停用的 server 不该再"尝试连接并必然失败"。
     const knownServers = sanitizeMcpList(stored.mcpServers)
     const selected = (grant?.mcpServerIds ?? [])
-      .map((id) => knownServers.find((s) => s.id === id))
+      // 内置基础组不在用户配置里（合成条目），按常量 id 命中；其余从过闸门的配置里找
+      .map((id) => (id === mcp.BUILTIN_MCP_BASIC.id ? mcp.BUILTIN_MCP_BASIC : knownServers.find((s) => s.id === id)))
       .filter((s): s is McpServer => !!s && s.enabled !== false)
     const clients: mcp.McpClient[] = []
     const wiringEntries: { client: mcp.McpClient; tools: mcp.McpToolInfo[] }[] = []
@@ -613,7 +628,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
         const { client } = await mcp.McpClient.connect(s)
         clients.push(client)
         const tools = await client.listTools()
-        if (!approvals.isMcpTrusted(s.id)) {
+        // 内置组免信任弹窗：进程内实现、随应用发布，与内置工具同级信任；
+        // 其余 server 首次连接仍要确认（探完工具清单再问人，放行时看得见它能干什么）
+        if (s.builtin !== 'basic' && !approvals.isMcpTrusted(s.id)) {
           const d = await approvals.requestApproval(
             {
               id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,

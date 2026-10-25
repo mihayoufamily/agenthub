@@ -56,7 +56,11 @@ const SUITES = [
   // fixes 687：2026-10-26 图片同源豁免轮实测（687 PASS / 0 FAIL）。686 → 687 的一条是 [MI] 追加：
   // image:fetch 同源豁免绊线（本地网关图片与 API 同 host 可渲染——sameHosts 由主进程对照 agents 配置生成，
   // 第一跳与跳转后的 SSRF 拦截判定仍在，豁免不拆墙）。
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 687, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围与工作流技能管理（skillUsages/时机文案/三写入口/开工快照）+ 模型回复图片渲染（[MI]：解析器/围栏免疫/SSRF 守卫在场）' },
+  // fixes 701：2026-10-26 内置基础组轮实测（701 PASS / 0 FAIL）。687 → 701 多的 14 条是 [BM] 段：
+  // buildDefaultTools 默认值形状、mcp 闸门拒伪造 builtin 条目（提交与读侧双防线）、
+  // BuiltinMcpClient 进程内集成（3 工具/时区换算/非法时区/记忆往返/函数表命名路由）、
+  // 接线绊线（ipc 装配与免信任分流、agents 默认工具、SettingsPage 只读行）。
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 701, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围与工作流技能管理（skillUsages/时机文案/三写入口/开工快照）+ 模型回复图片渲染（[MI]：解析器/围栏免疫/SSRF 守卫在场）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 59, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态、技能注入层序、上一任务上下文都真跑过）' },
   // engine 28 / mcp-transport 31：2026-10-25 功能波轮实测（28 PASS / 31 PASS / 0 FAIL，各自独立脚本可单跑）。
   { name: 'engine', tier: 'logic', script: 'engine-check.mjs', min: 28, what: '引擎纯函数快照：六个竞态序列（清门/快照还原/续跑推断/队列出入/终态口径）+ 计划审计常量' },

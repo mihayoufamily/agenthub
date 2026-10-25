@@ -63,10 +63,12 @@ export function stampMcpLegacy(s: McpServer): McpServer {
   return { ...out, legacyInvalid: true, enabled: false }
 }
 
-/** 过滤脏元素 + 补旧格式标记；不是数组（config.json 被手改成别的类型）就当没有 */
+/** 过滤脏元素 + 剥掉伪造的内置条目 + 补旧格式标记；不是数组（config.json 被手改成别的类型）就当没有。
+ *  内置 server 只存在于主进程合成的清单里：配置/提交里出现的 `builtin` 字段一律视为伪造剥掉——
+ *  内置身份意味着免信任弹窗，这个判定绝不能从存储侧进来。 */
 export function sanitizeMcpList(list: unknown): McpServer[] {
   if (!Array.isArray(list)) return []
-  return list.filter(isWellFormed).map(stampMcpLegacy)
+  return list.filter(isWellFormed).filter((s) => !(s as { builtin?: unknown }).builtin).map(stampMcpLegacy)
 }
 
 /**
@@ -88,6 +90,12 @@ export const MCP_SHAPE_REJECT_MESSAGE = '名称与启动命令都要填'
  * 设置页的 http 预检也引这条，两边说同一句话。
  */
 export const MCP_HTTP_URL_REJECT_MESSAGE = 'HTTP 方式的 server 要填合法的 http(s) 地址（以 http:// 或 https:// 开头的完整 URL）'
+
+/**
+ * 伪造内置条目的拒收原因。内置身份 = 免信任弹窗（进程内、随应用发布），这个身份
+ * 只能由主进程合成的清单给出；mcp:set 收到带 builtin 字段的提交时点名拒收。
+ */
+export const MCP_BUILTIN_FORGE_REJECT_MESSAGE = '内置 server 不接受配置写入：内置条目由主进程提供，无需也不允许手动添加'
 
 /**
  * 形状合格 = 有名称，且按传输方式各有一个"能启动的凭据"：
@@ -128,6 +136,11 @@ export function partitionMcpServers(list: unknown): { kept: McpServer[]; rejecte
   for (let i = 0; i < incoming.length; i++) {
     const raw = incoming[i]
     const id = String((raw && typeof raw === 'object' ? (raw as { id?: unknown }).id : undefined) ?? `#${i + 1}`)
+    // 伪造内置身份 = 试图借"免信任"通道塞私货：无论其余字段多合法，一律点名拒收
+    if (raw && typeof raw === 'object' && 'builtin' in raw) {
+      rejected.push({ id, message: MCP_BUILTIN_FORGE_REJECT_MESSAGE })
+      continue
+    }
     const reason = shapeRejectReason(raw)
     if (reason) {
       rejected.push({ id, message: reason })
