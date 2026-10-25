@@ -904,9 +904,11 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   // MCP：server 列表是全局的，这里只做"这个 Agent 能用哪几个"的勾选
   const [mcpList, setMcpList] = useState<McpServer[]>([])
   const [mcpIds, setMcpIds] = useState<string[]>(agent.tools?.mcpServerIds ?? [])
-  // 工具清单（折叠区）：懒加载——展开或命令/联网开关变化时，向主进程要一份与发给模型同一份的清单
+  // 工具清单（折叠区）：懒加载——展开或命令/联网/进阶开关变化时，向主进程要一份与发给模型同一份的清单
   const [listOpen, setListOpen] = useState(false)
   const [toolList, setToolList] = useState<{ name: string; desc: string }[] | null>(null)
+  // 进阶工具白名单（zip/剪贴板/资源管理器定位）：默认全关，逐个勾选
+  const [adv, setAdv] = useState<string[]>(agent.tools?.advanced ?? [])
   useEffect(() => {
     void bridge.mcp.list().then(setMcpList)
   }, [])
@@ -922,13 +924,13 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
   useEffect(() => {
     if (!listOpen) return
     let alive = true
-    void bridge.tools.defs({ allowCommands, allowWeb }).then((r) => {
+    void bridge.tools.defs({ allowCommands, allowWeb, advanced: adv }).then((r) => {
       if (alive) setToolList(r)
     })
     return () => {
       alive = false
     }
-  }, [listOpen, allowCommands, allowWeb])
+  }, [listOpen, allowCommands, allowWeb, adv])
 
   const save = () => {
     if (!enabled) {
@@ -950,7 +952,8 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
       ...(fullAccess ? { access: 'full' as const } : {}),
       ...(allowCommands ? { commandPolicy } : {}),
       ...(previewWrites ? { previewWrites: true } : {}),
-      ...(mcpIds.length ? { mcpServerIds: mcpIds } : {})
+      ...(mcpIds.length ? { mcpServerIds: mcpIds } : {}),
+      ...(adv.length ? { advanced: adv } : {})
     }
     updateAgent(agent.id, { tools })
     void bridge.approval.setRules(agent.id, rules.map((r) => r.trim()).filter(Boolean))
@@ -1147,6 +1150,31 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
                 </div>
               </span>
             </label>
+            {/* 进阶工具（默认全关）：逐个勾选启用；清单实时反映在下方折叠区 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '10px 12px' }} data-testid="advanced-tools-block">
+              <div style={{ fontSize: 12.5, fontWeight: 600 }}>进阶工具（默认关，逐个开启）</div>
+              {([
+                ['zip_pack', '打包 zip', '把沙箱内文件/目录打成一个 zip（写类：计划态会被拦）'],
+                ['zip_unpack', '解压 zip', '把沙箱内 zip 解到目录（zip-slip 防护；覆盖的同名文件进检查点，写类）'],
+                ['clipboard_read', '读剪贴板', '模型能读到你刚复制的文本——隐私面，仅在确有需要时开'],
+                ['clipboard_write', '写剪贴板', '模型可把文本写进系统剪贴板（交付代码/命令时方便你直接粘贴）'],
+                ['show_in_folder', '资源管理器定位', '在资源管理器中打开并选中沙箱内某文件']
+              ] as const).map(([id, label, note]) => (
+                <label key={id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', fontSize: 12.5 }}>
+                  <input
+                    type="checkbox"
+                    checked={adv.includes(id)}
+                    onChange={(e) => setAdv(e.target.checked ? [...adv, id] : adv.filter((x) => x !== id))}
+                    data-testid={`advanced-tool-${id}`}
+                    style={{ marginTop: 3 }}
+                  />
+                  <span style={{ lineHeight: 1.6 }}>
+                    <b>{label}</b> <code style={{ fontSize: 11 }}>{id}</code>
+                    <div style={{ color: 'var(--text-3)', fontSize: 12 }}>{note}</div>
+                  </span>
+                </label>
+              ))}
+            </div>
             {/* 工具清单折叠区：内容来自 tools:defs（主进程同一份 toolDefs），展开才拉取 */}
             <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '6px 12px' }} data-testid="tool-list-block">
               <button

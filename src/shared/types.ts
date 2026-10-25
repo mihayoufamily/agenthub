@@ -68,7 +68,7 @@ export interface ToolGrant {
   /** 写前预览：覆盖已有文件前先给出行级 diff 让人确认（默认关，工具循环里逐次弹窗很吵） */
   previewWrites?: boolean
   /**
-   * 计划态：true 时五个写类工具（write_file/replace_in_file/delete_file/move/run_command）
+   * 计划态：true 时写类工具（WRITE_TOOLS 七个：write_file/replace_in_file/delete_file/move/run_command/zip_pack/zip_unpack）
    * 一律拒绝，并且连发给模型的 schema 都不给它们；只读与联网照常。
    * 只对**模型 Agent 的工具层**成立——CLI 角色的写盘由它自己的子进程执行，这里拦不到，
    * 界面措辞按 spec 批次 F 写，不写"一定没改文件"。
@@ -76,6 +76,12 @@ export interface ToolGrant {
   planMode?: boolean
   /** 该 Agent 勾选启用的 MCP server id（不勾 = 这个 Agent 看不到任何 MCP 工具） */
   mcpServerIds?: string[]
+  /**
+   * 进阶工具白名单（zip_pack / zip_unpack / clipboard_read / clipboard_write / show_in_folder）：
+   * 只列出名字的才启用，缺省 = 全关——打包、剪贴板、系统定位这些进阶面默认不替用户开，
+   * 要用就在工具面板「进阶工具」分区逐个勾选。
+   */
+  advanced?: string[]
 }
 
 /** 命令审批的人工裁决结果 */
@@ -528,6 +534,8 @@ export interface AppConfig {
   hooks?: HookRule[]
   /** MCP server 全局列表（各 Agent 在工具面板勾选启用；信任标记在主进程侧） */
   mcpServers?: McpServer[]
+  /** 已全局停用的内置 MCP server id（只经 mcp:builtin:set 写入，主进程校验 id 合法性） */
+  mcpBuiltinOff?: string[]
   /** 沙箱/GPU 崩溃自动降级策略：auto=降级后提示一次，ask=降级前问，off=不降级直接失败 */
   sandboxFallback?: 'auto' | 'ask' | 'off'
   /**
@@ -777,11 +785,12 @@ export interface McpServer {
   /** transport 为 http 但 url 缺失/非法：已停用，等用户重填（判定口径见 shared/mcp-list.stampMcpLegacy） */
   httpInvalid?: boolean
   /**
-   * 内置组标记（值固定 'basic'）：内置 server 由主进程合成提供，进程内实现、零子进程，
-   * 与内置工具同级信任（不需要首次连接确认）。带此字段的条目不落用户配置——
-   * mcp:set 的闸门会把伪造内置条目的提交点名拒收（防渲染层借"内置"身份绕信任弹窗）。
+   * 内置组标记（basic=时间与记忆 / calc=计算器 / kv=键值存储 / think=顺序思考）：
+   * 内置 server 由主进程合成提供，进程内实现、零子进程，与内置工具同级信任（不需要首次连接确认）。
+   * 带此字段的条目不落用户配置——mcp:set 的闸门会把伪造内置条目的提交点名拒收
+   * （防渲染层借"内置"身份绕信任弹窗）；全局停用状态存 config.mcpBuiltinOff（mcp:builtin:set 写）。
    */
-  builtin?: 'basic'
+  builtin?: 'basic' | 'calc' | 'kv' | 'think'
   createdAt?: number
 }
 

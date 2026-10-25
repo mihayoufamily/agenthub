@@ -159,8 +159,8 @@ export class McpClient {
   protected constructor(readonly server: McpServer, private timeoutMs: number) {}
 
   static async connect(server: McpServer): Promise<{ client: McpClient; info: { title?: string; version?: string } }> {
-    // 分流点一：内置组交给 BuiltinMcpClient（进程内实现，零子进程，免信任弹窗）
-    if (server.builtin === 'basic') return BuiltinMcpClient.connect(server)
+    // 分流点一：内置组（basic/calc/kv/think）交给 BuiltinMcpClient（进程内实现，零子进程，免信任弹窗）
+    if (server.builtin) return BuiltinMcpClient.connect(server)
     // 分流点二：http 记录交给 HttpMcpClient（返回类型是 McpClient 的子类，调用方类型零改动）
     if (server.transport === 'http') return HttpMcpClient.connect(server)
     const c = new McpClient(server, server.timeoutMs && server.timeoutMs > 0 ? server.timeoutMs : DEFAULT_TIMEOUT)
@@ -545,21 +545,24 @@ export function trustCommand(s: McpServer): string {
     : `${(s.command ?? '').trim()}${s.legacyInvalid ? '（已停用，v0.4.0 不再用旧单命令启动）' : ''}`
 }
 
-// ---------- 内置基础组（builtin-basic）：进程内实现，零子进程，随应用发布 ----------
+// ---------- 内置 MCP 组（进程内实现，零子进程，随应用发布） ----------
 //
+// basic=时间与记忆 / calc=计算器 / kv=键值存储 / think=顺序思考。
 // 信任口径：与内置工具（execTool）同级——代码随应用发布、不经外部进程、不需要首次连接确认。
-// 这份"免信任"只认主进程合成的 BUILTIN_MCP_BASIC 常量：配置/提交里出现 builtin 字段的
-// 条目会被 shared/mcp-list 的闸门剥掉或点名拒收，渲染层伪造不出这个身份。
-// 工具循环、Hook、计划态整组禁用等既有管线对它照常生效（走 McpClient 同一形状）。
+// 这份"免信任"只认主进程合成的 BUILTIN_MCP_SERVERS 常量：配置/提交里出现 builtin 字段的
+// 条目会被 shared/mcp-list 的闸门剥掉或点名拒收，渲染层伪造不出这个身份；
+// 全局停用状态存 config.mcpBuiltinOff（mcp:builtin:set 写入，ipc 侧应用）。
+// 工具循环、Hook、计划态整组禁用等既有管线对内置组照常生效（走 McpClient 同一形状）。
 
-/** 内置基础组的虚拟配置：mcp:list 合成清单用。command 字段是只读说明，不参与任何启动逻辑 */
-export const BUILTIN_MCP_BASIC: McpServer = {
-  id: 'builtin-basic',
-  name: '内置基础（时间 · 记忆）',
-  builtin: 'basic',
-  command: '（内置：随应用提供，无需配置）',
-  enabled: true
-}
+/** 内置组的虚拟配置：mcp:list 合成清单用。command 字段是只读说明，不参与任何启动逻辑 */
+export const BUILTIN_MCP_SERVERS: McpServer[] = [
+  { id: 'builtin-basic', name: '内置基础（时间 · 记忆）', builtin: 'basic', command: '（内置：随应用提供，无需配置）', enabled: true },
+  { id: 'builtin-calc', name: '内置计算器', builtin: 'calc', command: '（内置：随应用提供，无需配置）', enabled: true },
+  { id: 'builtin-kv', name: '内置键值存储', builtin: 'kv', command: '（内置：随应用提供，无需配置）', enabled: true },
+  { id: 'builtin-think', name: '顺序思考', builtin: 'think', command: '（内置：随应用提供，无需配置）', enabled: true }
+]
+/** 兼容别名：内置基础组（首个成员） */
+export const BUILTIN_MCP_BASIC: McpServer = BUILTIN_MCP_SERVERS[0]
 
 /** 长期记忆存取注入：ipc 装配时绑定 store，逻辑层测试注入内存 fake。读写都是同步小操作 */
 let memoryAccess: { get: () => MemoryEntry[]; add: (text: string, kind: MemoryEntry['kind']) => MemoryEntry } | null = null
@@ -567,52 +570,326 @@ export function bindBuiltinMemory(access: { get: () => MemoryEntry[]; add: (text
   memoryAccess = access
 }
 
-const BUILTIN_BASIC_TOOLS: McpToolInfo[] = [
-  {
-    name: 'now',
-    description: '获取当前日期与时间（模型自己不知道现在几点——凡涉时效性、日程、时间计算的问题先调它）。可选传 IANA 时区名换算（如 Asia/Shanghai、America/New_York），format 可选 date/time/datetime',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        timezone: { type: 'string', description: 'IANA 时区名；缺省用本机时区' },
-        format: { type: 'string', enum: ['datetime', 'date', 'time'], description: '缺省 datetime' }
+/** 键值存储注入（kv 组用）：ipc 绑到 userData/mcp-kv.json，测试注入内存 fake */
+let kvAccess: { load: () => Record<string, string>; save: (m: Record<string, string>) => void } | null = null
+export function bindBuiltinKv(access: { load: () => Record<string, string>; save: (m: Record<string, string>) => void }) {
+  kvAccess = access
+}
+const KV_MAX_KEYS = 500
+const KV_MAX_VALUE = 10_000
+
+const BUILTIN_TOOLS: Record<NonNullable<McpServer['builtin']>, McpToolInfo[]> = {
+  basic: [
+    {
+      name: 'now',
+      description: '获取当前日期与时间（模型自己不知道现在几点——凡涉时效性、日程、时间计算的问题先调它）。可选传 IANA 时区名换算（如 Asia/Shanghai、America/New_York），format 可选 date/time/datetime',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          timezone: { type: 'string', description: 'IANA 时区名；缺省用本机时区' },
+          format: { type: 'string', enum: ['datetime', 'date', 'time'], description: '缺省 datetime' }
+        }
+      }
+    },
+    {
+      name: 'memory_save',
+      description: '把跨会话需要记住的要点存入长期记忆：用户的目标、偏好、约束、关键决定、重要事实。每条一句话，宁短勿长',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: '要记住的要点，一句话' },
+          kind: { type: 'string', enum: ['goal', 'constraint', 'decision', 'summary'], description: '缺省 summary' }
+        },
+        required: ['text']
+      }
+    },
+    {
+      name: 'memory_list',
+      description: '检索跨会话积累的长期记忆（用户目标/偏好/约定/决定）。回答涉及用户背景的问题前先查一次',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          keyword: { type: 'string', description: '关键词过滤（不区分大小写）；缺省返回全部' },
+          limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50' }
+        }
       }
     }
-  },
-  {
-    name: 'memory_save',
-    description: '把跨会话需要记住的要点存入长期记忆：用户的目标、偏好、约束、关键决定、重要事实。每条一句话，宁短勿长',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: '要记住的要点，一句话' },
-        kind: { type: 'string', enum: ['goal', 'constraint', 'decision', 'summary'], description: '缺省 summary' }
-      },
-      required: ['text']
-    }
-  },
-  {
-    name: 'memory_list',
-    description: '检索跨会话积累的长期记忆（用户目标/偏好/约定/决定）。回答涉及用户背景的问题前先查一次',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        keyword: { type: 'string', description: '关键词过滤（不区分大小写）；缺省返回全部' },
-        limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50' }
+  ],
+  calc: [
+    {
+      name: 'calc',
+      description: '精确计算数学表达式（模型心算容易错，涉及金额/比例/多位数运算时必须用它）。支持 + - * / % ^、括号、sqrt/sin/cos/tan/abs/ln/log/floor/ceil/round/min/max 与常量 pi/e；三角函数按弧度',
+      inputSchema: {
+        type: 'object',
+        properties: { expression: { type: 'string', description: '如 "(1+0.13)*2400" 或 "sqrt(2)^2"' } },
+        required: ['expression']
       }
     }
-  }
-]
+  ],
+  kv: [
+    {
+      name: 'kv_set',
+      description: '写入/更新一个键值对（跨调用、跨会话持久；任务状态、中间结果、编号计数器）。值上限 10KB，键上限 500 个',
+      inputSchema: {
+        type: 'object',
+        properties: { key: { type: 'string', description: '键名（≤64 字符）' }, value: { type: 'string', description: '值（文本）' } },
+        required: ['key', 'value']
+      }
+    },
+    {
+      name: 'kv_get',
+      description: '读取一个键的值',
+      inputSchema: {
+        type: 'object',
+        properties: { key: { type: 'string' } },
+        required: ['key']
+      }
+    },
+    {
+      name: 'kv_delete',
+      description: '删除一个键',
+      inputSchema: {
+        type: 'object',
+        properties: { key: { type: 'string' } },
+        required: ['key']
+      }
+    },
+    {
+      name: 'kv_list',
+      description: '列出全部键（可选前缀过滤，返回键名与值长度）',
+      inputSchema: {
+        type: 'object',
+        properties: { prefix: { type: 'string' } }
+      }
+    }
+  ],
+  think: [
+    {
+      name: 'sequential_thinking',
+      description: '分步思考脚手架：把复杂问题拆成带编号的思考步，每步调用一次记录当前想法，最后一步 nextThoughtRequired=false 收束。适合多环节推理/排查任务的中途整理',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          thought: { type: 'string', description: '这一步的思考内容' },
+          nextThoughtRequired: { type: 'boolean', description: '还有下一步则 true；收尾传 false' },
+          thoughtNumber: { type: 'number', description: '当前步号（从 1 开始）' },
+          totalThoughts: { type: 'number', description: '预计总步数（1..100）' }
+        },
+        required: ['thought', 'nextThoughtRequired', 'thoughtNumber', 'totalThoughts']
+      }
+    }
+  ]
+}
 
 const MEMORY_KINDS: MemoryEntry['kind'][] = ['goal', 'constraint', 'decision', 'progress', 'review', 'confirm', 'summary']
 
-/** tools/call 的进程内分发。返回 MCP result 形状，走与 stdio/http 同一份 toolOutputFrom 解析 */
-function builtinCall(params: { name?: string; arguments?: Record<string, unknown> }): { content: { type: 'text'; text: string }[]; isError?: boolean } {
+/**
+ * 安全表达式求值（shunting-yard 调度场算法）：纯手写解析器，把表达式当**数据**处理，
+ * 全程不把任何输入当代码执行——表达式来自模型输出，动态求值等于交出任意代码执行权。
+ * 支持：数字（十进制/小数）、+ - * / % ^、括号、一元负号、常量 pi/e、
+ * 函数 sqrt/sin/cos/tan/abs/ln/log(=log10)/floor/ceil/round 与 min/max（逗号分隔多参）；
+ * 三角函数按弧度。导出给逻辑层断言直测。
+ */
+export function calcEval(expr: string): { ok: boolean; value?: number; message?: string } {
+  const src = String(expr ?? '').trim()
+  if (!src) return { ok: false, message: '表达式为空' }
+  if (src.length > 500) return { ok: false, message: '表达式超过 500 字符上限' }
+  type Tok = { t: 'num'; v: number } | { t: 'fn'; v: string } | { t: 'op'; v: string }
+  type Rpn = { t: 'num'; v: number } | { t: 'op'; v: string } | { t: 'call'; v: string; n: number }
+  // 词法
+  const toks: Tok[] = []
+  const FNS = new Set(['sqrt', 'sin', 'cos', 'tan', 'abs', 'ln', 'log', 'floor', 'ceil', 'round', 'min', 'max'])
+  for (let i = 0; i < src.length; ) {
+    const c = src[i]
+    if (c === ' ' || c === '\t' || c === '\n') { i++; continue }
+    const nm = /^[0-9]+(\.[0-9]+)?/.exec(src.slice(i))
+    if (nm) { toks.push({ t: 'num', v: parseFloat(nm[0]) }); i += nm[0].length; continue }
+    const id = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i))
+    if (id) {
+      const low = id[0].toLowerCase()
+      if (low === 'pi') toks.push({ t: 'num', v: Math.PI })
+      else if (low === 'e') toks.push({ t: 'num', v: Math.E })
+      else if (FNS.has(low)) toks.push({ t: 'fn', v: low })
+      else return { ok: false, message: `未知标识符：${id[0]}（支持 pi/e 与 sqrt、sin、cos、tan、abs、ln、log、floor、ceil、round、min、max）` }
+      i += id[0].length
+      continue
+    }
+    if ('+-*/%^(),'.includes(c)) { toks.push({ t: 'op', v: c }); i++; continue }
+    return { ok: false, message: `无法识别的字符：${c}` }
+  }
+  // 调度场：中缀 → RPN。frame 记每个括号层所属函数与逗号数（min/max 的实参个数靠它算）
+  const PREC: Record<string, [number, boolean]> = { 'u-': [4, false], '^': [3, false], '*': [2, true], '/': [2, true], '%': [2, true], '+': [1, true], '-': [1, true] }
+  const out: Rpn[] = []
+  const ops: string[] = []
+  const frames: { fn: string | null; commas: number }[] = []
+  let prev: 'start' | 'value' | 'fn' | 'op' | 'lp' | 'comma' = 'start'
+  for (const tok of toks) {
+    if (tok.t === 'num') {
+      if (prev === 'value') return { ok: false, message: '两个数之间缺少运算符' }
+      out.push({ t: 'num', v: tok.v })
+      prev = 'value'
+      continue
+    }
+    if (tok.t === 'fn') {
+      if (prev === 'value') return { ok: false, message: `函数 ${tok.v} 前缺少运算符` }
+      ops.push(`fn:${tok.v}`)
+      prev = 'fn'
+      continue
+    }
+    const v = tok.v
+    if (v === '(') {
+      // 函数名紧跟左括号：把这个括号层标记为该函数的参数区（逗号合法性与其元数都靠它）
+      const top = ops[ops.length - 1]
+      frames.push({ fn: top && top.startsWith('fn:') ? top.slice(3) : null, commas: 0 })
+      ops.push('(')
+      prev = 'lp'
+      continue
+    }
+    if (v === ',') {
+      const frame = frames[frames.length - 1]
+      if (!frame || frame.fn === null) return { ok: false, message: '逗号只能出现在函数参数里' }
+      frame.commas++
+      while (ops.length && ops[ops.length - 1] !== '(') out.push({ t: 'op', v: ops.pop()! })
+      prev = 'comma'
+      continue
+    }
+    if (v === ')') {
+      const frame = frames[frames.length - 1]
+      if (!frame) return { ok: false, message: '括号不匹配' }
+      while (ops.length && ops[ops.length - 1] !== '(') out.push({ t: 'op', v: ops.pop()! })
+      if (!ops.length || ops[ops.length - 1] !== '(') return { ok: false, message: '括号不匹配' }
+      ops.pop()
+      frames.pop()
+      // 栈顶是函数则随闭括号出栈，带上实参个数（逗号 + 1）
+      if (ops.length && ops[ops.length - 1].startsWith('fn:')) {
+        const name = ops.pop()!.slice(3)
+        out.push({ t: 'call', v: name, n: frame.commas + 1 })
+      }
+      prev = 'value'
+      continue
+    }
+    // 二元/一元运算符：'-' 在开头、运算符后、左括号后、逗号后是一元负号
+    let op = v
+    if (v === '-' && (prev === 'start' || prev === 'op' || prev === 'lp' || prev === 'comma')) op = 'u-'
+    else if (prev !== 'value') return { ok: false, message: `运算符 ${v} 的位置不合法` }
+    const [p, leftAssoc] = PREC[op] ?? [0, true]
+    while (ops.length) {
+      const top = ops[ops.length - 1]
+      if (top === '(') break
+      const [tp, tLeft] = top.startsWith('fn:') ? [5, false] : PREC[top] ?? [0, true]
+      if (tp > p || (tp === p && leftAssoc)) out.push({ t: 'op', v: ops.pop()! })
+      else break
+    }
+    ops.push(op)
+    prev = 'op'
+  }
+  while (ops.length) {
+    const top = ops.pop()!
+    if (top === '(') return { ok: false, message: '括号不匹配' }
+    if (top.startsWith('fn:')) return { ok: false, message: `函数 ${top.slice(3)} 缺少参数括号` }
+    out.push({ t: 'op', v: top })
+  }
+  // RPN 求值
+  const st: number[] = []
+  const FN1: Record<string, (x: number) => number> = {
+    sqrt: Math.sqrt, sin: Math.sin, cos: Math.cos, tan: Math.tan, abs: Math.abs,
+    ln: Math.log, log: Math.log10, floor: Math.floor, ceil: Math.ceil, round: Math.round
+  }
+  for (const t of out) {
+    if (t.t === 'num') { st.push(t.v); continue }
+    if (t.t === 'call') {
+      if (t.v === 'min' || t.v === 'max') {
+        if (t.n < 2) return { ok: false, message: `${t.v} 至少要两个参数` }
+        if (st.length < t.n) return { ok: false, message: `${t.v} 参数不足` }
+        const args = st.splice(st.length - t.n, t.n)
+        st.push(t.v === 'min' ? Math.min(...args) : Math.max(...args))
+      } else {
+        const f = FN1[t.v]
+        if (!f || st.length < 1) return { ok: false, message: `函数 ${t.v} 参数不足` }
+        st.push(f(st.pop()!))
+      }
+      continue
+    }
+    if (t.v === 'u-') {
+      if (!st.length) return { ok: false, message: '表达式不完整' }
+      st.push(-st.pop()!)
+      continue
+    }
+    if (st.length < 2) return { ok: false, message: `运算符 ${t.v} 缺少操作数` }
+    const b = st.pop()!
+    const a = st.pop()!
+    if (t.v === '+') st.push(a + b)
+    else if (t.v === '-') st.push(a - b)
+    else if (t.v === '*') st.push(a * b)
+    else if (t.v === '/') { if (b === 0) return { ok: false, message: '除以零' }; st.push(a / b) }
+    else if (t.v === '%') { if (b === 0) return { ok: false, message: '模零' }; st.push(a % b) }
+    else if (t.v === '^') st.push(Math.pow(a, b))
+  }
+  if (st.length !== 1) return { ok: false, message: '表达式不完整' }
+  const val = st[0]
+  if (!Number.isFinite(val)) return { ok: false, message: '结果不是有限数（溢出或非法运算）' }
+  // 1e-10 精度内取整，避免 0.1+0.2 → 0.30000000000000004 这类浮点尾巴直接喂给模型
+  return { ok: true, value: Math.round(val * 1e10) / 1e10 }
+}
+
+/** tools/call 的进程内分发（按内置组 id 路由）。返回 MCP result 形状，走与 stdio/http 同一份 toolOutputFrom 解析 */
+function builtinCall(builtin: string, params: { name?: string; arguments?: Record<string, unknown> }): { content: { type: 'text'; text: string }[]; isError?: boolean } {
   const name = String(params?.name ?? '')
   const args = params?.arguments ?? {}
   const reply = (text: string, isError = false): { content: { type: 'text'; text: string }[]; isError?: boolean } =>
     ({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) })
   try {
+    if (builtin === 'calc') {
+      if (name !== 'calc') return reply(`内置计算器没有这个工具：${name}`, true)
+      const r = calcEval(typeof args.expression === 'string' ? args.expression : '')
+      if (!r.ok) return reply(`无法计算：${r.message}`, true)
+      return reply(`${String(args.expression).trim()} = ${r.value}`)
+    }
+    if (builtin === 'kv') {
+      if (!kvAccess) return reply('键值存储尚未初始化（应用装配未完成）', true)
+      const key = typeof args.key === 'string' ? args.key.trim() : ''
+      const map = kvAccess.load()
+      if (name === 'kv_set') {
+        const value = typeof args.value === 'string' ? args.value : ''
+        if (!key || key.length > 64) return reply('key 必须是 1..64 个字符', true)
+        if (value.length > KV_MAX_VALUE) return reply(`value 超过 ${KV_MAX_VALUE} 字符上限`, true)
+        if (!(key in map) && Object.keys(map).length >= KV_MAX_KEYS) return reply(`键数已达 ${KV_MAX_KEYS} 上限，先删几个再存`, true)
+        map[key] = value
+        kvAccess.save(map)
+        return reply(`已存 ${key}（${value.length} 字符）`)
+      }
+      if (name === 'kv_get') {
+        if (!key) return reply('key 不能为空', true)
+        if (!(key in map)) return reply(`没有这个键：${key}`, true)
+        return reply(map[key])
+      }
+      if (name === 'kv_delete') {
+        if (!key || !(key in map)) return reply(`没有这个键：${key || '（空）'}`, true)
+        delete map[key]
+        kvAccess.save(map)
+        return reply(`已删除 ${key}`)
+      }
+      if (name === 'kv_list') {
+        const prefix = typeof args.prefix === 'string' ? args.prefix : ''
+        const keys = Object.keys(map).filter((k) => !prefix || k.startsWith(prefix)).sort()
+        return reply(keys.length ? keys.map((k) => `${k}（${map[k].length} 字符）`).join('\n') : prefix ? `（没有以 ${prefix} 开头的键）` : '（键值存储是空的）')
+      }
+      return reply(`内置键值存储没有这个工具：${name}`, true)
+    }
+    if (builtin === 'think') {
+      if (name !== 'sequential_thinking') return reply(`顺序思考组没有这个工具：${name}`, true)
+      const thought = typeof args.thought === 'string' ? args.thought : ''
+      const n = Number(args.thoughtNumber)
+      const total = Number(args.totalThoughts)
+      const more = args.nextThoughtRequired === true
+      if (!thought.trim()) return reply('thought 不能为空（写下这一步的思考内容）', true)
+      if (!Number.isInteger(n) || n < 1 || !Number.isInteger(total) || total < 1 || total > 100) {
+        return reply('thoughtNumber / totalThoughts 必须是 1..100 的整数', true)
+      }
+      if (n > total) return reply(`thoughtNumber（${n}）超过 totalThoughts（${total}）`, true)
+      if (!more && n < total) return reply('nextThoughtRequired=false 表示收尾，但 thoughtNumber 还没到 totalThoughts；继续中间步骤请传 true', true)
+      return reply(more ? `已记录第 ${n}/${total} 步。继续（nextThoughtRequired=true，thoughtNumber=${n + 1}）。` : `思考完成（共 ${total} 步）。现在基于以上思考给出最终结论。`)
+    }
     if (name === 'now') {
       const tz = typeof args.timezone === 'string' && args.timezone.trim() ? args.timezone.trim() : undefined
       const fmt = args.format === 'date' || args.format === 'time' ? args.format : 'datetime'
@@ -665,13 +942,16 @@ export class BuiltinMcpClient extends McpClient {
       return Promise.resolve({
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { title: 'AgentHub 内置基础组', name: 'builtin-basic', version: '1.0' }
+        serverInfo: { title: `AgentHub 内置组（${String(this.server.builtin ?? '')}）`, name: `builtin-${String(this.server.builtin ?? '')}`, version: '1.0' }
       })
     }
-    if (method === 'tools/list') return Promise.resolve({ tools: BUILTIN_BASIC_TOOLS })
-    if (method === 'tools/call') return Promise.resolve(builtinCall(params as { name?: string; arguments?: Record<string, unknown> }))
+    if (method === 'tools/list') {
+      const tools = this.server.builtin ? BUILTIN_TOOLS[this.server.builtin] : undefined
+      return Promise.resolve({ tools: tools ?? [] })
+    }
+    if (method === 'tools/call') return Promise.resolve(builtinCall(String(this.server.builtin ?? ''), params as { name?: string; arguments?: Record<string, unknown> }))
     // 与 mock server 同口径：未实现的方法如实报错（tools-only 子集，不接 prompts/resources）
-    return Promise.reject(new Error(`内置基础组未实现方法：${method}`))
+    return Promise.reject(new Error(`内置组未实现方法：${method}`))
   }
 
   /** 进程内没有可泄漏的后台资源：close 只翻状态位（running 断言用同一口径） */

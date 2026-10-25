@@ -12,6 +12,7 @@ import { isWriteTool, planModeVerdict } from '../shared/plan-mode'
 import { relativeOf, beforeChange as cpBefore, record as cpRecord, diffOfFile, diffLines } from './checkpoints'
 import { runShell, MAX_OUTPUT } from './shell'
 import { runHooks } from './hooks'
+import { createZip, extractZip } from './zip'
 
 const MAX_READ = 200 * 1024 // 读文件上限
 const MAX_WRITE = 1024 * 1024 // 写文件上限
@@ -24,6 +25,8 @@ const MAX_GLOB_LEN = 200 // 通配符模式长度上限（模型可控输入）
 const WEB_TIMEOUT_MS = 20_000 // 联网请求超时
 const MAX_WEB_BODY = 200 * 1024 // 联网响应体上限
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentHub/0.2'
+const MAX_ZIP_BYTES = 64 * 1024 * 1024 // zip 打包/解包的字节上限（防"打包整个盘"）
+const MAX_ZIP_ENTRIES = 2000 // zip 条目数上限
 /** 遍历时跳过的目录（对齐常见工程习惯，避免把依赖/版本库翻出来） */
 const SKIP_DIRS = new Set(['node_modules', '.git', '.workbuddy', 'dist', 'out', 'release'])
 
@@ -219,7 +222,77 @@ function defName(def: unknown): string {
 }
 
 /** OpenAI function calling 工具定义（发给模型的 schema；命令执行与联网仅授权后可见） */
-export function toolDefs(allowCommands: boolean, allowWeb: boolean, planMode?: boolean): unknown[] {
+/**
+ * 进阶工具的 schema 表（名字 → 定义）。启用与否由 ToolGrant.advanced 白名单决定，
+ * 默认全关——打包、剪贴板、系统定位这些面不替用户开。zip 两枚属写类（见 WRITE_TOOLS），
+ * 计划态会被统一摘除 schema 并在执行期拒绝。
+ */
+const ADVANCED_TOOL_DEFS: Record<string, unknown> = {
+  zip_pack: {
+    type: 'function',
+    function: {
+      name: 'zip_pack',
+      description: '把沙箱内的若干文件/目录打成一个 zip 包（store-only）。目录会递归收集（跳过 node_modules/.git 等依赖目录）',
+      parameters: {
+        type: 'object',
+        properties: {
+          entries: { type: 'array', items: { type: 'string' }, description: '相对沙箱根的文件/目录路径' },
+          out: { type: 'string', description: '产物 zip 相对路径，如 bundle.zip' }
+        },
+        required: ['entries', 'out']
+      }
+    }
+  },
+  zip_unpack: {
+    type: 'function',
+    function: {
+      name: 'zip_unpack',
+      description: '把沙箱内的 zip 解压到沙箱内某目录（zip-slip/盘符/绝对路径条目会被拒绝并点名；会覆盖同名文件，原件进检查点）',
+      parameters: {
+        type: 'object',
+        properties: {
+          zip: { type: 'string', description: 'zip 相对路径' },
+          dest: { type: 'string', description: '解压目标目录（相对沙箱根）' }
+        },
+        required: ['zip', 'dest']
+      }
+    }
+  },
+  clipboard_read: {
+    type: 'function',
+    function: {
+      name: 'clipboard_read',
+      description: '读取系统剪贴板的文本内容（隐私面：能读到你刚复制的东西，仅在明确需要剪贴板内容时调用）',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  clipboard_write: {
+    type: 'function',
+    function: {
+      name: 'clipboard_write',
+      description: '把一段文本写入系统剪贴板（如交付代码片段、命令，方便用户直接粘贴）',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string', description: '要写入的文本' } },
+        required: ['text']
+      }
+    }
+  },
+  show_in_folder: {
+    type: 'function',
+    function: {
+      name: 'show_in_folder',
+      description: '在 Windows 资源管理器中定位并选中某个文件（交付产物时让用户一眼找到它）',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: '相对沙箱根的文件路径' } },
+        required: ['path']
+      }
+    }
+  }
+}
+
+export function toolDefs(allowCommands: boolean, allowWeb: boolean, planMode?: boolean, advanced?: string[]): unknown[] {
   const defs: unknown[] = [
     {
       type: 'function',
@@ -374,6 +447,13 @@ export function toolDefs(allowCommands: boolean, allowWeb: boolean, planMode?: b
         }
       }
     )
+  }
+  // 进阶工具按白名单逐个附加（缺省全关）；计划态的写类摘除在最后一道统一做（zip 两枚会被摘掉）
+  if (advanced && advanced.length) {
+    for (const name of advanced) {
+      const d = ADVANCED_TOOL_DEFS[name]
+      if (d) defs.push(d)
+    }
   }
   // 计划态连"能调什么"的清单里都不留写类工具：只靠执行期拒绝，模型会反复试同一堵墙
   if (planMode === true) return defs.filter((d) => !isWriteTool(defName(d)))
@@ -551,6 +631,10 @@ async function dispatch(
   // 放在 dispatch 而不是 execTool 开头：用户的 Hook 仍能看见这次"被计划态拒掉"的尝试，审计不缺一段。
   const planGate = planModeVerdict(tool, grant.planMode)
   if (!planGate.allowed) return { ok: false, output: `拒绝：${planGate.reason}` }
+  // 进阶工具统一闸：没进白名单的名字（或缺省全关）在这里拦，不在每个 case 里各写一遍
+  if (ADVANCED_TOOL_DEFS[tool] && !(grant.advanced ?? []).includes(tool)) {
+    return { ok: false, output: `拒绝：进阶工具 ${tool} 未启用（在工具面板「进阶工具」分区勾选开启）` }
+  }
   try {
     switch (tool) {
       case 'read_file': {
@@ -839,6 +923,124 @@ async function dispatch(
         if (sh.code === null && sh.error) return { ok: false, output: `${sh.error}\n${sh.output || ''}`.trim() }
         // 非零退出码不是工具失败：模型要看得到"退出码 1 + 输出"才能自己改，这里与旧行为一致
         return { ok: true, output: `退出码 ${sh.code}\n${sh.output || '（无输出）'}` }
+      }
+      case 'zip_pack': {
+        const list = args.entries
+        if (!Array.isArray(list) || list.length === 0 || !list.every((e) => typeof e === 'string' && e.trim())) {
+          return { ok: false, output: '拒绝：entries 必须是非空字符串数组（相对沙箱根的文件/目录）' }
+        }
+        if (typeof args.out !== 'string' || !args.out.trim()) return { ok: false, output: '拒绝：out 必须是产物 zip 的相对路径' }
+        const outP = sandboxPath(grant, args.out)
+        if (!outP) return { ok: false, output: '拒绝：产物路径越界（仅限沙箱目录内）' }
+        if (!outP.toLowerCase().endsWith('.zip')) return { ok: false, output: '拒绝：产物必须以 .zip 结尾' }
+        const collected: { name: string; data: Buffer }[] = []
+        const seen = new Set<string>()
+        let bytes = 0
+        const walk = async (rel: string): Promise<void> => {
+          if (collected.length >= MAX_ZIP_ENTRIES) throw new Error(`条目超过 ${MAX_ZIP_ENTRIES} 上限`)
+          const abs = sandboxPath(grant, rel)
+          if (!abs) throw new Error(`路径越界：${rel}`)
+          let st
+          try { st = await fs.stat(abs) } catch { throw new Error(`不存在：${rel}`) }
+          if (st.isDirectory()) {
+            const subs = await fs.readdir(abs, { withFileTypes: true })
+            for (const e of subs) {
+              if (e.isDirectory() && SKIP_DIRS.has(e.name)) continue
+              await walk(`${rel.replace(/[\\/]+$/, '')}/${e.name}`)
+            }
+            return
+          }
+          // zip 条目名用相对沙箱根的正斜杠路径；同名条目（大小写差异）跳过不覆盖，保包可回读
+          const name = (relativeOf(grant.dir || '.', abs) ?? abs).replace(/\\/g, '/')
+          const key = name.toLowerCase()
+          if (seen.has(key)) return
+          seen.add(key)
+          const data = await fs.readFile(abs)
+          bytes += data.length
+          if (bytes > MAX_ZIP_BYTES) throw new Error(`打包总量超过 ${Math.round(MAX_ZIP_BYTES / 1024 / 1024)}MB 上限`)
+          collected.push({ name, data })
+        }
+        try {
+          for (const rel of list as string[]) await walk(rel)
+        } catch (e) {
+          return { ok: false, output: `拒绝：${(e as Error).message}` }
+        }
+        if (!collected.length) return { ok: false, output: '拒绝：没有可打包的文件（entries 里全是空目录？）' }
+        const existed = await existsFile(outP)
+        const bk = await backup(outP)
+        await fs.mkdir(dirname(outP), { recursive: true })
+        const buf = createZip(collected)
+        await fs.writeFile(outP, buf)
+        const kind: FileChange['kind'] = existed ? 'modified' : 'created'
+        const change = bk.rel === null && !bk.unbacked ? null : { rel: bk.rel ?? outP, path: outP, kind, diff: null, bytes: buf.length, ...(bk.unbacked ? { unbacked: bk.unbacked } : {}) }
+        track(change)
+        return { ok: true, output: `已打包 ${collected.length} 个文件（${Math.round(buf.length / 1024)}KB）→ ${args.out}`, writtenPath: outP, ...(change ? { change } : {}) }
+      }
+      case 'zip_unpack': {
+        const zipP = sandboxPath(grant, args.zip)
+        const destP = sandboxPath(grant, args.dest)
+        if (!zipP || !destP) return { ok: false, output: '拒绝：zip 或 dest 路径越界（仅限沙箱目录内）' }
+        let buf: Buffer
+        try { buf = await fs.readFile(zipP) } catch { return { ok: false, output: `拒绝：zip 不存在或不可读：${args.zip}` } }
+        if (buf.length > MAX_ZIP_BYTES) return { ok: false, output: `拒绝：zip 超过 ${Math.round(MAX_ZIP_BYTES / 1024 / 1024)}MB 上限` }
+        // 解包会覆盖同名文件：先枚举 dest 里已有文件逐个备份（有检查点才可还原），上限与条目数同
+        const before = new Set<string>()
+        const listExisting = async (d: string, depth: number): Promise<void> => {
+          if (before.size >= MAX_ZIP_ENTRIES || depth > 8) return
+          let subs
+          try { subs = await fs.readdir(d, { withFileTypes: true }) } catch { return }
+          for (const e of subs) {
+            const abs = resolvePath(d, e.name)
+            if (e.isFile()) {
+              before.add(abs)
+              if (before.size >= MAX_ZIP_ENTRIES) return
+            } else if (e.isDirectory()) await listExisting(abs, depth + 1)
+          }
+        }
+        await listExisting(destP, 0)
+        for (const p of before) await backup(p)
+        await fs.mkdir(destP, { recursive: true })
+        let r: { files: string[]; skipped: string[] }
+        try { r = extractZip(buf, destP) } catch (e) { return { ok: false, output: `解包失败：${(e as Error).message}` } }
+        // 逐文件登记：原有的按 modified（有备份可还原），新建的按 created（回滚时删除）
+        let overwritten = 0
+        for (const f of r.files) {
+          const rel = relativeOf(grant.dir || '.', f) ?? f
+          if (before.has(f)) {
+            overwritten++
+            track({ rel, path: f, kind: 'modified', diff: null })
+          } else {
+            track({ rel, path: f, kind: 'created', diff: null })
+          }
+        }
+        return {
+          ok: true,
+          output: `已解出 ${r.files.length} 个文件 → ${args.dest}` +
+            (overwritten ? `（覆盖 ${overwritten} 个已有文件，原件已备份）` : '') +
+            (r.skipped.length ? `\n被拒条目（zip-slip 防护）：${r.skipped.join('；')}` : '')
+        }
+      }
+      case 'clipboard_read': {
+        const { clipboard } = require('electron') as typeof import('electron')
+        const text = clipboard.readText()
+        if (!text) return { ok: true, output: '（剪贴板当前没有文本内容）' }
+        return { ok: true, output: text.length > MAX_READ ? text.slice(0, MAX_READ) + `\n…（超过 ${MAX_READ} 字节，已截断）` : text }
+      }
+      case 'clipboard_write': {
+        const text = typeof args.text === 'string' ? args.text : ''
+        if (!text.trim()) return { ok: false, output: '拒绝：text 不能为空' }
+        if (text.length > MAX_WRITE) return { ok: false, output: `拒绝：内容超过 ${MAX_WRITE / 1024}KB 上限` }
+        const { clipboard } = require('electron') as typeof import('electron')
+        clipboard.writeText(text)
+        return { ok: true, output: `已写入剪贴板（${text.length} 字符）` }
+      }
+      case 'show_in_folder': {
+        const p = sandboxPath(grant, args.path)
+        if (!p) return { ok: false, output: '拒绝：路径越界（仅限沙箱目录内）' }
+        try { await fs.stat(p) } catch { return { ok: false, output: `拒绝：文件不存在：${args.path}` } }
+        const { shell } = require('electron') as typeof import('electron')
+        shell.showItemInFolder(p)
+        return { ok: true, output: `已在资源管理器中定位：${p}` }
       }
       default:
         return { ok: false, output: `未知工具：${tool}` }

@@ -225,6 +225,13 @@ export class Store {
     this.writeJson(this.dirs.config, cfg)
   }
 
+  /** 已全局停用的内置 MCP server id（内置组启停；写入方 ipc 已限定为已知内置 id） */
+  setMcpBuiltinOff(list: AppConfig['mcpBuiltinOff']) {
+    const cfg = this.getConfig()
+    cfg.mcpBuiltinOff = list
+    this.writeJson(this.dirs.config, cfg)
+  }
+
   /**
    * 沙箱降级策略（设置 → 关于 三选）：走的就是这条既有配置路径——读整份 config、改一个键、写回。
    * 调用方（ipc.ts）已把值限定在 auto/ask/off，脏值进不来。

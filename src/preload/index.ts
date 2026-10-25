@@ -239,7 +239,10 @@ const api = {
     set: (list: McpServer[]) => ipcRenderer.invoke('mcp:set', list) as Promise<{ ok: boolean; list: McpServer[]; rejected: RejectedEntry[] }>,
     probe: (server: McpServer) => ipcRenderer.invoke('mcp:probe', server) as Promise<McpProbe>,
     trusted: () => ipcRenderer.invoke('mcp:trust') as Promise<string[]>,
-    setTrust: (id: string, trusted: boolean) => ipcRenderer.invoke('mcp:trust:set', id, trusted) as Promise<{ ok: boolean; list: string[] }>
+    setTrust: (id: string, trusted: boolean) => ipcRenderer.invoke('mcp:trust:set', id, trusted) as Promise<{ ok: boolean; list: string[] }>,
+    /** 内置组全局启停（设置页内置行的开关；id 只认主进程常量里的内置 server） */
+    builtinSet: (id: string, on: boolean) =>
+      ipcRenderer.invoke('mcp:builtin:set', id, on) as Promise<{ ok: boolean; message?: string }>
   },
   /** 工具前后 Hook：pre 可否决调用，post 只观察/后处理 */
   hooks: {
@@ -268,7 +271,7 @@ const api = {
         ok: boolean; output: string; writtenPath?: string; change?: FileChange
       }>,
     /** 内置工具清单（只读展示）：与发给模型的同一份定义；flags 按面板当前开关状态传 */
-    defs: (flags: { allowCommands?: boolean; allowWeb?: boolean }) =>
+    defs: (flags: { allowCommands?: boolean; allowWeb?: boolean; advanced?: string[] }) =>
       ipcRenderer.invoke('tools:defs', flags) as Promise<{ name: string; desc: string }[]>,
     pickDir: () => ipcRenderer.invoke('dialog:pickDir') as Promise<string | null>
   },

@@ -171,6 +171,23 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       return entry
     }
   })
+  // 内置 MCP 键值存储（kv 组）：持久在 userData/mcp-kv.json，容量与键长上限在 mcp.ts 侧执行
+  const kvFile = join(app.getPath('userData'), 'mcp-kv.json')
+  mcp.bindBuiltinKv({
+    load: () => {
+      try {
+        const j = JSON.parse(readFileSync(kvFile, 'utf-8')) as unknown
+        return j && typeof j === 'object' && !Array.isArray(j) ? (j as Record<string, string>) : {}
+      } catch {
+        return {}
+      }
+    },
+    save: (m) => {
+      try {
+        writeFileSync(kvFile, JSON.stringify(m), 'utf-8')
+      } catch { /* 写不进下次再试：一次保存失败不该打断对话 */ }
+    }
+  })
   market.bindStore({ getSkills: () => getStore().getSkills(), saveSkill: (s) => getStore().saveSkill(s) })
 
   ipcMain.handle('app:info', () => ({
@@ -368,8 +385,13 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- MCP server（tools-only，stdio） ----------
   // mcp:list 只放行形状正确的记录（sanitizeMcpList 可断言）：迁移层刻意把脏元素原样透传，
   // 手改 config.json 的 null 不该活到渲染层被解引用炸掉设置页/ChatView。
-  // 内置基础组由主进程合成在最前（只读；sanitize 会剥掉存储里任何伪造 builtin 字段的条目）。
-  ipcMain.handle('mcp:list', () => [mcp.BUILTIN_MCP_BASIC, ...sanitizeMcpList(getStore().getConfig().mcpServers)])
+  // 内置组由主进程合成在最前（只读；sanitize 会剥掉存储里任何伪造 builtin 字段的条目），
+  // 全局停用态（config.mcpBuiltinOff）在这里应用到合成条目上。
+  ipcMain.handle('mcp:list', () => {
+    const off = new Set(getStore().getConfig().mcpBuiltinOff ?? [])
+    const builtins = mcp.BUILTIN_MCP_SERVERS.map((s) => (off.has(s.id) ? { ...s, enabled: false } : s))
+    return [...builtins, ...sanitizeMcpList(getStore().getConfig().mcpServers)]
+  })
   ipcMain.handle('mcp:set', (_e, list: McpServer[]) => {
     // 闸门抽到 shared/mcp-list.partitionMcpServers（逻辑层可断言）：形状判定 + 条数上限 + 补形打标，
     // 被拒的条目一律点名回界面（rejected），不再由 .slice 静默丢掉第 21 条。
@@ -383,6 +405,16 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   ipcMain.handle('mcp:probe', (_e, server: McpServer) => mcp.probeServer(server))
   ipcMain.handle('mcp:trust', () => approvals.mcpTrusted())
   ipcMain.handle('mcp:trust:set', (_e, id: string, trusted: boolean) => ({ ok: true, list: approvals.setMcpTrust(String(id ?? ''), !!trusted) }))
+  // 内置组全局启停：id 只认主进程常量里的内置条目（渲染层塞别的 id 无效），状态存 config.mcpBuiltinOff
+  ipcMain.handle('mcp:builtin:set', (_e, id: string, on: boolean) => {
+    const known = mcp.BUILTIN_MCP_SERVERS.find((s) => s.id === id)
+    if (!known) return { ok: false, message: `未知的内置 server id：${String(id ?? '').slice(0, 40)}` }
+    const cur = new Set(getStore().getConfig().mcpBuiltinOff ?? [])
+    if (on) cur.delete(id)
+    else cur.add(id)
+    getStore().setMcpBuiltinOff([...cur])
+    return { ok: true }
+  })
 
   // ---------- 工具 Hook（用户在设置里配置） ----------
   // 读路径的形状闸门（复审 Out-of-Scope 里点出的：hooks:list 原样返回整表，手改 config.json 塞个
@@ -617,9 +649,14 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     // 手改 config.json 塞进的 null 会当场 TypeError 掀掉整次对话。闸门顺带把旧单命令记录
     // 标成停用，这里按 enabled !== false 直接跳过：停用的 server 不该再"尝试连接并必然失败"。
     const knownServers = sanitizeMcpList(stored.mcpServers)
+    const builtinOff = new Set(stored.mcpBuiltinOff ?? [])
     const selected = (grant?.mcpServerIds ?? [])
-      // 内置基础组不在用户配置里（合成条目），按常量 id 命中；其余从过闸门的配置里找
-      .map((id) => (id === mcp.BUILTIN_MCP_BASIC.id ? mcp.BUILTIN_MCP_BASIC : knownServers.find((s) => s.id === id)))
+      // 内置组不在用户配置里（合成条目），按常量命中并应用全局停用态；其余从过闸门的配置里找
+      .map((id) => {
+        const b = mcp.BUILTIN_MCP_SERVERS.find((s) => s.id === id)
+        if (b) return builtinOff.has(b.id) ? { ...b, enabled: false as const } : b
+        return knownServers.find((s) => s.id === id)
+      })
       .filter((s): s is McpServer => !!s && s.enabled !== false)
     const clients: mcp.McpClient[] = []
     const wiringEntries: { client: mcp.McpClient; tools: mcp.McpToolInfo[] }[] = []
@@ -628,9 +665,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
         const { client } = await mcp.McpClient.connect(s)
         clients.push(client)
         const tools = await client.listTools()
-        // 内置组免信任弹窗：进程内实现、随应用发布，与内置工具同级信任；
+        // 内置组（basic/calc/kv/think）免信任弹窗：进程内实现、随应用发布，与内置工具同级信任；
         // 其余 server 首次连接仍要确认（探完工具清单再问人，放行时看得见它能干什么）
-        if (s.builtin !== 'basic' && !approvals.isMcpTrusted(s.id)) {
+        if (!s.builtin && !approvals.isMcpTrusted(s.id)) {
           const d = await approvals.requestApproval(
             {
               id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
@@ -846,8 +883,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- 工具层（沙箱执行） ----------
   // 工具清单（只读展示）：与发给模型的同一份 toolDefs——授权面板里"看到的"与模型"拿到的"永远一致，
   // 不在渲染层再抄一份清单（两份必然漂移）。flags 取面板当前的开关状态。
-  ipcMain.handle('tools:defs', (_e, flags: { allowCommands?: boolean; allowWeb?: boolean }) =>
-    (toolDefs(!!flags?.allowCommands, !!flags?.allowWeb) as { function: { name: string; description?: string } }[])
+  ipcMain.handle('tools:defs', (_e, flags: { allowCommands?: boolean; allowWeb?: boolean; advanced?: string[] }) =>
+    (toolDefs(!!flags?.allowCommands, !!flags?.allowWeb, false, Array.isArray(flags?.advanced) ? (flags.advanced as string[]) : undefined) as { function: { name: string; description?: string } }[])
       .map((d) => ({ name: d.function.name, desc: String(d.function.description ?? '').split('\n')[0].slice(0, 140) }))
   )
   // 这条直调入口只存在于验证态：与 config:importJson 同一道闸门（argv 带 --ahub-verify 才注册）、同一先例。

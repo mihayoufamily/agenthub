@@ -854,6 +854,16 @@ function McpSection() {
           return (
             <div key={s.id} data-mcp-row data-mcp-builtin style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <Switch
+                  on={s.enabled !== false}
+                  onChange={(v) => {
+                    void bridge.mcp.builtinSet(s.id, v).then((r) => {
+                      if (!r.ok) useUi.getState().toast(r.message ?? '操作失败', 'warn')
+                      load()
+                    })
+                  }}
+                  label={`启用 ${s.name}`}
+                />
                 <b style={{ fontSize: 13 }}>{s.name}</b>
                 <Badge tone="ok">内置 · 随应用更新</Badge>
                 <Badge tone="ok">进程内实现，无需信任</Badge>
@@ -862,7 +872,17 @@ function McpSection() {
                 <Button variant="ghost" onClick={() => void probe(s)} disabled={busy === s.id}>{busy === s.id ? '连接中…' : '连接并查看工具'}</Button>
               </div>
               <code style={{ display: 'block', fontSize: 11.5, marginTop: 4, wordBreak: 'break-all', color: 'var(--text-2)' }}>
-                now（当前时间/时区换算）· memory_save（存跨会话要点）· memory_list（查长期记忆）——在 Agent 的「文件/命令工具」面板勾选启用
+                {(() => {
+                  const kind = String(s.builtin)
+                  return kind === 'calc'
+                    ? 'calc（数学表达式精确求值，手写解析器、绝不动态执行）'
+                    : kind === 'kv'
+                      ? 'kv_set / kv_get / kv_delete / kv_list（跨会话键值存储，持久在应用数据目录）'
+                      : kind === 'think'
+                        ? 'sequential_thinking（分步思考脚手架）'
+                        : 'now（当前时间/时区换算）· memory_save（存跨会话要点）· memory_list（查长期记忆）'
+                })()}
+                ——停用后所有 Agent 都看不到它；Agent 侧还要在「文件/命令工具」面板勾选
               </code>
             </div>
           )

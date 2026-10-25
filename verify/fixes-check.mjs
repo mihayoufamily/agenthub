@@ -2680,9 +2680,9 @@ console.log('\n[批次 F · 计划态] 批准前不产生文件改动（模型 A
   const planGrant = { dir: planRoot, access: 'sandbox' }
 
   if (pm) {
-    ok('写类工具名单就是那五个（write/replace/delete/move/run_command），不多不少',
+    ok('写类工具名单就是那七个（write/replace/delete/move/run_command/zip_pack/zip_unpack），不多不少',
       JSON.stringify([...pm.WRITE_TOOLS].sort()) ===
-        JSON.stringify(['delete_file', 'move', 'replace_in_file', 'run_command', 'write_file']),
+        JSON.stringify(['delete_file', 'move', 'replace_in_file', 'run_command', 'write_file', 'zip_pack', 'zip_unpack']),
       JSON.stringify(pm.WRITE_TOOLS))
     ok('只读类（read/list/search/glob）在计划态照常放行——计划要读东西才出得来',
       ['read_file', 'list_dir', 'search_files', 'glob_files'].every((t) => pm.planModeVerdict(t, true).allowed === true),
@@ -3560,10 +3560,10 @@ console.log('\n[BM] 内置 MCP 基础组与默认工具授权')
 
   // 接线绊线：装配/分流/免信任/只读渲染/默认工具注入，断任何一条立刻红
   const ipcBM = readSrcSafe('src/main/ipc.ts')
-  ok('绊线：ipc 装配绑定记忆存储、mcp:list 合成内置条目、信任弹窗对 builtin 分流',
+  ok('绊线：ipc 装配绑定记忆存储、mcp:list 按常量组合成内置条目、信任弹窗对 builtin 分流',
     ipcBM.error === null && ipcBM.text.includes('bindBuiltinMemory(') &&
-      ipcBM.text.includes('[mcp.BUILTIN_MCP_BASIC, ...sanitizeMcpList') &&
-      ipcBM.text.includes("s.builtin !== 'basic' && !approvals.isMcpTrusted"),
+      ipcBM.text.includes('BUILTIN_MCP_SERVERS') &&
+      ipcBM.text.includes('!s.builtin && !approvals.isMcpTrusted'),
     ipcBM.error ?? '缺 bindBuiltinMemory / 合成清单 / builtin 信任分流')
   const agBM = readSrcSafe('src/renderer/src/stores/agents.ts')
   ok('绊线：新建模型 Agent 注入默认工具（buildDefaultTools + ensureWorkspaceDir，失败降级纯对话）',
@@ -3597,6 +3597,116 @@ console.log('\n[TL] 工具清单折叠区（tools:defs）')
     cvTL.error === null && cvTL.text.includes('data-testid="tool-list-toggle"') && cvTL.text.includes('aria-expanded={listOpen}') &&
       cvTL.text.includes('bridge.tools.defs') && cvTL.text.includes('对话时并入'),
     cvTL.error ?? 'ToolsGrantModal 缺折叠清单')
+}
+
+// ---------- [AT] 进阶工具（zip/剪贴板/定位）+ 进阶内置 MCP（calc/kv/think）与启停 ----------
+console.log('\n[AT] 进阶工具白名单与进阶内置 MCP')
+{
+  const mcpAT = await import('../out/main/mcp.js')
+  const pmAT = await import('../out/shared/plan-mode.js')
+
+  // calc：手写调度场的行为面（绝不动态执行）
+  {
+    const r1 = mcpAT.calcEval('(1+2)*3')
+    ok('calc：优先级与括号 (1+2)*3 = 9', r1.ok && r1.value === 9, JSON.stringify(r1))
+    ok('calc：^ 右结合 2^3^2 = 512', (() => { const r = mcpAT.calcEval('2^3^2'); return r.ok && r.value === 512 })(), JSON.stringify(mcpAT.calcEval('2^3^2')))
+    ok('calc：一元负号与函数 sqrt(2)^2 ≈ 2', (() => { const r = mcpAT.calcEval('-3+5'); const r2 = mcpAT.calcEval('sqrt(2)^2'); return r.ok && r.value === 2 && r2.ok && Math.abs(r2.value - 2) < 1e-9 })())
+    ok('calc：min/max 多参与常量 min(3,1,2)=1、pi>3', (() => { const r = mcpAT.calcEval('min(3,1,2)'); const r2 = mcpAT.calcEval('pi'); return r.ok && r.value === 1 && r2.ok && r2.value > 3.14 && r2.value < 3.15 })())
+    ok('calc：浮点尾巴收敛 0.1+0.2 = 0.3', (() => { const r = mcpAT.calcEval('0.1+0.2'); return r.ok && r.value === 0.3 })(), JSON.stringify(mcpAT.calcEval('0.1+0.2')))
+    ok('calc：除零/残缺式/未知标识符逐个拒收', (() => {
+      return !mcpAT.calcEval('1/0').ok && !mcpAT.calcEval('2+').ok && !mcpAT.calcEval('eval(1)').ok && !mcpAT.calcEval('process').ok
+    })(), JSON.stringify([mcpAT.calcEval('1/0'), mcpAT.calcEval('eval(1)')]))
+    const mcpSrcAT = readSrcSafe('src/main/mcp.ts')
+    ok('绊线：calc 实现里没有动态执行（无裸 eval( 与 new Function）',
+      mcpSrcAT.error === null && !/[^A-Za-z]eval\s*\(/.test(mcpSrcAT.text) && !mcpSrcAT.text.includes('new Function'),
+      mcpSrcAT.error ?? 'mcp.ts 出现动态执行')
+  }
+
+  // kv：注入 fake 存储，四操作往返与上限
+  {
+    const kvStore = {}
+    // load 必须返回副本：kv 实现是"load→改→save 回传同一对象"，fake 若返回原引用，
+    // save 里的"清空再合并"会把作为入参的同一个对象也清掉（自引用清空，全组断言必红）
+    mcpAT.bindBuiltinKv({ load: () => ({ ...kvStore }), save: (m) => { Object.keys(kvStore).forEach((k) => delete kvStore[k]); Object.assign(kvStore, m) } })
+    const conn = await mcpAT.McpClient.connect(mcpAT.BUILTIN_MCP_SERVERS.find((s) => s.id === 'builtin-kv'))
+    const c = conn.client
+    try {
+      const tools = await c.listTools()
+      ok('kv 组列出 4 个工具（set/get/delete/list）', tools.length === 4 && ['kv_set', 'kv_get', 'kv_delete', 'kv_list'].every((n) => tools.some((t) => t.name === n)), JSON.stringify(tools.map((t) => t.name)))
+      const sv = await c.callTool('kv_set', { key: 'task/step', value: '第 3 步已完成' })
+      const gt = await c.callTool('kv_get', { key: 'task/step' })
+      ok('kv：set→get 往返', sv.ok && gt.ok && gt.output.includes('第 3 步已完成'), `${sv.output} | ${gt.output}`)
+      const ls = await c.callTool('kv_list', { prefix: 'task/' })
+      ok('kv：list 按前缀过滤', ls.ok && ls.output.includes('task/step'), ls.output)
+      const big = await c.callTool('kv_set', { key: 'big', value: 'x'.repeat(20000) })
+      ok('kv：超长值拒收（10KB 上限）', !big.ok, big.output.slice(0, 60))
+      const del = await c.callTool('kv_delete', { key: 'task/step' })
+      const gone = await c.callTool('kv_get', { key: 'task/step' })
+      ok('kv：delete 后 get 如实报无此键', del.ok && !gone.ok, `${del.output} | ${gone.output}`)
+    } finally { c.close() }
+  }
+
+  // think 与 calc 的 server 集成
+  {
+    const c = (await mcpAT.McpClient.connect(mcpAT.BUILTIN_MCP_SERVERS.find((s) => s.id === 'builtin-think'))).client
+    try {
+      const t1 = await c.callTool('sequential_thinking', { thought: '先看输入范围', nextThoughtRequired: true, thoughtNumber: 1, totalThoughts: 3 })
+      const bad = await c.callTool('sequential_thinking', { thought: '跳步', nextThoughtRequired: true, thoughtNumber: 5, totalThoughts: 3 })
+      ok('think：中间步受理、越界步号拒收', t1.ok && !bad.ok, `${t1.output} | ${bad.output}`)
+    } finally { c.close() }
+    const c2 = (await mcpAT.McpClient.connect(mcpAT.BUILTIN_MCP_SERVERS.find((s) => s.id === 'builtin-calc'))).client
+    try {
+      const r = await c2.callTool('calc', { expression: '(1+0.13)*2400' })
+      ok('calc server 集成：(1+0.13)*2400 = 2712', r.ok && r.output.includes('2712'), r.output)
+    } finally { c2.close() }
+  }
+
+  // 进阶工具 schema 与执行面
+  {
+    const toolsAT = await import('../out/main/tools.js')
+    const base = toolsAT.toolDefs(true, true).map((d) => d.function.name)
+    const withAdv = toolsAT.toolDefs(true, true, undefined, ['zip_pack', 'clipboard_read']).map((d) => d.function.name)
+    ok('进阶 schema：白名单内附加（11→13），白名单外不出现',
+      base.length === 11 && !base.includes('zip_pack') &&
+        withAdv.includes('zip_pack') && withAdv.includes('clipboard_read') && !withAdv.includes('zip_unpack') && withAdv.length === 13,
+      JSON.stringify(withAdv))
+    ok('计划态：zip 两枚按写类摘除 schema 并拒绝执行',
+      toolsAT.toolDefs(true, true, true, ['zip_pack']).every((d) => d.function.name !== 'zip_pack') &&
+        pmAT.planModeVerdict('zip_pack', true).allowed === false,
+      JSON.stringify(toolsAT.toolDefs(true, true, true, ['zip_pack']).map((d) => d.function.name)))
+
+    const zipRoot = mkdtempSync(join(tmpdir(), 'ahub-at-'))
+    const g = { dir: zipRoot, access: 'sandbox', advanced: ['zip_pack', 'zip_unpack'] }
+    const gNo = { dir: zipRoot, access: 'sandbox' }
+    const w = await toolsAT.execTool(g, 'write_file', JSON.stringify({ path: 'docs/x.txt', content: 'ZIP-ROUNDTRIP-内容123' }))
+    const pk = await toolsAT.execTool(g, 'zip_pack', JSON.stringify({ entries: ['docs'], out: 'bundle.zip' }))
+    const up = await toolsAT.execTool(g, 'zip_unpack', JSON.stringify({ zip: 'bundle.zip', dest: 'out2' }))
+    const rd = await toolsAT.execTool(g, 'read_file', JSON.stringify({ path: 'out2/docs/x.txt' }))
+    ok('zip：pack→unpack→read 真实往返（内容逐字一致）',
+      w.ok && pk.ok && up.ok && rd.ok && rd.output.includes('ZIP-ROUNDTRIP-内容123'),
+      `${pk.output} | ${up.output} | ${rd.output.slice(0, 60)}`)
+    const gated = await toolsAT.execTool(gNo, 'zip_pack', JSON.stringify({ entries: ['docs'], out: 'b2.zip' }))
+    ok('闸：advanced 未启用时 zip_pack 拒收并点名面板', !gated.ok && /进阶工具/.test(gated.output) && /未启用/.test(gated.output), gated.output)
+    const esc = await toolsAT.execTool(g, 'zip_pack', JSON.stringify({ entries: ['../evil'], out: 'b3.zip' }))
+    ok('闸：zip_pack 输入越界（../）拒收', !esc.ok && /越界/.test(esc.output), esc.output)
+  }
+
+  // 接线绊线：启停通道与界面
+  const ipcAT = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：mcp:builtin:set 启停通道在场（id 只认常量，状态落 mcpBuiltinOff）',
+    ipcAT.error === null && ipcAT.text.includes("'mcp:builtin:set'") && ipcAT.text.includes('setMcpBuiltinOff') && ipcAT.text.includes('mcpBuiltinOff'),
+    ipcAT.error ?? '缺启停通道')
+  const spAT = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
+  ok('绊线：设置页内置行有启停 Switch（bridge.mcp.builtinSet）',
+    spAT.error === null && spAT.text.includes('builtinSet'),
+    spAT.error ?? '设置页缺内置启停')
+  const cvAT = readSrcSafe('src/renderer/src/features/ChatView.tsx')
+  ok('绊线：工具面板有进阶分区（advanced-tools-block + 五个开关 + 保存写入 advanced）',
+    cvAT.error === null && cvAT.text.includes('data-testid="advanced-tools-block"') &&
+      cvAT.text.includes('advanced-tool-${id}') &&
+      ['zip_pack', 'zip_unpack', 'clipboard_read', 'clipboard_write', 'show_in_folder'].every((n) => cvAT.text.includes(n)) &&
+      cvAT.text.includes('{ advanced: adv }'),
+    cvAT.error ?? '工具面板缺进阶分区')
 }
 
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)

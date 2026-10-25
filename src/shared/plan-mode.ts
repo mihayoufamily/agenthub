@@ -6,8 +6,8 @@
  * 只能事后列出改动，界面措辞绝不能写成"一定没改文件"）。
  */
 
-/** 会改动盘上或系统状态的五个工具；只读类与联网类不在其内 */
-export const WRITE_TOOLS = ['write_file', 'replace_in_file', 'delete_file', 'move', 'run_command'] as const
+/** 会改动盘上或系统状态的七个工具；只读类与联网类不在其内（zip 两枚 2026-10-26 加入：打包/解包都落盘） */
+export const WRITE_TOOLS = ['write_file', 'replace_in_file', 'delete_file', 'move', 'run_command', 'zip_pack', 'zip_unpack'] as const
 
 export interface PlanVerdict {
   allowed: boolean

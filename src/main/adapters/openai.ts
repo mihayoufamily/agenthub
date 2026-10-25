@@ -436,8 +436,9 @@ export function chatStream(
   // （route.call 由我们发起），拦得住就不该用"声明它危险"代替"关掉它"。
   // CLI 角色是另一回事——那是真拦不到，只能事后列改动。
   const mcpActive = grant?.planMode === true ? undefined : mcp
-  // 内置工具（有沙箱授权才有）+ MCP 工具合并成一张函数表；一个都没有就不带 tools 字段
-  const toolList = [...(grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb, grant.planMode) : []), ...(mcpActive?.defs ?? [])]
+  // 内置工具（有沙箱授权才有）+ MCP 工具合并成一张函数表；一个都没有就不带 tools 字段。
+  // advanced 是进阶工具白名单（zip/剪贴板/资源管理器定位），缺省全关
+  const toolList = [...(grant ? toolDefs(!!grant.allowCommands, !!grant.allowWeb, grant.planMode, grant.advanced) : []), ...(mcpActive?.defs ?? [])]
   const tools = toolList.length ? toolList : undefined
 
   void (async () => {
