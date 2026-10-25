@@ -168,7 +168,10 @@ const api = {
   },
   agents: {
     scan: () => ipcRenderer.invoke('agents:scan') as Promise<ScanResultItem[]>,
-    checkPath: (p: string) => ipcRenderer.invoke('agents:checkPath', p) as Promise<boolean>
+    checkPath: (p: string) => ipcRenderer.invoke('agents:checkPath', p) as Promise<boolean>,
+    /** 所有老模型 Agent 一键补默认工具（无→全套默认；有→只补沙箱目录与联网，其余显式设置不动） */
+    applyDefaults: () =>
+      ipcRenderer.invoke('agents:defaults:apply') as Promise<{ ok: boolean; changed: { name: string; what: string }[]; message?: string }>
   },
   cli: {
     /** 本地连接测试（解析 exe + 版本命令，不联网） */

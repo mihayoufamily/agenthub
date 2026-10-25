@@ -8,6 +8,7 @@ import * as openai from './adapters/openai'
 import * as cli from './adapters/cli'
 import type { CustomModelConfig, AgentSession, WorkflowRun, Prefs, AgentConfig, AppConfig, ToolGrant, Skill, PriceOverride, ApprovalDecision, HookRule, McpServer, TaskSchedule, WorkflowTemplate, MemoryEntry } from '../shared/types'
 import { configurePriceOverrides, partitionPriceOverrides } from '../shared/overrides'
+import { planDefaultToolsBackfill } from '../shared/default-tools'
 import { partitionHookRules, sanitizeHookList } from '../shared/hooks'
 import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
 import { normalizePolicy, VERIFY_SWITCH } from '../shared/compat'
@@ -581,6 +582,32 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- Agent 扫描 ----------
   ipcMain.handle('agents:scan', () => scanAgents())
   ipcMain.handle('agents:checkPath', (_e, p: string) => checkManualPath(p))
+
+  // 所有老模型 Agent 一键补默认工具（显式操作，界面带两步确认）：规划在 shared 纯函数（可断言），
+  // 主进程只做"确保工作区目录存在"并整表写回；用户显式设置的字段（access/命令/进阶/MCP）规划器不碰。
+  ipcMain.handle('agents:defaults:apply', async () => {
+    const agents = getStore().getConfig().agents
+    const dirCache = new Map<string, string>()
+    const dirFor = (name: string): string | null => {
+      const key = name.toLowerCase()
+      if (dirCache.has(key)) return dirCache.get(key) ?? null
+      const safe = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40)
+      let dir = ''
+      if (safe && safe !== '.' && safe !== '..') {
+        try {
+          dir = join(app.getPath('documents'), 'AgentHub-workspaces', safe)
+          mkdirSync(dir, { recursive: true })
+        } catch { dir = '' }
+      }
+      dirCache.set(key, dir)
+      return dir || null
+    }
+    const plan = planDefaultToolsBackfill(agents, dirFor)
+    if (!plan.length) return { ok: true, changed: [] as { name: string; what: string }[] }
+    const byId = new Map(plan.map((p) => [p.id, p]))
+    getStore().setAgents(agents.map((a) => (byId.has(a.id) ? { ...a, tools: byId.get(a.id)!.tools } : a)))
+    return { ok: true, changed: plan.map((p) => ({ name: p.name, what: p.what.join('、') })) }
+  })
 
   // ---------- 自定义模型（真实 OpenAI 兼容接入） ----------
   ipcMain.handle('model:test', async (_e, cfg: CustomModelConfig, apiKey: string) => {

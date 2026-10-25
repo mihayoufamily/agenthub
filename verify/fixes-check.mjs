@@ -3807,5 +3807,60 @@ console.log('\n[FP] 文件预览面板与 fs:readDataUrl 守卫')
     cvFP.error ?? '缺推荐配置按钮')
 }
 
+// ---------- [DB] 老 Agent 一键补默认值（纯规划器 + 接线绊线） ----------
+console.log('\n[DB] planDefaultToolsBackfill 与一键补默认值')
+{
+  const dt2 = await import('../out/shared/default-tools.js')
+  const mk = (id, name, kind, tools) => ({ id, name, kind, ...(tools ? { tools } : {}) })
+  const dirFor = (n) => `D:\\ws\\${n}`
+  {
+    const plan = dt2.planDefaultToolsBackfill([
+      mk('a1', 'DeepSeek', 'model', undefined),
+      mk('c1', 'Codex', 'cli', undefined),
+      mk('d1', '演示', 'demo', undefined)
+    ], dirFor)
+    ok('无 tools 的模型 Agent 补全套默认（沙箱+联网）；CLI/演示不碰',
+      plan.length === 1 && plan[0].id === 'a1' && plan[0].tools.allowWeb === true && plan[0].tools.access === 'sandbox' &&
+        plan[0].tools.dir === 'D:\\ws\\DeepSeek' && plan[0].tools.allowCommands === undefined,
+      JSON.stringify(plan))
+  }
+  {
+    const plan = dt2.planDefaultToolsBackfill([
+      mk('b1', 'auto', 'model', { dir: 'D:\\ws\\auto', access: 'full', allowWeb: false, advanced: ['zip_pack'], mcpServerIds: ['builtin-calc'] })
+    ], dirFor)
+    ok('已有 tools 只补缺：联网没开则开；完全访问/进阶/MCP 勾选原样保留',
+      plan.length === 1 && plan[0].tools.allowWeb === true && plan[0].tools.access === 'full' &&
+        JSON.stringify(plan[0].tools.advanced) === JSON.stringify(['zip_pack']) &&
+        JSON.stringify(plan[0].tools.mcpServerIds) === JSON.stringify(['builtin-calc']) &&
+        plan[0].tools.dir === 'D:\\ws\\auto',
+      JSON.stringify(plan))
+  }
+  {
+    const plan = dt2.planDefaultToolsBackfill([
+      mk('e1', '半配', 'model', { dir: '', allowWeb: true })
+    ], dirFor)
+    ok('dir 为空则补工作区目录',
+      plan.length === 1 && plan[0].tools.dir === 'D:\\ws\\半配'.replace('半配', dirFor('半配').split('\\').pop()) || plan[0].tools.dir === dirFor('半配'),
+      JSON.stringify(plan))
+    const none = dt2.planDefaultToolsBackfill([mk('f1', '齐的', 'model', { dir: 'D:\\x', allowWeb: true })], dirFor)
+    ok('已符合默认配置的 Agent 不产生改动', none.length === 0, JSON.stringify(none))
+    const failed = dt2.planDefaultToolsBackfill([mk('g1', 'x', 'model', undefined)], () => null)
+    ok('目录解析失败（磁盘/权限）→ 该 Agent 跳过而不是半套写回', failed.length === 0, JSON.stringify(failed))
+  }
+
+  const ipcDB = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：agents:defaults:apply 通道用同一个规划器并整表写回',
+    ipcDB.error === null && ipcDB.text.includes("'agents:defaults:apply'") && ipcDB.text.includes('planDefaultToolsBackfill') && ipcDB.text.includes('setAgents('),
+    ipcDB.error ?? '缺一键补默认值通道')
+  const preDB = readSrcSafe('src/preload/index.ts')
+  ok('绊线：preload 暴露 agents.applyDefaults',
+    preDB.error === null && preDB.text.includes("invoke('agents:defaults:apply'"),
+    preDB.error ?? 'preload 缺 applyDefaults')
+  const spDB2 = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
+  ok('绊线：设置页有一键补默认值行（两步确认 + 应用后点名回执）',
+    spDB2.error === null && spDB2.text.includes('data-testid="apply-defaults-row"') && spDB2.text.includes('确认对全部应用'),
+    spDB2.error ?? '设置页缺一键入口')
+}
+
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

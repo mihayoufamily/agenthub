@@ -14,3 +14,50 @@ import type { ToolGrant } from './types'
 export function buildDefaultTools(dir: string): ToolGrant {
   return { dir: dir.trim(), access: 'sandbox', allowWeb: true }
 }
+
+/** 老 Agent 补默认值的一件改动（界面回执用） */
+export interface BackfillPlanItem {
+  id: string
+  name: string
+  tools: ToolGrant
+  what: string[]
+}
+
+/**
+ * "所有老 Agent 一键补默认值"的纯规划器（2026-10-26 用户拍板；显式操作、带确认，不是静默迁移）：
+ * - 没有 tools 的模型 Agent：补全套默认（沙箱工作区 + 联网，命令不默认开）；
+ * - 已有 tools 的模型 Agent：只补缺——dir 空则填工作区、联网没开则开；
+ *   access/命令/审批策略/进阶白名单/MCP 勾选一律不动（用户显式设置的东西不覆盖）；
+ * - CLI / 演示 Agent 不碰。
+ * dirFor(name) 由调用方注入：主进程是"确保并返回工作区目录"，逻辑层测试传 fake。
+ */
+export function planDefaultToolsBackfill(
+  agents: { id: string; name: string; kind: string; tools?: ToolGrant }[],
+  dirFor: (name: string) => string | null
+): BackfillPlanItem[] {
+  const out: BackfillPlanItem[] = []
+  for (const a of agents) {
+    if (a.kind !== 'model') continue
+    if (!a.tools) {
+      const dir = dirFor(a.name)
+      if (!dir) continue
+      out.push({ id: a.id, name: a.name, tools: buildDefaultTools(dir), what: ['启用工具（沙箱工作区+联网）'] })
+      continue
+    }
+    const what: string[] = []
+    let tools: ToolGrant = { ...a.tools }
+    if (!tools.dir.trim()) {
+      const dir = dirFor(a.name)
+      if (dir) {
+        tools = { ...tools, dir }
+        what.push('补沙箱目录')
+      }
+    }
+    if (!tools.allowWeb) {
+      tools = { ...tools, allowWeb: true }
+      what.push('开启联网')
+    }
+    if (what.length) out.push({ id: a.id, name: a.name, tools, what })
+  }
+  return out
+}

@@ -148,8 +148,51 @@ function AgentsSection() {
   const scanning = useAgents((s) => s.scanning)
   const scan = useAgents((s) => s.scan)
   const colorOf = useAgents((s) => s.colorOf)
+  // 一键补默认值：两步确认（第一击变"确认？"，4 秒不点回弹），应用后整表刷新并点名谁被补了什么
+  const [confirmApply, setConfirmApply] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const applyDefaults = async () => {
+    if (!confirmApply) {
+      setConfirmApply(true)
+      setTimeout(() => setConfirmApply(false), 4000)
+      return
+    }
+    setConfirmApply(false)
+    setApplying(true)
+    const r = await bridge.agents.applyDefaults()
+    const cfg = await bridge.config.get()
+    useAgents.getState().init(cfg.agents)
+    setApplying(false)
+    if (!r.ok) {
+      useUi.getState().toast(r.message ?? '应用失败', 'error')
+      return
+    }
+    if (!r.changed.length) {
+      useUi.getState().toast('没有需要补的 Agent——都已符合默认配置', 'info')
+      return
+    }
+    useUi.getState().toast(`已补 ${r.changed.length} 个 Agent：${r.changed.map((c) => `${c.name}（${c.what}）`).join('；')}`, 'ok')
+  }
   return (
     <div className="set-group">
+      <div
+        style={{ display: 'flex', gap: 10, alignItems: 'center', border: '1px dashed var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 12px', marginBottom: 12, fontSize: 12.5 }}
+        data-testid="apply-defaults-row"
+      >
+        <div style={{ flex: 1, color: 'var(--text-3)', lineHeight: 1.6 }}>
+          <b style={{ color: 'var(--text-1)' }}>老 Agent 一键补默认工具</b>：给所有模型 Agent 补上新建 Agent 的默认配置——
+          没开工具的启用（沙箱工作区 + 联网，命令仍默认关）；已开工具的只补缺（沙箱目录为空 / 联网没开）。
+          完全访问、命令、进阶工具、MCP 勾选等显式设置一律不动；CLI 与演示 Agent 不受影响。
+        </div>
+        <Button
+          variant={confirmApply ? 'primary' : 'secondary'}
+          style={{ height: 28 }}
+          disabled={applying}
+          onClick={() => void applyDefaults()}
+        >
+          {applying ? '应用中…' : confirmApply ? '确认对全部应用？' : '一键补默认值'}
+        </Button>
+      </div>
       <div className="group-title" style={{ display: 'flex', alignItems: 'center' }}>
         已连接 Agent
         <span style={{ marginLeft: 'auto' }}>
