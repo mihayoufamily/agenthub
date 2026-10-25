@@ -61,11 +61,13 @@
   from { opacity: 0.55; transform: translate(0, -0.08em); filter: blur(1px); }
   to { opacity: 0; transform: translate(0.7em, 0.4em); filter: blur(2.5px); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .spin-dot { animation: none; }
-  .ch-fade { animation: none; opacity: 1; transform: none; filter: none; }
-  .ch-fade::after { display: none; }
-}
+/* 动效偏好的唯一闸门是应用自身设置（root[data-motion]，外观里"减少动态效果"）：
+   不用 prefers-reduced-motion 媒体查询——Windows 系统级"关闭动画"会让它恒为 reduce，
+   把 CSS 动画整体杀死（2026-10-25 用户实测：打字机节奏在而所有 CSS 动画不可见，与此吻合）；
+   应用内的偏好由用户在设置里显式选择，显式选择优先于系统默认 */
+[data-motion='reduced'] .spin-dot { animation: none; }
+[data-motion='reduced'] .ch-fade { animation: none; opacity: 1; transform: none; filter: none; }
+[data-motion='reduced'] .ch-fade::after { display: none; }
 
 html, body, #root {
   height: 100%;
