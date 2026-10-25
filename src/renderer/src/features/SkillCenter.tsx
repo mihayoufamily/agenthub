@@ -4,7 +4,7 @@
 // 不引入新的全局 store（stores 本批次禁改，且 settings store 里本就没有 skills 状态）。
 import React, { useCallback, useEffect, useState } from 'react'
 import type { Skill } from '@shared/types'
-import { skillUsages, SKILL_TIMING_NOTE, SKILL_SOURCE_LABELS } from '@shared/skill-usages'
+import { skillUsages, SKILL_TIMING_NOTE, SKILL_TIMING_NOTE_WF, SKILL_SOURCE_LABELS } from '@shared/skill-usages'
 import { bridge, market, type RegistryItem } from '../lib/ipc'
 import { useUi } from '../stores/ui'
 import { useAgents } from '../stores/agents'
@@ -53,12 +53,13 @@ export function SkillUsagePanel({ skill }: { skill: Skill }) {
   )
 }
 
-type TabKey = 'installed' | 'builtin' | 'market'
+type TabKey = 'installed' | 'builtin' | 'market' | 'wf'
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'installed', label: '已安装' },
   { key: 'builtin', label: '官方内置' },
-  { key: 'market', label: '技能市场' }
+  { key: 'market', label: '技能市场' },
+  { key: 'wf', label: '工作流绑定' }
 ]
 
 // 来源标签在 shared（Agent 管理卡的技能徽章与这里共用一份，不许各写一份）
@@ -72,6 +73,82 @@ function verCmp(a: string, b: string): number {
     if (d !== 0) return d
   }
   return 0
+}
+
+const WF_ROLES = ['planner', 'executor', 'reviewer'] as const
+const WF_ROLE_LABEL: Record<(typeof WF_ROLES)[number], string> = { planner: '规划', executor: '执行', reviewer: '审核' }
+
+/**
+ * 「工作流绑定」矩阵：行 = 已安装技能，列 = 工作流三角色，格子 = 角色级绑定勾选。
+ * 写路径与 ConfigPanel.roleSelect / RolePicker 浮层逐字同源：
+ * patchConfig({ [role]: { ...cur, skillIds } })（store 内部落盘 setWorkflowDefaults 的 skillIds 三件套）。
+ * 停用技能照 AgentManageCard 的交互（⚠ 已停用 + 勾选禁用）：绑了也不会被注入，不能放行勾选。
+ */
+function WfBindingTab({ skills }: { skills: Skill[] | null }) {
+  const config = useWorkflow((s) => s.config)
+  const patchConfig = useWorkflow((s) => s.patchConfig)
+  const toggle = (role: (typeof WF_ROLES)[number], sk: Skill, checked: boolean) => {
+    const cur = config[role]
+    patchConfig({
+      [role]: { ...cur, skillIds: checked ? [...(cur.skillIds ?? []), sk.id] : (cur.skillIds ?? []).filter((x) => x !== sk.id) }
+    } as never)
+    // 即时反馈按既有 toggle 的 toast 风格，并把"何时生效"说在同一个句子里
+    useUi.getState().toast(`已更新「${sk.name}」在工作流${WF_ROLE_LABEL[role]}的绑定（下一次「开始任务」生效）`, 'ok')
+  }
+  return (
+    <div>
+      {skills === null && <div className="skill-center-empty">加载中…</div>}
+      {skills !== null && skills.length === 0 && (
+        <div className="skill-center-empty">还没有安装任何技能；先去「已安装 / 官方内置 / 技能市场」装一个</div>
+      )}
+      {skills !== null && skills.length > 0 && (
+        <div className="wf-skill-matrix" data-wf-skill-matrix>
+          <div className="wf-skill-matrix-head">
+            <div className="wf-skill-matrix-name">技能</div>
+            {WF_ROLES.map((r) => (
+              <div key={r} className="wf-skill-matrix-col">
+                {WF_ROLE_LABEL[r]}
+                <span className="wf-skill-count">{(config[r].skillIds ?? []).length}</span>
+              </div>
+            ))}
+          </div>
+          {skills.map((sk) => {
+            const src = sk.source ?? 'local'
+            const off = sk.enabled === false
+            return (
+              <div key={sk.id} className={cls('wf-skill-matrix-row', off && 'off')} style={off ? { opacity: 0.55 } : undefined}>
+                <div className="wf-skill-matrix-name">
+                  <span className="ac-skill-name">{sk.name}</span>
+                  <span className={cls('skill-src-badge', `src-${src}`)}>{SKILL_SOURCE_LABELS[src] ?? src}</span>
+                  {sk.version && <span className="wf-skill-ver">v{sk.version}</span>}
+                  {off && <span className="ac-skill-off" title="该技能已停用，绑定也不会生效">⚠ 已停用</span>}
+                </div>
+                {WF_ROLES.map((r) => {
+                  const on = (config[r].skillIds ?? []).includes(sk.id)
+                  return (
+                    <div key={r} className="wf-skill-matrix-cell">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={off}
+                        title={off ? '该技能已停用，绑定也不会生效' : `绑定到${WF_ROLE_LABEL[r]}角色`}
+                        onChange={(e) => toggle(r, sk, e.target.checked)}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })}
+          {/* Agent 级绑定（工作站 Agent 管理卡）是另一条注入来源，矩阵只管角色级这一层 */}
+          <div className="wf-skill-matrix-note">
+            这里只管<b>角色级</b>绑定；Agent 自身的技能绑定在工作站 Agent 管理卡配置，两边会合并注入。
+          </div>
+          <div className="skill-usage-note skill-usage-note-inline">{SKILL_TIMING_NOTE_WF}</div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 type PreviewTarget =
@@ -247,6 +324,8 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
             })}
           </div>
         )}
+
+        {tab === 'wf' && <WfBindingTab skills={skills} />}
 
         {tab === 'builtin' && (
           <div>

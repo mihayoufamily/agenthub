@@ -42,10 +42,15 @@ const SUITES = [
   // fixes 625：2026-10-25 两轮实测（审查修复轮 602 + 功能波轮 625）。602→625 多的 23 条：
   // winnav 无锚 fail-closed 反转与显式传根对照、__ahub_debug 验证态源码绊线 3 条、SSRF all:true 校验 3 条、
   // 引擎纯函数接线 2 条、MCP trustCommand 分派 1 条、队列计划开关口径 1 条、git 回滚段 [K2] 13 条。
-  // fixes 642：2026-10-25 技能生效范围轮实测（642 PASS / 0 FAIL）。625→642 多的 17 条是 [SK] 段：
-  // skillUsages 纯函数行为（Agent/角色绑定、enabled 不掺入、双通道、脏输入）、skillToggleToast 四组合逐字、
-  // SKILL_TIMING_NOTE 渲染层手抄绊线 + AgentManageCard 模式解释绊线（ConfigPanel 刻意不在列——角色级无 skillMode）。
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 642, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围（skillUsages/toggle toast/文案绊线）' },
+  // fixes 657：2026-10-25 两轮实测累积。625→642 是技能生效范围轮（[SK]：skillUsages 纯函数行为、
+  // skillToggleToast 四组合逐字、SKILL_TIMING_NOTE 渲染层手抄绊线、AgentManageCard 模式解释绊线——
+  // ConfigPanel 刻意不在列，角色级无 skillMode）；642→648 是 Agent 管理卡分区化轮（头部/保存状态/
+  // 来源徽章/技能中心入口六条绊线 + SKILL_SOURCE_LABELS 齐全性）；648→657 是工作流技能管理轮
+  // （[SK]⑨：SKILL_TIMING_NOTE_WF 有牙 + 手抄绊线、三写入口单一写路径、TaskView 只读、
+  // 开工快照 skillPlan 与 RunSkillEntry 契约、TaskView 读快照）。
+  // 口径订正记录：WF 时机文案初版写"含返工与续跑不受影响"，被渲染层批次的代码核实推翻
+  // （runStage 每阶段现读配置，任务内下一阶段即生效）——措辞已改，绊线的独特片段同步换成"下一个角色阶段"。
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 657, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围与工作流技能管理（skillUsages/时机文案/三写入口/开工快照）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 59, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态、技能注入层序、上一任务上下文都真跑过）' },
   // engine 28 / mcp-transport 31：2026-10-25 功能波轮实测（28 PASS / 31 PASS / 0 FAIL，各自独立脚本可单跑）。
   { name: 'engine', tier: 'logic', script: 'engine-check.mjs', min: 28, what: '引擎纯函数快照：六个竞态序列（清门/快照还原/续跑推断/队列出入/终态口径）+ 计划审计常量' },

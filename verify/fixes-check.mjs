@@ -3248,6 +3248,60 @@ console.log('\n[SK] 技能生效范围（skillUsages 事实清单 + 文案常量
     typeof su.SKILL_MODE_HINTS?.auto === 'string' && su.SKILL_MODE_HINTS.auto.length > 0 &&
       typeof su.SKILL_MODE_HINTS?.reference === 'string' && su.SKILL_MODE_HINTS.reference.length > 0,
     JSON.stringify(su.SKILL_MODE_HINTS))
+
+  // ⑨ 工作流侧的时机文案（SKILL_TIMING_NOTE_WF）：与工作站那句分开出——工作流是"每个角色阶段
+  // 现读配置"（runStage 每次重读，任务内下一阶段就生效），快照只供对账；承诺不同不能共用一句。
+  // 先钉"绊线自己有牙"：独特片段必须真的在常量里，否则下面那条渲染层绊线就是空转（口径同 ⑧）
+  ok('绊线本身有牙：SKILL_TIMING_NOTE_WF 常量非空且含独特片段「下一个角色阶段」',
+    typeof su.SKILL_TIMING_NOTE_WF === 'string' && su.SKILL_TIMING_NOTE_WF.length > 0 &&
+      su.SKILL_TIMING_NOTE_WF.includes('下一个角色阶段'), su.SKILL_TIMING_NOTE_WF)
+
+  // 渲染层手抄绊线：复用上面 ⑧ 的递归扫描结果（rendererTexts），「下一个角色阶段」只许活在 shared
+  // 常量里，渲染层必须 import——出现即说明有人把整句复制过去了，改措辞时会漏改
+  const WF_UNIQUE_PHRASE = '下一个角色阶段'
+  const wfPhraseHits = rendererTexts.filter((t) => t.includes(WF_UNIQUE_PHRASE)).length
+  ok('绊线：渲染层源码里没有手抄 SKILL_TIMING_NOTE_WF 的独特片段（必须 import 常量）',
+    rendererTexts.length > 0 && wfPhraseHits === 0,
+    `扫描 ${rendererTexts.length} 个文件，命中 ${wfPhraseHits} 处`)
+
+  // 单一写入口绊线：角色技能绑定的写路径只许经 useWorkflow 的 patchConfig 走三处界面
+  // （RolePicker / ConfigPanel / SkillCenter 工作流 Tab），三处源码必须同时出现 patchConfig 与
+  // skillIds——缺一个都说明绑定改从旁门写入，或界面根本没接上共享写路径。
+  // 渲染层接线由并行批次同刻进行；若此处红可能是对方尚未落地，重试一次后如实报。
+  const wfWriteFiles = [
+    'src/renderer/src/features/RolePicker.tsx',
+    'src/renderer/src/features/ConfigPanel.tsx',
+    'src/renderer/src/features/SkillCenter.tsx'
+  ]
+  for (const wfRel of wfWriteFiles) {
+    const wfSrc = readSrcSafe(wfRel)
+    ok(`绊线：${wfRel} 的绑定写路径经 patchConfig 且操作 skillIds（单一写入口）`,
+      wfSrc.error === null && wfSrc.text.includes('patchConfig') && wfSrc.text.includes('skillIds'),
+      wfSrc.error ?? (wfSrc.text.includes('patchConfig') ? '有 patchConfig，缺 skillIds' : '缺 patchConfig'))
+  }
+
+  // TaskView 是只读事实面板（读 run 上的定格快照），源码里出现 patchConfig 即说明把写入口混进了
+  // 事实面板。写断言前已核实 TaskView 现状确实没有 patchConfig，不是钉空绊线
+  const tvSrc = readSrcSafe('src/renderer/src/features/TaskView.tsx')
+  ok('绊线：TaskView 是只读事实面板，源码不得含 patchConfig（写入口只许三处）',
+    tvSrc.error === null && !tvSrc.text.includes('patchConfig'),
+    tvSrc.error ?? 'TaskView 出现了 patchConfig')
+
+  // 开工快照：角色绑定在开工时解析成快照存进 run（workflow store 写 skillPlan；types 契约
+  // 是 RunSkillEntry，条目带 via 标注入来源）——快照是"开始任务那刻"的对账记录；注入本体
+  // 按阶段现读 config（SKILL_TIMING_NOTE_WF 的口径），两者分工写进了 skill-usages.ts 的 JSDoc
+  const wfStoreSrc = readSrcSafe('src/renderer/src/stores/workflow.ts')
+  ok('开工快照：workflow store 源码含 skillPlan（解析结果存进 run）',
+    wfStoreSrc.error === null && wfStoreSrc.text.includes('skillPlan'), wfStoreSrc.error ?? '缺 skillPlan')
+  const typesSrcSK = readSrcSafe('src/shared/types.ts')
+  ok('契约：types.ts 含 RunSkillEntry 与 via（快照条目带上注入来源）',
+    typesSrcSK.error === null && typesSrcSK.text.includes('RunSkillEntry') && typesSrcSK.text.includes('via'),
+    typesSrcSK.error ?? '缺 RunSkillEntry 或 via')
+
+  // TaskView 读的必须是 run.skillPlan 这份开工快照（对账事实），而不是现查 config 冒充
+  // "当时注入了什么"——配置随时在变，现查就撒谎了
+  ok('绊线：TaskView 读 run 的开工快照 skillPlan（对账事实，不现查 config）',
+    tvSrc.error === null && tvSrc.text.includes('skillPlan'), tvSrc.error ?? '缺 skillPlan')
 }
 
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)

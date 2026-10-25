@@ -1,7 +1,9 @@
 // 角色配置浮层：悬停 200ms 打开 / 点击固定；Agent 选择 + 模型联动（角色级覆盖真实生效）
 // 模型列表来自真实接口（model:list）；CLI 手填 --model；演示 Agent 如实标注不支持切换
+// 角色浮层同时提供技能就地绑定：与 ConfigPanel 的 roleSelect 走同一条 patchConfig 写路径
 import React, { useEffect, useRef, useState } from 'react'
-import type { AgentConfig } from '@shared/types'
+import type { AgentConfig, Skill } from '@shared/types'
+import { SKILL_SOURCE_LABELS, SKILL_TIMING_NOTE_WF } from '@shared/skill-usages'
 import { useAgents } from '../stores/agents'
 import { useWorkflow } from '../stores/workflow'
 import { bridge } from '../lib/ipc'
@@ -72,6 +74,73 @@ export function RolePicker({ role, onEnter, onLeave }: {
         })}
       </div>
       {selected && <ModelSection role={role} agent={selected} />}
+      <RoleSkillSection role={role} />
+    </div>
+  )
+}
+
+/** 浮层里最多直视几项技能，剩下的指去技能中心：空间有限，堆满了会把模型区挤出屏 */
+const SKILL_LIST_CAP = 6
+
+/**
+ * 技能分区（就地绑定）：清单来自 bridge.skills.list()（浮层挂载时拉一次）。
+ * 写路径与 ConfigPanel.roleSelect 逐字同源：patchConfig({ [role]: { ...cur, skillIds } })，
+ * 两边任何一个入口改绑定，另一边通过 store 订阅立即反映。停用技能照 AgentManageCard 的
+ * 交互（⚠ 已停用 + 勾选禁用）——绑了也不会注入，放行勾选等于许诺一件不会发生的事。
+ */
+function RoleSkillSection({ role }: { role: RoleKey }) {
+  const config = useWorkflow((s) => s.config)
+  const patchConfig = useWorkflow((s) => s.patchConfig)
+  const roleCfg = config[role]
+  const [skills, setSkills] = useState<Skill[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    void bridge.skills
+      .list()
+      .then((list) => {
+        if (alive) setSkills(list)
+      })
+      .catch(() => {
+        if (alive) setSkills([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+  if (skills === null || skills.length === 0) return null
+  const bound = skills.filter((s) => (roleCfg.skillIds ?? []).includes(s.id)).length
+  return (
+    <div className="cp-models wf-skill-section">
+      <div className="cp-m-title">
+        技能{bound > 0 && <span className="wf-skill-count">{bound}</span>}
+      </div>
+      {skills.slice(0, SKILL_LIST_CAP).map((s) => {
+        const on = (roleCfg.skillIds ?? []).includes(s.id)
+        const off = s.enabled === false
+        return (
+          <label key={s.id} className={cls('ac-skill-item', 'wf-skill-item', off && 'off')} title={off ? '该技能已停用，绑定也不会生效' : s.desc}>
+            <input
+              type="checkbox"
+              checked={on}
+              disabled={off}
+              onChange={(e) =>
+                // 与 ConfigPanel 完全同一条写路径（含整对象保留 modelOverride/skillIds 的形状）
+                patchConfig({
+                  [role]: { ...roleCfg, skillIds: e.target.checked ? [...(roleCfg.skillIds ?? []), s.id] : (roleCfg.skillIds ?? []).filter((x) => x !== s.id) }
+                } as never)
+              }
+            />
+            <span className="ac-skill-name">{s.name}</span>
+            <span className={cls('skill-src-badge', `src-${s.source}`)}>{SKILL_SOURCE_LABELS[s.source ?? 'local'] ?? s.source ?? '本地'}</span>
+            {s.version && <span className="wf-skill-ver">v{s.version}</span>}
+            {off && <span className="ac-skill-off">⚠ 已停用</span>}
+          </label>
+        )
+      })}
+      {skills.length > SKILL_LIST_CAP && (
+        <div className="wf-skill-more">共 {skills.length} 个，去技能中心查看全部</div>
+      )}
+      <div className="skill-usage-note skill-usage-note-inline">{SKILL_TIMING_NOTE_WF}</div>
     </div>
   )
 }

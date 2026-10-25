@@ -5,7 +5,7 @@
 import { create } from 'zustand'
 import type {
   WorkflowRun, WorkflowConfig, WorkflowRoleConfig, RoleCard, Stage, ReviewGate,
-  Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole, Skill
+  Attachment, ChecklistItem, ProcessEvent, AgentConfig, WorkflowPreset, PresetRole, Skill, RunSkillEntry
 } from '@shared/types'
 import { unionSkillIds, partitionSkillsForInjection } from '@shared/skills-union'
 import { dirDelta } from '@shared/dir-delta'
@@ -487,6 +487,55 @@ async function skillsBlockFor(ids?: string[], mode: 'auto' | 'reference' = 'auto
   } catch {
     return ''
   }
+}
+
+/**
+ * 开工技能快照（run.skillPlan）的拼装：把此刻三角色的技能解析事实定格下来。
+ * 口径与 runStage 的注入链一致——角色级 ∪ Agent 级（unionSkillIds 去重）− 停用
+ * （enabled === false 的即使绑了也不会被注入，照 partitionSkillsForInjection 同一条规矩剔除）；
+ * via 标注注入层来源：角色 skillIds 绑了记 'role'、Agent skillIds 绑了记 'agent'、两边都绑记 'both'。
+ * 什么都没绑时也返回全空快照（三角色各空表）：空表与"没有快照"是两件事——
+ * 前者说明开工时确实没绑技能，后者说明任务创建于技能面板上线前，任务页要区分这两种话。
+ * 只在 start() 的开工路径调用一次：续跑/返工/单角色重跑复用同一个 run，不重拍——
+ * 引擎那半边（runStage）每次阶段调用都会按**当时**的 config 重新解析注入清单，这是既有行为；
+ * 快照的职责是把"开工那一刻解析出了什么"钉住，供事后回看对账，而不是跟着引擎重算。
+ */
+async function buildSkillPlan(cfg: WorkflowConfig): Promise<NonNullable<WorkflowRun['skillPlan']>> {
+  const roles = ['planner', 'executor', 'reviewer'] as const
+  const agents = useAgents.getState().agents
+  // 没有任何绑定（角色级与三个 Agent 级都空）时不必拉技能清单：直接返回全空快照
+  const hasAny = roles.some((k) => {
+    const a = agents.find((x) => x.id === cfg[k].agentId)
+    return (cfg[k].skillIds?.length ?? 0) > 0 || (a?.skillIds?.length ?? 0) > 0
+  })
+  if (!hasAny) return { planner: { skills: [] }, executor: { skills: [] }, reviewer: { skills: [] } }
+  const all = await bridge.skills.list().catch(() => [] as Skill[])
+  const byId = new Map(all.map((s) => [s.id, s]))
+  const plan = {} as NonNullable<WorkflowRun['skillPlan']>
+  for (const k of roles) {
+    const roleIds = cfg[k].skillIds ?? []
+    const agent = agents.find((x) => x.id === cfg[k].agentId)
+    const agentIds = agent?.skillIds ?? []
+    plan[k] = {
+      skills: unionSkillIds(roleIds, agentIds)
+        .filter((id) => byId.get(id)?.enabled !== false) // 停用的剔除；清单里查无此 id 的保留（见下）
+        .map((id) => {
+          const s = byId.get(id)
+          const inRole = roleIds.includes(id)
+          const inAgent = agentIds.includes(id)
+          const entry: RunSkillEntry = {
+            id,
+            // name 取不到时兜底用 id：快照是事实记录，宁可显示裸 id 也不显示 undefined
+            name: s?.name ?? id,
+            via: inRole && inAgent ? 'both' : inRole ? 'role' : 'agent',
+            ...(s?.source ? { source: s.source } : {}),
+            ...(s?.version ? { version: s.version } : {})
+          }
+          return entry
+        })
+    }
+  }
+  return plan
 }
 
 /** 执行一个角色阶段（演示 Agent 走脚本；真实模型走流式调用） */
@@ -1166,6 +1215,10 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     try {
       const demo = get().isDemoRun()
       const cfg = { ...get().config }
+      // 开工技能快照：在建 run 前按当前配置拍一次（含 planFirst 的计划轮——run 与快照都在
+      // start() 里建，计划轮只是这条链的第一段）。「按意见重出计划」走的是 confirmGate 的
+      // 同一 run 续路，不经过这里，天然不重拍；续跑/返工/单角色重跑同理——快照只定格开工那一刻。
+      const skillPlan = await buildSkillPlan(cfg)
       // 这一次要不要先出计划：全局开关按当前配置生效；单次档——草稿路径看 planNextTask
       // （勾一次即清），队列路径看入队那一刻定格的那份（出队不再看当前开关）。
       // 全局 planFirst 对队列任务按出队时刻的配置走：队列条目只定格了单次档这一项（类型如此）。
@@ -1192,6 +1245,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
         cards: [],
         demo,
         outputDir,
+        // 开工技能快照（三角色全空也是合法快照：说明开工时确实没绑技能）
+        skillPlan,
         // 计划态跟着这条任务走（不是"当前配置里有没有开"），续跑判定才有依据
         ...(usePlan ? { planFirst: true } : {})
       }

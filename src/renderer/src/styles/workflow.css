@@ -461,3 +461,102 @@
 .wf-preset-rm:hover { background: var(--danger, #c0392b); color: #fff; }
 .wf-pop-save { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border, #e5ddcc); }
 .wf-pop-save .cp-input { flex: 1; min-width: 0; }
+
+/* ============ 工作流技能绑定 / 开工技能快照（纯追加段） ============ */
+/* 色板只用既有 tokens；ac-skill-item / skill-src-badge 等通用类在 components.css，不在此重复 */
+
+/* RolePicker 浮层里的"技能"分区（与 cp-models 同一容器口径） */
+.wf-skill-section .wf-skill-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  margin-left: 5px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-2);
+}
+.wf-skill-item .wf-skill-ver { font-size: 10px; color: var(--text-3); white-space: nowrap; }
+.wf-skill-more {
+  font-size: 11px;
+  color: var(--brand-yellow, #d6a419);
+  cursor: pointer;
+  /* 只做链接观感，不真的跳转（浮层空间有限，剩余项指引去技能中心） */
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.wf-skill-item input[type='checkbox']:disabled { cursor: not-allowed; }
+
+/* TaskView 的"本任务技能"只读事实面板（默认折叠条，位于 wf-topbar 之下） */
+.skillplan-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--border, #e5ddcc);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.skillplan-bar .skillplan-title { font-weight: 700; color: var(--text); }
+.skillplan-bar .skillplan-stale { color: var(--text-3); }
+.skillplan-bar .skillplan-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.skillplan-bar .skillplan-toggle:hover { background: var(--surface-2); }
+.skillplan-body {
+  flex-basis: 100%;
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 6px 2px 2px;
+}
+.skillplan-role { min-width: 200px; flex: 1; }
+.skillplan-role-name { font-weight: 700; color: var(--text); margin-bottom: 3px; }
+.skillplan-none { color: var(--text-3); }
+.skillplan-entry { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 2px 0; }
+.skillplan-entry .skillplan-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skillplan-entry .skillplan-meta { color: var(--text-3); font-size: 11px; display: inline-flex; align-items: center; gap: 3px; }
+/* 展开体占满整行：折叠条是 flex 横排，明细换行铺开 */
+
+/* SkillCenter「工作流绑定」矩阵：行 = 技能，列 = 三角色 */
+.wf-skill-matrix { display: flex; flex-direction: column; }
+.wf-skill-matrix-head,
+.wf-skill-matrix-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, 72px);
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, #e5ddcc);
+}
+.wf-skill-matrix-head { font-weight: 700; color: var(--text); font-size: 12px; border-bottom: 1px solid var(--border-strong); }
+.wf-skill-matrix-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.wf-skill-matrix-col,
+.wf-skill-matrix-cell { text-align: center; }
+.wf-skill-matrix-col .wf-skill-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-2);
+}
+.wf-skill-matrix-note { font-size: 11.5px; color: var(--text-3); line-height: 1.6; padding: 8px 2px 2px; }

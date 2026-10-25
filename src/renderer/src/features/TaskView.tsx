@@ -11,6 +11,7 @@ import { OutputDirChip } from '../components/OutputDir'
 import { CheckpointBar } from '../components/CheckpointBar'
 import { bridge } from '../lib/ipc'
 import { matchFileRef } from '@shared/acceptance'
+import { SKILL_SOURCE_LABELS } from '@shared/skill-usages'
 import { hasExitCard, planAuditOf, type PlanCliDelta } from '@shared/engine-transitions'
 import { pickUnregistered, unregisteredNote } from '@shared/delivery-dir'
 import { STATUS_TEXT } from './WfChips'
@@ -47,6 +48,78 @@ function sameSourceWarning(run: WorkflowRun): string | null {
       : '⚠ 审核方与执行方同源：该结论不具备独立验收效力（可在配置条为审核角色换一个 Agent）'
   }
   return null
+}
+
+/**
+ * "本任务技能"只读事实面板：读 run.skillPlan（开工那一刻的解析对账），默认折叠。
+ * 严格只读：这里没有任何配置写入口（绑定写在角色浮层、更多设置与技能中心矩阵三处）——
+ * 逻辑层有绊线扫本文件不得出现那类调用，所以连注释里都不写那个函数名。
+ * 改绑定的生效时机见各自的时机小字，与本面板无关。
+ * via 三值的中文映射只此一处消费，就地写一份即可。
+ */
+const SKILLPLAN_VIA_TEXT: Record<'role' | 'agent' | 'both', string> = {
+  role: '角色绑定',
+  agent: 'Agent 绑定',
+  both: '双重'
+}
+const SKILLPLAN_ROLE_LABEL: Record<'planner' | 'executor' | 'reviewer', string> = {
+  planner: '规划',
+  executor: '执行',
+  reviewer: '审核'
+}
+
+function SkillPlanBar({ run }: { run: WorkflowRun }) {
+  const [open, setOpen] = useState(false)
+  const plan = run.skillPlan
+  // 旧任务没有快照字段（字段是可选的、旧记录零迁移）：如实说明，不伪造一份空表冒充事实
+  if (!plan) {
+    return (
+      <div className="skillplan-bar" data-skillplan="stale">
+        <span className="skillplan-title">技能</span>
+        <span className="skillplan-stale">该任务创建于技能面板上线前，无定格快照</span>
+      </div>
+    )
+  }
+  const counts = {
+    planner: plan.planner.skills.length,
+    executor: plan.executor.skills.length,
+    reviewer: plan.reviewer.skills.length
+  }
+  // 三角色全空 = 开工时确实没绑任何技能：没有可看的事实，整条不显示（省一行噪音）
+  if (counts.planner + counts.executor + counts.reviewer === 0) return null
+  return (
+    <div className="skillplan-bar" data-skillplan={open ? 'open' : 'closed'}>
+      <span className="skillplan-title">技能</span>
+      <span className="skillplan-sum">
+        规划×{counts.planner} · 执行×{counts.executor} · 审核×{counts.reviewer}
+      </span>
+      <button type="button" className="skillplan-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
+        {open ? '收起' : '展开'}
+      </button>
+      {open && (
+        <div className="skillplan-body">
+          {(['planner', 'executor', 'reviewer'] as const).map((k) => (
+            <div key={k} className="skillplan-role" data-skillplan-role={k}>
+              <div className="skillplan-role-name">{SKILLPLAN_ROLE_LABEL[k]}（{counts[k]}）</div>
+              {plan[k].skills.length === 0 && <div className="skillplan-none">（该角色开工时未绑定技能）</div>}
+              {plan[k].skills.map((e) => (
+                <div key={e.id} className="skillplan-entry" title={e.id}>
+                  <span className="skillplan-name">{e.name}</span>
+                  <span className="skillplan-meta">
+                    （
+                    {e.source && <span className={cls('skill-src-badge', `src-${e.source}`)}>{SKILL_SOURCE_LABELS[e.source] ?? e.source}</span>}
+                    {e.version ? ` v${e.version}` : ''}
+                    {` · ${SKILLPLAN_VIA_TEXT[e.via]}`}
+                    ）
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function TaskView() {
@@ -105,6 +178,9 @@ export function TaskView() {
           </Button>
         )}
       </div>
+
+      {/* 只读事实面板：开工技能快照（旧任务显示"无定格快照"，全空不显示） */}
+      <SkillPlanBar run={run} />
 
       {detailOpen && (
         <div className="wf-detail">

@@ -357,6 +357,21 @@ export interface ReviewGate {
   cliChanges?: string[]
 }
 
+/**
+ * 开工技能快照的单条事实：这个技能当时会以什么路径注入本角色。
+ * via 是判定结论不是展示文案：'role' = 角色级 skillIds 绑了它、'agent' = 其 Agent 的 skillIds
+ * 绑了它、'both' = 两边都绑（并集去重后只留一条，路径合并标注）。
+ */
+export interface RunSkillEntry {
+  id: string
+  name: string
+  via: 'role' | 'agent' | 'both'
+  /** 来源（Skill.source，如 local/builtin/market）；技能清单里取不到时缺省 */
+  source?: string
+  /** 来源声明的版本；取不到时缺省 */
+  version?: string
+}
+
 export interface WorkflowRun {
   id: string
   goal: string
@@ -386,6 +401,17 @@ export interface WorkflowRun {
   planFirst?: boolean
   /** 用户真的批准过这份计划。中断续跑按它判定，避免"计划还没批准就被续到执行角色" */
   planApproved?: boolean
+  /**
+   * 开工时角色技能解析的定格事实（角色级 ∪ Agent 级 − 停用），只在 start() 建这条 run 时拍一次。
+   * 任务页"本任务技能"事实面板与"注入层来源"标注都读它——引擎续跑/返工会按当时配置重新解析
+   * 注入清单，若不拍快照，"当时到底注入了什么"就再也说不清了。旧任务无此字段，界面如实标注，
+   * 不做迁移。三角色全空也是合法快照（= 开工时没有绑定任何技能）。
+   */
+  skillPlan?: {
+    planner: { skills: RunSkillEntry[] }
+    executor: { skills: RunSkillEntry[] }
+    reviewer: { skills: RunSkillEntry[] }
+  }
 }
 
 export interface WorkflowRoleConfig {
