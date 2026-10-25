@@ -53,5 +53,8 @@ export function useSmoothText(full: string, enabled: boolean): string {
     return () => cancelAnimationFrame(raf)
   }, [enabled])
 
-  return enabled ? shown : full
+  // 返回 shown（而非 enabled ? shown : full）：流结束把 enabled 翻 false 的瞬间，
+  // 积压可能还没播完——这时若直接切回 full 就瞬弹（2026-10-25 用户实测的真实原因）。
+  // shown 的同步由 effect 全权负责：未动过=全文、动画中=逐字切片、排空后=补满的全文。
+  return shown
 }
