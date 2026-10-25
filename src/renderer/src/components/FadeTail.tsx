@@ -13,7 +13,7 @@ export function FadeTail({ text, enabled, tail = 14 }: { text: string; enabled?:
     <>
       {head}
       {chars.map((c, i) => (
-        <span key={arr.length - cut + i} className="ch-fade">
+        <span key={arr.length - cut + i} className="ch-fade" data-ch={c}>
           {c}
         </span>
       ))}
