@@ -727,9 +727,10 @@ function McpSection() {
   useEffect(load, [])
 
   const save = async (next: McpServer[]) => {
-    // 内置条目只读：提交整表时剥掉（主进程闸门对伪造 builtin 也会点名拒收），回显时再拼回最前
-    const builtin = next.filter((s) => s.builtin === 'basic')
-    const r = await bridge.mcp.set(next.filter((s) => s.builtin !== 'basic'))
+    // 内置条目只读：提交整表时全部剥掉（主进程闸门对伪造 builtin 也会点名拒收），回显时再拼回最前。
+    // 判定按"是不是内置"而不是某个具体值——内置组会扩充，写死 'basic' 会让新成员漏进 mcp:set 被拒收后从界面消失
+    const builtin = next.filter((s) => !!s.builtin)
+    const r = await bridge.mcp.set(next.filter((s) => !s.builtin))
     const merged = [...builtin, ...r.list]
     setList(merged)
     setRejected(r.rejected ?? [])
@@ -849,8 +850,9 @@ function McpSection() {
       {list.map((s) => {
         const p = probes[s.id]
         const users = usedBy(s.id)
-        // 内置基础组：只读行——不可删改、不可停用，也没有信任一说（进程内实现，随应用发布）
-        if (s.builtin === 'basic') {
+        // 内置组（basic/calc/kv/think 任意成员）：只读行——不可删改，带全局启停开关；
+        // 进程内实现、随应用发布，也没有信任一说
+        if (s.builtin) {
           return (
             <div key={s.id} data-mcp-row data-mcp-builtin style={{ border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 10px', marginBottom: 8 }}>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

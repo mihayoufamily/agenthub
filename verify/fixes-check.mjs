@@ -3571,7 +3571,7 @@ console.log('\n[BM] 内置 MCP 基础组与默认工具授权')
     agBM.error ?? 'agents.ts 缺默认工具注入')
   const spBM = readSrcSafe('src/renderer/src/features/SettingsPage.tsx')
   ok('绊线：设置页内置行只读（data-mcp-builtin）且提交整表时剥掉内置条目',
-    spBM.error === null && spBM.text.includes('data-mcp-builtin') && spBM.text.includes("s.builtin !== 'basic'"),
+    spBM.error === null && spBM.text.includes('data-mcp-builtin') && spBM.text.includes('filter((s) => !s.builtin)'),
     spBM.error ?? 'SettingsPage 缺内置只读行或提交剥离')
 }
 
@@ -3700,6 +3700,10 @@ console.log('\n[AT] 进阶工具白名单与进阶内置 MCP')
   ok('绊线：设置页内置行有启停 Switch（bridge.mcp.builtinSet）',
     spAT.error === null && spAT.text.includes('builtinSet'),
     spAT.error ?? '设置页缺内置启停')
+  ok('绊线：内置行的渲染与提交剥离按"是内置"判定（不写死 basic——扩充新内置组时不再漏成用户行被拒收消失）',
+    spAT.error === null && spAT.text.includes('if (s.builtin) {') && spAT.text.includes('filter((s) => !s.builtin)') &&
+      !spAT.text.includes("filter((s) => s.builtin !== 'basic')"),
+    spAT.error ?? '内置行判定仍写死 basic')
   const cvAT = readSrcSafe('src/renderer/src/features/ChatView.tsx')
   ok('绊线：工具面板有进阶分区（advanced-tools-block + 五个开关 + 保存写入 advanced）',
     cvAT.error === null && cvAT.text.includes('data-testid="advanced-tools-block"') &&
