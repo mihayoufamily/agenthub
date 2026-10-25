@@ -64,7 +64,10 @@ const api = {
       }>,
     /** Agent 工作目录只读读文本（@文件引用用）：超 64KB 拒收并提示改用附件按钮 */
     readTextFile: (agentId: string, rel: string) =>
-      ipcRenderer.invoke('fs:readTextFile', agentId, rel) as Promise<{ ok: boolean; content?: string; message?: string }>
+      ipcRenderer.invoke('fs:readTextFile', agentId, rel) as Promise<{ ok: boolean; content?: string; message?: string }>,
+    /** Agent 工作目录只读图片预览（FilePreviewPanel 用）：仅图片扩展名、≤5MB，返回 data URL */
+    readDataUrl: (agentId: string, rel: string) =>
+      ipcRenderer.invoke('fs:readDataUrl', agentId, rel) as Promise<{ ok: boolean; dataUrl?: string; mime?: string; bytes?: number; message?: string }>
   },
   update: {
     /** 版本检查（manual=true 不受 3 天节流，用于设置页按钮）；asset 为便携包资产信息（确认弹窗显示大小用） */
@@ -326,7 +329,10 @@ const api = {
     allRules: () => ipcRenderer.invoke('approval:rules:all') as Promise<Record<string, string[]>>,
     setRules: (agentId: string, rules: string[]) => ipcRenderer.invoke('approval:rules:set', agentId, rules) as Promise<string[]>,
     history: (limit?: number) => ipcRenderer.invoke('approval:history', limit) as Promise<ApprovalRecord[]>,
-    clearHistory: () => ipcRenderer.invoke('approval:history:clear') as Promise<{ ok: boolean }>
+    clearHistory: () => ipcRenderer.invoke('approval:history:clear') as Promise<{ ok: boolean }>,
+    /** ask_user 的回答提交（空文本=跳过；该提问超时/结束时 ok=false） */
+    answer: (id: string, text: string) =>
+      ipcRenderer.invoke('approval:answer', id, text) as Promise<{ ok: boolean; message?: string }>
   },
   dialogs: {
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles') as Promise<Array<{ name: string; path: string; size: number; content?: string; dataUrl?: string; image?: boolean; error?: boolean; message?: string }>>,

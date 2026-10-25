@@ -68,7 +68,11 @@ const SUITES = [
   // 与 WRITE_TOOLS 七个、[BM] 合成清单绊线的口径更新。
   // fixes 728：2026-10-26 内置行消失 bug 修复轮实测（728 PASS / 0 FAIL）。727 → 728 净增 1 条：
   // 内置行渲染/剥离按"是内置"判定的绊线（写死 'basic' 曾让 calc/kv/think 被当用户行提交 → 拒收 → 从界面消失）。
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 728, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围与工作流技能管理（skillUsages/时机文案/三写入口/开工快照）+ 模型回复图片渲染（[MI]：解析器/围栏免疫/SSRF 守卫在场）' },
+  // fixes 746：2026-10-26 ask_user 提问工具 + 文件预览面板轮实测（746 PASS / 0 FAIL）。728 → 746 净增 18 条：
+  // [AQ]：onQuestion 往返/拒收/未回答/计划态放行、requestQuestion 机制（落地/超时/取消/空文本/迟到）、ipc 与弹窗与 preload 接线绊线；
+  // [FP]：fs:readDataUrl 守卫（guardRel+5MB+图片白名单）、预览面板结构（面板/标签/树/双通道自动刷新）、ChatView 挂载与推荐配置按钮绊线；
+  // [TL]/[AT] 计数 11→12、13→14（ask_user 入基础组）。
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 746, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）+ 技能生效范围与工作流技能管理（skillUsages/时机文案/三写入口/开工快照）+ 模型回复图片渲染（[MI]：解析器/围栏免疫/SSRF 守卫在场）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 59, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态、技能注入层序、上一任务上下文都真跑过）' },
   // engine 28 / mcp-transport 31：2026-10-25 功能波轮实测（28 PASS / 31 PASS / 0 FAIL，各自独立脚本可单跑）。
   { name: 'engine', tier: 'logic', script: 'engine-check.mjs', min: 28, what: '引擎纯函数快照：六个竞态序列（清门/快照还原/续跑推断/队列出入/终态口径）+ 计划审计常量' },

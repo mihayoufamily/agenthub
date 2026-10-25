@@ -103,10 +103,14 @@ export interface ApprovalRequest {
   /** 未被规则覆盖的命令片段（如实指出到底是哪一段没过） */
   uncovered?: string[]
   ts: number
-  /** 'command'（默认）= 命令审批；'diff' = 写前预览（不提示"始终允许"）；'mcp' = 首次连接一个 MCP server */
-  kind?: 'command' | 'diff' | 'mcp'
+  /** 'command'（默认）= 命令审批；'diff' = 写前预览（不提示"始终允许"）；'mcp' = 首次连接一个 MCP server；'question' = 模型的 ask_user 提问（界面收集自由文本回答） */
+  kind?: 'command' | 'diff' | 'mcp' | 'question'
   /** kind='diff' 时的行级 diff */
   diff?: string
+  /** kind='question' 时：问题正文（command 字段放截断版给通知用） */
+  question?: string
+  /** kind='question' 时：可选的背景说明/候选项 */
+  detail?: string
   /** kind='mcp' 时：这个 server 暴露的工具清单（放行前必须看得见） */
   mcpTools?: { name: string; description?: string }[]
   /** kind='mcp' 时：要记住信任的 server id */

@@ -11,6 +11,8 @@ interface ApprovalState {
   drop: (id: string) => void
   /** 界面点选：主进程会写历史（always 还会补白名单），这里只管把卡片撤掉 */
   decide: (id: string, decision: ApprovalDecision) => Promise<void>
+  /** ask_user 的回答提交：空文本按跳过（主调用如实拿到"未回答"） */
+  answer: (id: string, text: string) => Promise<void>
   refreshPending: () => Promise<void>
 }
 
@@ -31,6 +33,12 @@ export const useApprovals = create<ApprovalState>()((set, get) => ({
     get().drop(id)
     if (!r.ok) useUi.getState().toast(r.message ?? '该审批已超时或已结束', 'warn')
     else if (decision === 'always') useUi.getState().toast('已写入该 Agent 的命令白名单', 'ok')
+  },
+
+  answer: async (id, text) => {
+    const r = await bridge.approval.answer(id, text)
+    get().drop(id)
+    if (!r.ok) useUi.getState().toast(r.message ?? '该提问已超时或已结束', 'warn')
   },
 
   refreshPending: async () => {

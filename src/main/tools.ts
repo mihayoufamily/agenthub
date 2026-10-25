@@ -404,6 +404,21 @@ export function toolDefs(allowCommands: boolean, allowWeb: boolean, planMode?: b
           required: ['path', 'find', 'replace']
         }
       }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'ask_user',
+        description: '向用户提一个澄清问题并等待回答（会弹窗）。缺少关键信息无法继续时用它：question 一句话问清，context 给背景或候选项。用户可能跳过或超时——那会如实告诉你，请基于现有信息继续并说明你的假设',
+        parameters: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: '要问的问题，一句话' },
+            context: { type: 'string', description: '背景说明或可选答案（如「1. 覆盖现有文件 2. 另存新文件」）' }
+          },
+          required: ['question']
+        }
+      }
     }
   ]
   if (allowCommands) {
@@ -546,6 +561,8 @@ export interface ToolHooks {
   /** 用户配置的工具前后 Hook（pre 可否决本次调用） */
   userHooks?: import('../shared/types').HookRule[]
   meta?: { agentId?: string; agentName?: string; runId?: string; reqId?: string }
+  /** ask_user 的提问通道（工作站注入；逻辑层测试不注入则该工具如实拒收） */
+  onQuestion?: (q: { question: string; detail?: string }) => Promise<string | null>
 }
 
 /**
@@ -1041,6 +1058,22 @@ async function dispatch(
         const { shell } = require('electron') as typeof import('electron')
         shell.showItemInFolder(p)
         return { ok: true, output: `已在资源管理器中定位：${p}` }
+      }
+      case 'ask_user': {
+        const question = typeof args.question === 'string' ? args.question.trim() : ''
+        if (!question) return { ok: false, output: '拒绝：question 不能为空（要问用户什么）' }
+        if (question.length > 2000) return { ok: false, output: '拒绝：问题超过 2000 字上限，请精简后再问' }
+        // 提问不是执行面：没有注入提问通道的入口（逻辑测试/tools:exec）如实拒，不猜答案
+        if (!hooks?.onQuestion) {
+          return { ok: false, output: '拒绝：此执行入口没有提问界面（要从工作站对话发起才能弹窗提问）' }
+        }
+        const detail = typeof args.context === 'string' && args.context.trim() ? args.context.slice(0, 2000) : undefined
+        const answer = await hooks.onQuestion({ question, ...(detail ? { detail } : {}) })
+        if (signal?.aborted) return { ok: false, output: '已取消：工具执行被用户停止' }
+        if (answer === null || !answer.trim()) {
+          return { ok: false, output: '用户没有回答这个问题（跳过或超时）。请基于现有信息继续，并说明你采用的假设；也可以换个更简单的问法再问一次。' }
+        }
+        return { ok: true, output: `用户的回答：${answer}` }
       }
       default:
         return { ok: false, output: `未知工具：${tool}` }

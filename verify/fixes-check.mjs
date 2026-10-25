@@ -3581,8 +3581,8 @@ console.log('\n[TL] 工具清单折叠区（tools:defs）')
   const toolsMod = await import('../out/main/tools.js')
   const all = toolsMod.toolDefs(true, true)
   const names = all.map((d) => d.function.name)
-  ok('toolDefs(true,true) 共 11 个工具（文件 8 + 命令 1 + 联网 2）——清单展示的同一份真相',
-    names.length === 11 && ['read_file', 'write_file', 'list_dir', 'delete_file', 'move', 'search_files', 'glob_files', 'replace_in_file', 'run_command', 'web_fetch', 'web_search'].every((n) => names.includes(n)),
+  ok('toolDefs(true,true) 共 12 个工具（文件 8 + 提问 1 + 命令 1 + 联网 2）——清单展示的同一份真相',
+    names.length === 12 && ['read_file', 'write_file', 'list_dir', 'delete_file', 'move', 'search_files', 'glob_files', 'replace_in_file', 'ask_user', 'run_command', 'web_fetch', 'web_search'].every((n) => names.includes(n)),
     JSON.stringify(names))
   const ipcTL = readSrcSafe('src/main/ipc.ts')
   ok('绊线：tools:defs 通道用同一份 toolDefs（界面看到的=模型拿到的，不在渲染层另抄清单）',
@@ -3666,9 +3666,9 @@ console.log('\n[AT] 进阶工具白名单与进阶内置 MCP')
     const toolsAT = await import('../out/main/tools.js')
     const base = toolsAT.toolDefs(true, true).map((d) => d.function.name)
     const withAdv = toolsAT.toolDefs(true, true, undefined, ['zip_pack', 'clipboard_read']).map((d) => d.function.name)
-    ok('进阶 schema：白名单内附加（11→13），白名单外不出现',
-      base.length === 11 && !base.includes('zip_pack') &&
-        withAdv.includes('zip_pack') && withAdv.includes('clipboard_read') && !withAdv.includes('zip_unpack') && withAdv.length === 13,
+    ok('进阶 schema：白名单内附加（12→14），白名单外不出现',
+      base.length === 12 && !base.includes('zip_pack') &&
+        withAdv.includes('zip_pack') && withAdv.includes('clipboard_read') && !withAdv.includes('zip_unpack') && withAdv.length === 14,
       JSON.stringify(withAdv))
     ok('计划态：zip 两枚按写类摘除 schema 并拒绝执行',
       toolsAT.toolDefs(true, true, true, ['zip_pack']).every((d) => d.function.name !== 'zip_pack') &&
@@ -3711,6 +3711,100 @@ console.log('\n[AT] 进阶工具白名单与进阶内置 MCP')
       ['zip_pack', 'zip_unpack', 'clipboard_read', 'clipboard_write', 'show_in_folder'].every((n) => cvAT.text.includes(n)) &&
       cvAT.text.includes('{ advanced: adv }'),
     cvAT.error ?? '工具面板缺进阶分区')
+}
+
+// ---------- [AQ] ask_user 提问工具：行为面（onQuestion 往返/拒收/计划态） + requestQuestion 机制 ----------
+console.log('\n[AQ] ask_user 提问工具与提问等待机制')
+{
+  const toolsAQ = await import('../out/main/tools.js')
+  const pmAQ = await import('../out/shared/plan-mode.js')
+
+  const g = { dir: 'C:\\nonexistent-sandbox', access: 'sandbox' }
+  const noCh = await toolsAQ.execTool(g, 'ask_user', JSON.stringify({ question: '用哪个端口？' }))
+  ok('ask_user：没有提问通道的入口（逻辑测试/tools:exec）如实拒收',
+    !noCh.ok && /没有提问界面/.test(noCh.output), noCh.output)
+
+  const empty = await toolsAQ.execTool(g, 'ask_user', JSON.stringify({ question: '' }), undefined, { onQuestion: async () => 'x' })
+  ok('ask_user：空问题拒收', !empty.ok && /question 不能为空/.test(empty.output), empty.output)
+
+  const answered = await toolsAQ.execTool(
+    g, 'ask_user',
+    JSON.stringify({ question: '用哪个端口？', context: '1. 3000  2. 8080' }),
+    undefined,
+    { onQuestion: async (q) => (q.detail?.includes('8080') ? '8080' : null) }
+  )
+  ok('ask_user：回答原文回给模型（含 context 透传）', answered.ok && answered.output.includes('8080'), answered.output)
+
+  const skipped = await toolsAQ.execTool(g, 'ask_user', JSON.stringify({ question: '在吗？' }), undefined, { onQuestion: async () => null })
+  ok('ask_user：用户跳过/超时 → 如实"未回答"，模型被指引说明假设',
+    !skipped.ok && /没有回答/.test(skipped.output) && /假设/.test(skipped.output), skipped.output)
+
+  ok('ask_user 是非写类：计划态照常可用（规划阶段提问澄清是刚需）',
+    pmAQ.planModeVerdict('ask_user', true).allowed === true && toolsAQ.toolDefs(true, true, true).some((d) => d.function.name === 'ask_user'))
+
+  const appr = await import('../out/main/approvals.js')
+  {
+    // requestQuestion 机制：回答落地 / 空文本按跳过 / 超时按 null / 流取消连带收掉
+    const mkReq = (id) => ({ id, reqId: 'rq', tool: 'ask_user', command: 'q', dir: '', reason: 'r', uncovered: [], kind: 'question', question: 'q', ts: 1 })
+    const sent = []
+    const p1 = appr.requestQuestion(mkReq('q1'), (r) => sent.push(r), 1000)
+    const okR = appr.resolveQuestion('q1', '  答案文本  ')
+    const a1 = await p1
+    ok('requestQuestion：resolveQuestion 落地并去空白', okR.ok && a1 === '答案文本' && sent.length === 1, JSON.stringify({ okR, a1 }))
+    const p2 = appr.requestQuestion(mkReq('q2'), () => {}, 30)
+    await new Promise((r) => setTimeout(r, 60))
+    ok('requestQuestion：超时按 null（未回答）', (await p2) === null)
+    const p3 = appr.requestQuestion(mkReq('q3'), () => {}, 5000)
+    appr.denyPendingFor('rq')
+    ok('requestQuestion：流取消连带收掉（null），不留死弹窗', (await p3) === null)
+    const p4 = appr.requestQuestion(mkReq('q4'), () => {}, 5000)
+    appr.resolveQuestion('q4', '')
+    ok('requestQuestion：空文本按跳过（null）', (await p4) === null)
+    const late = appr.resolveQuestion('q4', '迟到的回答')
+    ok('requestQuestion：已结束的提问再答 → ok:false', !late.ok)
+  }
+
+  // 接线绊线
+  const ipcAQ = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：model:chat 装配 onQuestion（走 requestQuestion，kind=question）+ approval:answer 通道',
+    ipcAQ.error === null && ipcAQ.text.includes('onQuestion:') && ipcAQ.text.includes('requestQuestion') &&
+      ipcAQ.text.includes("'approval:answer'") && ipcAQ.text.includes("kind: 'question'"),
+    ipcAQ.error ?? '缺提问接线')
+  const amAQ = readSrcSafe('src/renderer/src/components/ApprovalModal.tsx')
+  ok('绊线：弹窗有提问形态（answer 输入框 + 跳过/回答按钮）',
+    amAQ.error === null && amAQ.text.includes('data-testid="approval-answer-input"') &&
+      amAQ.text.includes('data-approval-skip') && amAQ.text.includes('data-approval-answer'),
+    amAQ.error ?? '弹窗缺提问形态')
+  const preAQ = readSrcSafe('src/preload/index.ts')
+  ok('绊线：preload 暴露 approval.answer',
+    preAQ.error === null && preAQ.text.includes("invoke('approval:answer'"),
+    preAQ.error ?? 'preload 缺 approval:answer')
+}
+
+// ---------- [FP] 文件预览面板（标签页 + 自动刷新 + 图片只读通道）----------
+console.log('\n[FP] 文件预览面板与 fs:readDataUrl 守卫')
+{
+  const ipcFP = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：fs:readDataUrl 与 @文件引用同一道 guardRel 闸门（相对路径 + 沙箱），仅图片扩展名、5MB 上限',
+    ipcFP.error === null && ipcFP.text.includes("'fs:readDataUrl'") &&
+      /fs:readDataUrl[\s\S]{0,400}guardRel\(agentId, rel\)/.test(ipcFP.text) &&
+      /fs:readDataUrl[\s\S]{0,900}5 \* 1024 \* 1024/.test(ipcFP.text),
+    ipcFP.error ?? '缺 fs:readDataUrl 或守卫')
+  const fp = readSrcSafe('src/renderer/src/components/FilePreviewPanel.tsx')
+  ok('绊线：FilePreviewPanel 在场（面板/标签页/文件树/图片走 readDataUrl）',
+    fp.error === null && fp.text.includes('data-testid="file-preview-panel"') && fp.text.includes('data-testid="file-preview-tabs"') &&
+      fp.text.includes('readDataUrl'),
+    fp.error ?? 'FilePreviewPanel 缺关键结构')
+  ok('绊线：自动刷新两条腿（writtenPath 事件命中重读 + 2.5s 轮询兜底）',
+    fp.error === null && fp.text.includes('writtenPath') && fp.text.includes('setInterval') && fp.text.includes('2500'),
+    fp.error ?? '预览面板缺自动刷新')
+  const cvFP = readSrcSafe('src/renderer/src/features/ChatView.tsx')
+  ok('绊线：ChatView 挂预览开关与面板（preview-toggle + FilePreviewPanel）',
+    cvFP.error === null && cvFP.text.includes('data-testid="preview-toggle"') && cvFP.text.includes('<FilePreviewPanel'),
+    cvFP.error ?? 'ChatView 缺预览接线')
+  ok('绊线：工具面板有"应用推荐配置"（只补联网，不动其他项）',
+    cvFP.error === null && cvFP.text.includes('data-testid="recommend-tools-row"') && cvFP.text.includes('应用推荐配置'),
+    cvFP.error ?? '缺推荐配置按钮')
 }
 
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)

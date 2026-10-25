@@ -747,6 +747,26 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
         ...(opts?.agentId ? { agentId: opts.agentId } : {}),
         ...(agentName ? { agentName } : {})
       }),
+      // ask_user 的提问通道：复用审批弹窗链路（kind='question'），回答文本原样回给模型
+      onQuestion: (q: { question: string; detail?: string }) =>
+        approvals.requestQuestion(
+          {
+            id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+            reqId,
+            tool: 'ask_user',
+            command: q.question.slice(0, 120),
+            dir: grant.dir,
+            reason: '模型需要澄清后才能继续',
+            uncovered: [],
+            kind: 'question',
+            question: q.question,
+            ...(q.detail ? { detail: q.detail } : {}),
+            ...(opts?.agentId ? { agentId: opts.agentId } : {}),
+            ...(agentName ? { agentName } : {}),
+            ts: Date.now()
+          },
+          (req) => getWin()?.webContents.send('model:event', { reqId, type: 'approval', approval: req })
+        ),
       ...(checkpoint ? { checkpoint } : {}),
       ...(userHooks.length ? { userHooks } : {}),
       meta: {
@@ -1051,6 +1071,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- 命令审批（白名单 / 待裁决 / 审批历史） ----------
   ipcMain.handle('approval:pending', () => approvals.pendingList())
   ipcMain.handle('approval:decide', (_e, id: string, decision: ApprovalDecision) => approvals.resolveApproval(id, decision))
+  // ask_user 的回答落地（空文本=跳过，主调用如实拿到"未回答"）：与审批同一推送通道，不进审批历史
+  ipcMain.handle('approval:answer', (_e, id: string, answer: string) => approvals.resolveQuestion(String(id ?? ''), String(answer ?? '')))
   ipcMain.handle('approval:rules', (_e, agentId?: string) => approvals.rulesFor(agentId))
   ipcMain.handle('approval:rules:all', () => approvals.allRules())
   ipcMain.handle('approval:rules:set', (_e, agentId: string, rules: string[]) => approvals.setRules(agentId, rules))
@@ -1158,6 +1180,25 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       }
       const content = await readFile(g.abs, 'utf8')
       return { ok: true, content }
+    } catch (e) {
+      return { ok: false, message: (e as Error).message }
+    }
+  })
+
+  /** 只读图片预览（FilePreviewPanel 用）：与 @文件引用同一条 guardRel 闸门，只收图片扩展名且 ≤5MB，转 data URL */
+  ipcMain.handle('fs:readDataUrl', async (_e, agentId: unknown, rel: unknown) => {
+    const g = guardRel(agentId, rel)
+    if (!g.ok) return g
+    const MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' }
+    const dot = g.abs.lastIndexOf('.')
+    const mime = dot >= 0 ? MIME[g.abs.slice(dot).toLowerCase()] : undefined
+    if (!mime) return { ok: false, message: '图片预览只支持 png/jpg/jpeg/gif/webp/bmp；文本文件走内容预览' }
+    try {
+      const st = await stat(g.abs)
+      if (st.isDirectory()) return { ok: false, message: '该路径是目录' }
+      if (st.size > 5 * 1024 * 1024) return { ok: false, message: '图片超过 5MB 预览上限' }
+      const buf = await readFile(g.abs)
+      return { ok: true, dataUrl: `data:${mime};base64,${buf.toString('base64')}`, mime, bytes: st.size }
     } catch (e) {
       return { ok: false, message: (e as Error).message }
     }

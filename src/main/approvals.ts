@@ -211,9 +211,62 @@ export function denyPendingFor(reqId: string): number {
     pending.delete(id)
     n++
   }
+  // 挂着的提问同样收掉（null = 未回答），模型那边如实拿到"用户没有回答"
+  for (const [id, q] of pendingQ) {
+    if (q.req.reqId !== reqId) continue
+    clearTimeout(q.timer)
+    pendingQ.delete(id)
+    q.resolve(null)
+    n++
+  }
   return n
 }
 
 export function pendingList(): ApprovalRequest[] {
-  return Array.from(pending.values()).map((p) => p.req)
+  return [...pending.values(), ...pendingQ.values()].map((p) => p.req)
+}
+
+// ---------- ask_user 的提问队列（与审批同一条推送通道，但不写审批历史：提问不是安全裁决） ----------
+
+interface PendingQ {
+  req: ApprovalRequest
+  resolve: (answer: string | null) => void
+  timer: NodeJS.Timeout
+}
+
+const pendingQ = new Map<string, PendingQ>()
+
+/**
+ * 发起一次提问：把问题 send 给渲染层，等用户的回答文本。
+ * 超时 / 该流被取消 / 界面没接住——一律按 null（未回答）收场并如实告知模型。
+ */
+export function requestQuestion(
+  req: ApprovalRequest,
+  send: (req: ApprovalRequest) => void,
+  timeoutMs = APPROVAL_TIMEOUT_MS
+): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    let done = false
+    const settle = (answer: string | null) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      pendingQ.delete(req.id)
+      resolve(answer)
+    }
+    const timer = setTimeout(() => settle(null), timeoutMs)
+    pendingQ.set(req.id, { req, resolve: settle, timer })
+    send(req)
+  })
+}
+
+/** 界面提交回答：空文本按"跳过"处理（null），主调用拿到的是如实的未回答 */
+export function resolveQuestion(id: string, answer: string): { ok: boolean; message?: string } {
+  const p = pendingQ.get(id)
+  if (!p) return { ok: false, message: '该提问已超时或已结束' }
+  const text = typeof answer === 'string' ? answer.trim() : ''
+  clearTimeout(p.timer)
+  pendingQ.delete(id)
+  p.resolve(text || null)
+  return { ok: true }
 }

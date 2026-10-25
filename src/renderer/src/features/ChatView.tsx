@@ -16,6 +16,7 @@ import { FadeTail } from '../components/FadeTail'
 import { UsagePanel, rollup } from '../components/UsagePanel'
 import { DonutRings } from '../components/DonutRings'
 import { CheckpointBar } from '../components/CheckpointBar'
+import { FilePreviewPanel } from '../components/FilePreviewPanel'
 import { digestThinking } from '../lib/thinking'
 import { useSmoothText } from '../lib/smoothText'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
@@ -100,6 +101,9 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
   }
 
+  // 文件预览面板（右侧，随会话 UI 态；切 Agent 时面板自身重置内容）
+  const [previewOpen, setPreviewOpen] = useState(false)
+
   // 切换 Agent 或会话时恢复到底部
   useEffect(() => {
     scrollToBottom()
@@ -157,6 +161,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   }
 
   return (
+    <div style={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}>
     <div className="wb-main">
       <div className="wb-topbar">
         <Avatar name={agent.name} color={colorOf(agent.id)} size={26} />
@@ -194,6 +199,16 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
               title="CLI 的工作目录（进程 cwd，其文件读写与命令执行都发生在此目录内）"
             >
               <Icon name="folder" size={11} /> {agent.cliConfig.workDir ? agent.cliConfig.workDir.split(/[\\/]/).pop() : '目录未设'}
+            </button>
+          )}
+          {((agent.kind === 'model' && agent.tools) || agent.kind === 'cli') && (
+            <button
+              className={`model-chip ${previewOpen ? 'open' : ''}`}
+              onClick={() => setPreviewOpen((v) => !v)}
+              title="文件预览：工作区文件树 + 标签页，工具写盘自动刷新"
+              data-testid="preview-toggle"
+            >
+              <Icon name="folder" size={11} /> 预览{previewOpen ? '' : ''}
             </button>
           )}
         </div>
@@ -306,6 +321,8 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           fileRefAgentId={agent.id}
         />
       </div>
+    </div>
+    {previewOpen && <FilePreviewPanel agent={agent} onClose={() => setPreviewOpen(false)} />}
     </div>
   )
 }
@@ -991,6 +1008,18 @@ function ToolsGrantModal({ agent, onClose }: { agent: AgentConfig; onClose: () =
         </label>
         {enabled && (
           <>
+            {/* 老 Agent 补推荐配置：新 Agent 默认带联网，这个还没开——一键补上（只补联网，不动其他项） */}
+            {!allowWeb && (
+              <div
+                style={{ display: 'flex', gap: 8, alignItems: 'center', border: '1px dashed var(--border)', borderRadius: 'var(--r-sm)', padding: '6px 10px', fontSize: 12.5 }}
+                data-testid="recommend-tools-row"
+              >
+                <span style={{ flex: 1, color: 'var(--text-3)', lineHeight: 1.5 }}>
+                  推荐配置：新 Agent 默认开启联网（web_fetch / web_search），这个 Agent 还没开——查资料是基础能力。
+                </span>
+                <Button variant="secondary" style={{ height: 26 }} onClick={() => setAllowWeb(true)}>应用推荐配置</Button>
+              </div>
+            )}
             {/* 权限两档：沙箱 / 完全访问 */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '10px 12px' }}>

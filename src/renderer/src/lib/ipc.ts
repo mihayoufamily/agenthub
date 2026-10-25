@@ -23,13 +23,15 @@ export type ReadTextFileResult = { ok: boolean; content?: string; message?: stri
 type FileRefMethods = {
   listDir: (agentId: string, rel: string) => Promise<ListDirResult>
   readTextFile: (agentId: string, rel: string) => Promise<ReadTextFileResult>
+  readDataUrl: (agentId: string, rel: string) => Promise<{ ok: boolean; dataUrl?: string; mime?: string; bytes?: number; message?: string }>
 }
 
 /** @ 文件引用：rel 为相对该 Agent 文件目录（模型 Agent 沙箱目录 / CLI cwd）的 '/' 分层相对路径；
  *  目录越界、未配置目录、CLI Agent 等情况由主进程以 ok=false + message 如实拒绝 */
 export const fileRef: FileRefMethods = {
   listDir: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).listDir(agentId, rel),
-  readTextFile: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).readTextFile(agentId, rel)
+  readTextFile: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).readTextFile(agentId, rel),
+  readDataUrl: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).readDataUrl(agentId, rel)
 }
 
 // ---------------------------------------------------------------------------
