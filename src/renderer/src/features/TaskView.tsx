@@ -14,6 +14,9 @@ import { matchFileRef } from '@shared/acceptance'
 import { SKILL_SOURCE_LABELS } from '@shared/skill-usages'
 import { hasExitCard, planAuditOf, type PlanCliDelta } from '@shared/engine-transitions'
 import { pickUnregistered, unregisteredNote } from '@shared/delivery-dir'
+import { useSmoothText } from '../lib/smoothText'
+import { FadeTail } from '../components/FadeTail'
+import { useSettings } from '../stores/settings'
 import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls, safeName } from '../lib/utils'
 
@@ -413,6 +416,11 @@ function AcceptanceList({ run }: { run: WorkflowRun }) {
 }
 
 function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
+  // 流式柔和输出（与工作站气泡同一节奏）：hooks 必须在 delivery 早退之前——
+  // 交付卡不用卡片正文流式（它读 run 级内容），enabled=false 即直通
+  const reducedMotion = useSettings((s) => s.prefs?.reducedMotion === true)
+  const smoothOn = card.status === 'streaming' && !reducedMotion
+  const shownConclusion = useSmoothText(card.conclusion, smoothOn)
   if (card.role === 'delivery') {
     return <DeliveryCard run={run} />
   }
@@ -442,8 +450,14 @@ function CardRenderer({ card, run }: { card: RoleCardType; run: WorkflowRun }) {
       </div>
       <div className="rc-body">
         <div className="conclusion">
-          {card.conclusion}
-          {card.status === 'streaming' && <span className="caret" />}
+          {card.status === 'streaming' && !shownConclusion ? (
+            <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
+          ) : (
+            <>
+              <FadeTail text={shownConclusion} enabled={smoothOn} />
+              {card.status === 'streaming' && <span className="caret" />}
+            </>
+          )}
         </div>
         {card.checklist && card.checklist.length > 0 && (
           <div className="checklist">
