@@ -7,6 +7,7 @@ import { Icon } from '../components/Icons'
 import { AgentManageCard } from '../components/AgentManageCard'
 import { Modal } from '../components/Modal'
 import { LogoMark } from '../components/Logo'
+import { SkillCenter } from './SkillCenter'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
 import { cls, fmtTokens } from '../lib/utils'
 import { WfTaskList } from './WfChips'
@@ -28,6 +29,8 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
   const collapsed = useSettings((s) => s.prefs?.sidebarCollapsed ?? false)
   const patchPrefs = useSettings((s) => s.patchPrefs)
   const openSettings = useUi((s) => s.openSettings)
+  // 技能中心开关：纯本弹窗的局部状态，不进 ui store（无跨组件打开需求，少一条全局状态）
+  const [skillCenterOpen, setSkillCenterOpen] = useState(false)
   const [menuFor, setMenuFor] = useState<string | null>(null)
   /** 菜单 fixed 坐标：按触发按钮位置 + 剩余空间计算，避免被窗口/滚动容器裁切 */
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
@@ -262,10 +265,16 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
         <button className="foot-btn" onClick={() => useUi.getState().setSwitchHud('__switch_ask')} title="切换模式">
           <Icon name="swap" size={15} /> <span>切换模式</span>
         </button>
+        <button className="foot-btn" onClick={() => setSkillCenterOpen(true)} title="技能中心">
+          <Icon name="download" size={15} /> <span>技能中心</span>
+        </button>
         <button className="foot-btn" onClick={() => openSettings()} title="设置">
           <Icon name="settings" size={15} /> <span>设置</span>
         </button>
       </div>
+
+      {/* 技能中心：与上面 removeTarget 的 Modal 同一先例——fixed 弹窗挂在 aside 里是安全的 */}
+      <SkillCenter open={skillCenterOpen} onClose={() => setSkillCenterOpen(false)} />
     </aside>
   )
 }

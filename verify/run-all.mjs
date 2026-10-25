@@ -47,6 +47,9 @@ const SUITES = [
   // engine 28 / mcp-transport 31：2026-10-25 功能波轮实测（28 PASS / 31 PASS / 0 FAIL，各自独立脚本可单跑）。
   { name: 'engine', tier: 'logic', script: 'engine-check.mjs', min: 28, what: '引擎纯函数快照：六个竞态序列（清门/快照还原/续跑推断/队列出入/终态口径）+ 计划审计常量' },
   { name: 'mcp-transport', tier: 'logic', script: 'mcp-transport-check.mjs', min: 31, what: 'MCP HTTP 传输：JSON/SSE 两种响应形状、session 透传、close、超时、http 记录闸门与 trustCommand 分派' },
+  // market 42：2026-10-25 技能中心轮实测（42 PASS / 0 FAIL）。zip 读写与注册表闸门在 main 层
+  // （zip.ts 用 node:zlib，进 shared 会踩"shared 不碰 node:*"绊线）。
+  { name: 'market', tier: 'logic', script: 'market-check.mjs', min: 42, what: '技能中心：zip 打包/解包往返与 zip-slip 拒绝、注册表 index 闸门（缺字段/坏 sha256/越权 url 逐条点名）、内置技能清单、安装哈希不符拒绝' },
   // ui=83：2026-10-24 v0.5.0 Task 1 修复轮 1 实测（结果：83 PASS / 0 FAIL）。
   // 82 → 83 多的是"显式定视口 960×640 下介绍卡完整落在视口内"那一条（Ruling T1-e 的落点）；
   // 变异自证跑过：把 .mi-note 文案改回上一轮长版本 → 该条红（bottom=661 / vh=640，裁 21px）、82 PASS / 1 FAIL，

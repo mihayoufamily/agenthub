@@ -121,7 +121,11 @@ export interface ApprovalRecord {
 /** 思考强度（仅对官方支持的 harness 显示与透传；不支持的模型不显示该设置） */
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high'
 
-/** Skill：可复用提示包（Markdown），聊天中引用后注入本次对话上下文 */
+/**
+ * Skill：可复用提示包（Markdown），聊天中引用后注入本次对话上下文。
+ * 市场/内置技能与本地导入技能**共用同一存储与注入链**（saveSkill 落盘、同一套注入拼装），
+ * 下面的 source 系字段只负责标注来源与版本，不改变任何行为——没有"安装后禁用"的第三态。
+ */
 export interface Skill {
   id: string
   name: string
@@ -136,6 +140,16 @@ export interface Skill {
   dir?: string
   files?: string[]
   format?: 'legacy' | 'agentskills'
+  /** 来源：本地导入（缺省）/ 内置随应用分发 / 市场安装。只作标注，注入行为与本地技能完全一致 */
+  source?: 'local' | 'builtin' | 'market'
+  /** 来源条目 id：market 技能存注册表条目 id（安装更新时按 `market-<sourceId>` 覆盖同 id） */
+  sourceId?: string
+  /** 来源声明的版本（注册表/包 frontmatter 给的，如实转存，不代校验格式） */
+  version?: string
+  /** 作者（注册表/包 frontmatter 给的） */
+  author?: string
+  /** 主页/仓库链接（注册表/包 frontmatter 给的；只展示，不主动访问） */
+  homepage?: string
 }
 
 /** 单次请求的用量（usage 事件；CLI 与模型 Agent 通用） */

@@ -21,6 +21,8 @@ import { checkUpdate, downloadPortable, isDownloading, updatesDir } from './upda
 import * as ledger from './ledger'
 import { setBusy } from './lifecycle'
 import type { LedgerEntry } from './ledger'
+// 技能中心内核：frontmatter 解析的全仓唯一实现也在这里（本文件原先那一份已挪入，不许出现第二份）
+import * as market from './market'
 
 /**
  * 工作流产物目录（主进程唯一口径）：用户在设置里选的目录；未选则默认文档目录下的 AgentHub-artifacts。
@@ -37,17 +39,8 @@ export function workflowOutDir(getStore: () => Store): string {
   }
 }
 
-/** Agent Skills 的 frontmatter：只取顶层 `key: value`（够用且不会误吃正文里的冒号） */
-function parseSkillFrontmatter(raw: string): { meta: Record<string, string>; body: string } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw)
-  if (!m) return { meta: {}, body: raw }
-  const meta: Record<string, string> = {}
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line.trim())
-    if (kv) meta[kv[1].toLowerCase()] = kv[2].replace(/^["']|["']$/g, '').trim()
-  }
-  return { meta, body: raw.slice(m[0].length) }
-}
+// Agent Skills 的 frontmatter 解析已挪到 main/market.ts（parseSkillFrontmatter，全仓唯一实现）：
+// 技能中心要扫内置技能与解包市场技能，两处都要同一套解析，留两份实现必然漂移。
 
 /** 账本采集：在事件出口统计耗时/事件数/usage/错误，done|error 时落一条脱敏记录 */
 function ledgerTap(meta: Omit<LedgerEntry, 'ts' | 'ok' | 'ms' | 'events'>) {
@@ -123,6 +116,13 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   // ---------- 应用信息 ----------
   const { app } = require('electron')
+
+  // ---------- 技能中心（市场）内核注入 ----------
+  // builtinDir 由 app.getAppPath() 推：packaged 时是 <便携根>/resources/app/builtin-skills，
+  // dev 时是仓库根/builtin-skills，两种形态都对。存储访问收窄成两个动作注入，见 market.ts。
+  market.init(join(app.getAppPath(), 'builtin-skills'), app.getPath('userData'))
+  market.bindStore({ getSkills: () => getStore().getSkills(), saveSkill: (s) => getStore().saveSkill(s) })
+
   ipcMain.handle('app:info', () => ({
     version: app.getVersion(),
     electron: process.versions.electron,
@@ -620,13 +620,45 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       enabled: skill.enabled !== false,
       dir: typeof skill.dir === 'string' ? skill.dir.slice(0, 300) : undefined,
       files: Array.isArray(skill.files) ? skill.files.filter((f) => typeof f === 'string').slice(0, 40) : undefined,
-      format: skill.format === 'agentskills' ? 'agentskills' : 'legacy'
+      format: skill.format === 'agentskills' ? 'agentskills' : 'legacy',
+      // 来源标注字段（市场/内置）：编辑保存时原样带回，不因一次编辑就把"这是市场装的"悄悄抹掉
+      ...(typeof skill.source === 'string' && ['local', 'builtin', 'market'].includes(skill.source) ? { source: skill.source } : {}),
+      ...(typeof skill.sourceId === 'string' && skill.sourceId ? { sourceId: skill.sourceId.slice(0, 80) } : {}),
+      ...(typeof skill.version === 'string' && skill.version ? { version: skill.version.slice(0, 40) } : {}),
+      ...(typeof skill.author === 'string' && skill.author ? { author: skill.author.slice(0, 80) } : {}),
+      ...(typeof skill.homepage === 'string' && skill.homepage ? { homepage: skill.homepage } : {})
     })
     return { ok: true, skill: saved }
   })
   ipcMain.handle('skills:remove', (_e, id: string) => {
     getStore().removeSkill(id)
     return { ok: true }
+  })
+
+  // ---------- 技能中心（市场）：内置 / 注册表 / 安装 / 导出 ----------
+  // id 入参先过字符白名单（本仓既有口径，防路径拼接）：install/exportPack 都拼得进路径
+  const MARKET_ID_RE = /^[A-Za-z0-9._-]{1,64}$/
+  /** 内置技能只读清单（装前可读的另一半：不落盘也能看到正文）。失败形态与渲染层契约一致：ok=false + message，不抛桥异常 */
+  ipcMain.handle('market:builtin', () => {
+    try {
+      return { ok: true, skills: market.listBuiltin() }
+    } catch (e) {
+      return { ok: false, message: `内置技能读取失败：${(e as Error).message}` }
+    }
+  })
+  ipcMain.handle('market:registry', () => market.fetchRegistry())
+  ipcMain.handle('market:install', async (_e, id: string) => {
+    if (typeof id !== 'string' || !MARKET_ID_RE.test(id)) return { ok: false, message: '条目 id 不合法' }
+    // 渲染层只给 id，不传整条 item：url/sha256 一律以主进程刚拉到的注册表为准，
+    // 防"界面伪造一条 item 指向任意下载源"——注册表是唯一可信来源
+    const reg = await market.fetchRegistry()
+    const item = reg.items.find((it) => it.id === id)
+    if (!item) return { ok: false, message: reg.ok ? `注册表里没有这个条目：${id}` : `注册表不可用：${reg.error ?? '未知原因'}` }
+    return market.installFromMarket(item)
+  })
+  ipcMain.handle('market:exportPack', (_e, id: string) => {
+    if (typeof id !== 'string' || !MARKET_ID_RE.test(id)) return Promise.resolve({ ok: false, message: '技能 id 不合法' })
+    return market.exportPack(id)
   })
 
   /**
@@ -650,7 +682,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     }
     const MAX_SKILL = 256 * 1024
     if (raw.length > MAX_SKILL) raw = raw.slice(0, MAX_SKILL) + '\n…（内容超长，已截断）'
-    const { meta, body } = parseSkillFrontmatter(raw)
+    const { meta, body } = market.parseSkillFrontmatter(raw)
     let files: string[] = []
     try {
       files = readdirSync(dir, { recursive: true })

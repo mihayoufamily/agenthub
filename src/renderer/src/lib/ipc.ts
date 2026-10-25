@@ -31,3 +31,16 @@ export const fileRef: FileRefMethods = {
   listDir: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).listDir(agentId, rel),
   readTextFile: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).readTextFile(agentId, rel)
 }
+
+// ---------------------------------------------------------------------------
+// @ 技能中心（官方内置 / 技能市场 / 导出）：并行批次的 preload 契约已落地
+// （bridge.market.{builtin,registry,install,exportPack}），此前的交叉类型窄化
+// 已按约定撤掉、直接用 preload 的真实声明。RegistryItem 的唯一真相在
+// main/market.ts，渲染层不直接 import main，从 API 返回类型反推同一个形状。
+// ---------------------------------------------------------------------------
+
+/** 注册表条目：与 main/market.RegistryItem 逐字段同形（id/name/desc/version/sha256/size/url + 可选 author/homepage） */
+export type RegistryItem = NonNullable<Awaited<ReturnType<typeof bridge.market.registry>>['items']>[number]
+
+/** 技能中心市场通道：preload 已落地，这里只是给渲染层一个稳定入口 */
+export const market = bridge.market

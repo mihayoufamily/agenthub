@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { CompatState, SandboxFallbackPolicy } from '../shared/compat'
+// 类型-only 导入（编译期擦除，不产生对 main 的运行时依赖）：注册表条目形状的唯一真相在 main/market.ts
+import type { RegistryItem as MarketRegistryItem } from '../main/market'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
@@ -168,6 +170,19 @@ const api = {
     remove: (id: string) => ipcRenderer.invoke('skills:remove', id) as Promise<{ ok: true }>,
     /** 导入 Agent Skills 标准目录（含 SKILL.md） */
     importDir: () => ipcRenderer.invoke('skills:importDir') as Promise<{ ok: boolean; skill?: Skill; message?: string }>
+  },
+  /** 技能中心（市场）：内置技能只读清单 / 官方注册表 / 安装 / 导出。安装走 saveSkill 同一存储与注入链 */
+  market: {
+    /** 内置技能（不落盘的只读清单；装前可读，SKILL.md 正文就在 content 里）。失败以 ok=false + message 回传，不抛桥异常 */
+    builtin: () => ipcRenderer.invoke('market:builtin') as Promise<{ ok: boolean; skills?: Skill[]; message?: string }>,
+    /** 官方注册表（fromCache=true 表示来自本地缓存，界面要如实标注） */
+    registry: () => ipcRenderer.invoke('market:registry') as Promise<{ ok: boolean; items?: MarketRegistryItem[]; error?: string; fromCache?: boolean; skipped?: string[] }>,
+    /** 按条目 id 安装：渲染层不传 url/哈希——以主进程拉到的注册表为准 */
+    install: (id: string) =>
+      ipcRenderer.invoke('market:install', id) as Promise<{ ok: boolean; skill?: Skill; message?: string }>,
+    /** 导出技能包（zip）：选择保存位置的对话框在主进程侧 */
+    exportPack: (id: string) =>
+      ipcRenderer.invoke('market:exportPack', id) as Promise<{ ok: boolean; path?: string; message?: string }>
   },
   /** MCP server（tools-only + stdio）：配置在 config，信任标记在主进程 approvals.json */
   mcp: {

@@ -1,0 +1,38 @@
+{
+  "comment": "AgentHub 官方技能注册表。字段口径见 registry/README.md；url 只允许官方仓库 packs/ 前缀，客户端对越权 url 一律拒绝。",
+  "items": [
+    {
+      "id": "code-review",
+      "name": "代码审查清单",
+      "desc": "按严重度分级的审查清单（正确性/安全/边界/可读性），每条结论必须给证据行号，面向审核角色使用",
+      "version": "1.0.0",
+      "sha256": "ee0912cdbca91d37fe752b1b5d75fb9b8762ba40bb4a43b125fa2c397fbebf71",
+      "size": 2876,
+      "url": "https://raw.githubusercontent.com/mihayoufamily/agenthub-skills/main/packs/code-review-1.0.0.zip",
+      "author": "AgentHub 官方",
+      "homepage": "https://github.com/mihayoufamily/agenthub"
+    },
+    {
+      "id": "task-planning",
+      "name": "任务拆解规划",
+      "desc": "把模糊目标拆成可独立验收的步骤，输出结构化清单与验收标准，不编造文件名，面向规划角色使用",
+      "version": "1.0.0",
+      "sha256": "81f25a776d9290307844f7c69c37e7a943c9b1ea8f44e5394894dc5b434420dd",
+      "size": 2955,
+      "url": "https://raw.githubusercontent.com/mihayoufamily/agenthub-skills/main/packs/task-planning-1.0.0.zip",
+      "author": "AgentHub 官方",
+      "homepage": "https://github.com/mihayoufamily/agenthub"
+    },
+    {
+      "id": "tech-writing",
+      "name": "技术文档撰写",
+      "desc": "固定结构（背景/现状/改动/验证/遗留）的技术文档写法，如实声明未验证项，不夸大，面向执行角色使用",
+      "version": "1.0.0",
+      "sha256": "cca4dea9d82b16688fe8f640b8b19af87c963279376b9f3379b53f2084e129fb",
+      "size": 2865,
+      "url": "https://raw.githubusercontent.com/mihayoufamily/agenthub-skills/main/packs/tech-writing-1.0.0.zip",
+      "author": "AgentHub 官方",
+      "homepage": "https://github.com/mihayoufamily/agenthub"
+    }
+  ]
+}

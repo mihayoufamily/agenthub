@@ -578,3 +578,37 @@
 .kbd-rec { border-color: var(--brand-amber, #b45309); color: var(--brand-amber, #b45309); animation: kbd-rec-pulse 1.2s ease-in-out infinite; }
 @keyframes kbd-rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 :root[data-anim='off'] .kbd-rec, :root[data-motion='reduced'] .kbd-rec { animation: none; }
+
+/* ---- 技能中心（Sidebar 入口弹窗：已安装 / 官方内置 / 技能市场 三栏 Tab） ---- */
+/* Tab 栏直接复用设置页的 .seg 分段控件，这里只补与正文的间距 */
+.skill-center-tabs { display: flex; margin-bottom: 12px; }
+
+/* 来源徽章：本地不染色（多数派降噪），内置/市场给轻量底色便于一眼分拣 */
+.skill-center-src { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-3); flex: none; margin-left: 6px; }
+.skill-center-src-builtin { color: var(--info); border-color: var(--info); background: var(--info-bg); }
+.skill-center-src-market { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+
+/* 市场卡片网格：按容器宽度自适应列数，窄窗口退化成单列不横向滚动 */
+.skill-center-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; margin-bottom: 10px; }
+.skill-center-card { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.skill-center-card-head { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
+.skill-center-ver { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.skill-center-card-desc { font-size: 12px; color: var(--text-2); line-height: 1.6; flex: 1; }
+.skill-center-card-meta { font-size: 11px; color: var(--text-3); word-break: break-all; }
+.skill-center-card-acts { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* 空/错误/缓存/固定小字：与设置页 desc 同口径（字号 12 上下、text-3 色） */
+.skill-center-empty { font-size: 12.5px; color: var(--text-3); padding: 14px 2px; }
+.skill-center-hint { font-size: 12px; color: var(--text-3); margin-bottom: 10px; line-height: 1.6; }
+.skill-center-error { font-size: 12px; color: var(--danger); border: 1px solid var(--danger); border-radius: var(--r-sm); padding: 8px 10px; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; line-height: 1.6; word-break: break-all; }
+.skill-center-error .btn { flex: none; }
+.skill-center-cache { font-size: 11.5px; color: var(--warn); margin-bottom: 6px; }
+.skill-center-note { font-size: 11.5px; color: var(--text-3); border-top: 1px solid var(--border); padding-top: 8px; line-height: 1.6; }
+
+/* 预览：SKILL.md 源码纯文本渲染（等宽、可滚动、只读），不做任何 markdown 解析改写 */
+.skill-center-preview-meta { font-size: 11.5px; color: var(--text-3); margin-bottom: 8px; line-height: 1.6; word-break: break-all; }
+.skill-center-preview { margin: 0 0 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; overflow-y: auto; max-height: 48vh; color: var(--text); }
+
+/* Modal 组件没有透传 className，技能中心要 760px 宽只能按 aria-label 精确放宽上限
+   （.modal 默认 max-width 640px 会盖过内联 width）；等 Modal 支持 className 后应换成显式类 */
+.modal[aria-label='技能中心'] { max-width: min(92vw, 780px); }

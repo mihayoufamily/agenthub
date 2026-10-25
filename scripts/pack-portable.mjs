@@ -47,6 +47,10 @@ cpSync(join(cwd, 'dist'), join(appDir, 'dist'), { recursive: true })
 if (existsSync(join(cwd, 'build', 'icon.ico'))) {
   cpSync(join(cwd, 'build'), join(appDir, 'build'), { recursive: true })
 }
+// builtin-skills/：官方内置技能（技能中心按 app.getAppPath()/builtin-skills 扫描，与 build/ 同级）
+if (existsSync(join(cwd, 'builtin-skills'))) {
+  cpSync(join(cwd, 'builtin-skills'), join(appDir, 'builtin-skills'), { recursive: true })
+}
 
 // 3) 兼容模式一键启动器（安全软件拦截沙箱导致双击无反应时使用）
 writeFileSync(join(outDir, 'start-compat-mode.cmd'), [
