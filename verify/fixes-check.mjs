@@ -3400,6 +3400,14 @@ console.log('\n[MI] 模型回复图片：parseMessageSegments 分段与边界 / 
   ok('绊线：preload 暴露 images.fetch（渲染层唯一入口，不经手明文以外的下载细节）',
     preloadSrcMI.error === null && preloadSrcMI.text.includes("invoke('image:fetch'"),
     preloadSrcMI.error ?? 'preload 缺 image:fetch 调用')
+  // 同源豁免（2026-10-26）：本地网关场景图片与 API 同 host，SSRF 直判会误杀自己的出图。
+  // 豁免必须由主进程对照存储配置生成（渲染层无权自报），且两道拦截判定仍在（豁免不是拆墙）。
+  const ipcSrcMISame = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：image:fetch 同源豁免在场——sameHosts 来自主进程的 agents 配置，第一跳与跳转后拦截文案未拆',
+    ipcSrcMISame.error === null && ipcSrcMISame.text.includes('sameHosts') &&
+      /modelConfig\?\.baseUrl/.test(ipcSrcMISame.text) &&
+      ipcSrcMISame.text.includes('指向内网/本机（SSRF 已拦截）'),
+    ipcSrcMISame.error ?? '缺 sameHosts 豁免或拦截文案')
 }
 
 // ---------- [OM] 官方模型服务：注册表解析闸门（纯函数） + 接线绊线 ----------

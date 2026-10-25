@@ -911,26 +911,46 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     }
     const hit = imgCache.get(url)
     if (hit) return { ok: true, dataUrl: hit.dataUrl, mime: hit.mime, bytes: hit.bytes }
-    // 第一跳 hostname 直判：命中内网/环回给点名文案，让"模型指内网"这件事对用户可见
+    // 同源豁免：图片与某个已配置模型 Agent 的端点**同 host** 时，环回/内网地址放行——
+    // 本来就在与这台服务器通话（如本地网关 127.0.0.1:8080 的 /images），下载它给出的
+    // 图片没有扩大攻击面。豁免名单由主进程对照自己的存储配置得出，渲染层无权自报。
+    const sameHosts = new Set<string>()
+    for (const a of getStore().getConfig().agents) {
+      const b = a.modelConfig?.baseUrl
+      if (typeof b === 'string' && b) {
+        try { sameHosts.add(new URL(b).host) } catch { /* 端点写坏的条目跳过 */ }
+      }
+    }
+    let target = url
     try {
-      if (isNonPublicHost(new URL(url).hostname)) {
+      const sameOrigin = sameHosts.has(new URL(url).host)
+      // 第一跳 hostname 直判：命中内网/环回给点名文案，让"模型指内网"这件事对用户可见
+      if (!sameOrigin && isNonPublicHost(new URL(url).hostname)) {
         return { ok: false, message: '拒绝：模型给出的地址指向内网/本机（SSRF 已拦截）' }
+      }
+      if (!sameOrigin) {
+        // DNS 复核与 web_fetch 同一份 safeWebUrl：all:true 拿全部地址，任一命中内网即拒
+        const checked = await safeWebUrl(url)
+        if (!checked) return { ok: false, message: '拒绝：模型给出的地址指向内网，或域名解析失败（SSRF 已拦截）' }
+        target = checked
       }
     } catch {
       return { ok: false, message: '链接无法解析' }
     }
-    // DNS 复核与 web_fetch 同一份 safeWebUrl：all:true 拿全部地址，任一命中内网即拒
-    const checked = await safeWebUrl(url)
-    if (!checked) return { ok: false, message: '拒绝：模型给出的地址指向内网，或域名解析失败（SSRF 已拦截）' }
     const { net } = require('electron') as typeof import('electron')
     try {
-      const res = await net.fetch(checked, {
+      const res = await net.fetch(target, {
         redirect: 'follow',
         signal: AbortSignal.timeout(IMG_TIMEOUT_MS),
         headers: { 'User-Agent': IMG_UA, Accept: 'image/*' }
       })
-      // 跳转后按最终落点复核（与 webGet 同口径）：跳进内网的响应体不返回给渲染层
-      if (!(await safeWebUrl(res.url || checked))) {
+      // 跳转后按最终落点复核（与 webGet 同口径）：跳进内网的响应体不返回给渲染层；
+      // 落点仍是同源端点（本地网关跳自己的另一条路径）照常放行
+      let finalOk = false
+      try {
+        finalOk = sameHosts.has(new URL(res.url || target).host) || (await safeWebUrl(res.url || target)) !== null
+      } catch { finalOk = false }
+      if (!finalOk) {
         return { ok: false, message: '拒绝：跳转后指向内网/本机（SSRF 已拦截，图片未返回）' }
       }
       if (!res.ok) return { ok: false, message: `HTTP ${res.status} ${res.statusText}` }
