@@ -273,7 +273,8 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
         </button>
       </div>
 
-      {/* 技能中心：与上面 removeTarget 的 Modal 同一先例——fixed 弹窗挂在 aside 里是安全的 */}
+      {/* 技能中心：Modal 组件自身 portal 到 body（aside 的入场动画 fill-mode:both 会让
+          fixed 后代被困在侧栏里——真实事故，Modal 层统一修掉了），这里挂哪都行 */}
       <SkillCenter open={skillCenterOpen} onClose={() => setSkillCenterOpen(false)} />
     </aside>
   )

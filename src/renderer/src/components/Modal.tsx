@@ -1,5 +1,6 @@
 // 模态框：焦点捕获、Esc 关闭、关闭后焦点回触发元素、关键操作不受误点遮罩影响
 import React, { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { cls } from '../lib/utils'
 import { IconButton } from './primitives'
 import { Icon } from './Icons'
@@ -71,7 +72,12 @@ export function Modal({
   }, [open])
 
   if (!open) return null
-  return (
+  // 必须走 portal 挂到 body：position:fixed 的"视口定位"会被带 transform 的祖先劫持成
+  // 相对那个祖先定位——.sidebar 的入场动画 sidebar-in 带 fill-mode:both，动画结束后
+  // transform 效果仍算"在生效"，aside 从此永久是 fixed 后代的包含块。真实事故：
+  // 技能中心弹窗挂进侧栏后被塞进 310px 宽的侧栏里。portal 之后弹窗与挂载点无关，
+  // 将来谁再从带动画的容器里开 Modal 也不会复发。
+  return createPortal(
     <div
       className="modal-overlay"
       onMouseDown={(e) => {
@@ -95,6 +101,7 @@ export function Modal({
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-foot">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
