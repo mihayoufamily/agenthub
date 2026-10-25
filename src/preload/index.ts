@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { CompatState, SandboxFallbackPolicy } from '../shared/compat'
 // 类型-only 导入（编译期擦除，不产生对 main 的运行时依赖）：注册表条目形状的唯一真相在 main/market.ts
 import type { RegistryItem as MarketRegistryItem } from '../main/market'
+// 同上：官方模型清单形状的唯一真相在 main/official-models.ts
+import type { OfficialModelsResult } from '../main/official-models'
 import type {
   AppConfig, AgentSession, WorkflowRun, MemoryEntry, CustomModelConfig,
   ModelTestResult, ScanResultItem, AppInfo, AgentConfig, CliName, ToolGrant, ToolCall, Skill, ThinkingLevel,
@@ -224,6 +226,11 @@ const api = {
     /** 导出技能包（zip）：选择保存位置的对话框在主进程侧 */
     exportPack: (id: string) =>
       ipcRenderer.invoke('market:exportPack', id) as Promise<{ ok: boolean; path?: string; message?: string }>
+  },
+  /** 官方模型服务：端点+模型清单来自注册表仓库（fromCache=true 为本地缓存，界面如实标注）。
+   *  连接测试与对话走既有 models.test / models.chat——key 由用户粘贴，不经本通道 */
+  officialModels: {
+    list: () => ipcRenderer.invoke('officialModels:list') as Promise<OfficialModelsResult>
   },
   /** MCP server（tools-only + stdio）：配置在 config，信任标记在主进程 approvals.json */
   mcp: {

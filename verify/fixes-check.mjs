@@ -351,14 +351,17 @@ console.log('\n[G] 历史消息的 reasoning 默认不回传接口')
   server.close()
 }
 
-// ---------- H. 关闭确认（Ctrl+W 不再静默退出应用） ----------
-console.log('\n[H] decideClose（正在执行工作流时关闭必须弹确认）')
+// ---------- H. 关闭裁决三态（空闲缩托盘 / 忙碌弹确认 / quitting 放行） ----------
+console.log('\n[H] decideClose（关窗≠退出：空闲缩托盘，忙碌弹确认，托盘常驻）')
 {
   const lc = await import('../out/main/lifecycle.js')
-  ok('没在跑：直接退出（不打扰）', lc.decideClose({ busy: false, quitting: false }) === 'quit')
+  ok('没在跑：缩到托盘（hide，应用常驻；2026-10-25 用户拍板）', lc.decideClose({ busy: false, quitting: false }) === 'hide')
   ok('正在跑：弹确认', lc.decideClose({ busy: true, quitting: false }) === 'ask')
-  ok('已确认过退出：不再重复追问（否则托盘退出会被自己拦住）', lc.decideClose({ busy: true, quitting: true }) === 'quit')
-  ok('确认框的默认选项是"后台继续运行"（index.ts 里 defaultId=0）', /buttons: \[\s*'后台继续运行/.test(readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf-8')))
+  ok('已确认过退出：放行（否则托盘"退出"会被自己拦住）', lc.decideClose({ busy: true, quitting: true }) === 'quit')
+  const mainSrc = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf-8')
+  ok('确认框的默认选项是"后台继续运行"（index.ts 里 defaultId=0）', /buttons: \[\s*'后台继续运行/.test(mainSrc))
+  ok('托盘随应用常驻：whenReady 里就 ensureTray（不是等收起才建）', /mainWindow = createWindow\(\)\s*\n\s*\/\/ 托盘随应用常驻[\s\S]{0,80}ensureTray\(\)/.test(mainSrc))
+  ok('忙碌确认框的"后台继续运行"只 hide、不再 setQuitting（否则缩托盘变成真退出）', !/response === 0\) \{\s*\n\s*setQuitting/.test(mainSrc))
   ok('busy 由渲染层上报而非主进程猜测', readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf-8').includes('app:setBusy'))
 }
 
@@ -3397,6 +3400,98 @@ console.log('\n[MI] 模型回复图片：parseMessageSegments 分段与边界 / 
   ok('绊线：preload 暴露 images.fetch（渲染层唯一入口，不经手明文以外的下载细节）',
     preloadSrcMI.error === null && preloadSrcMI.text.includes("invoke('image:fetch'"),
     preloadSrcMI.error ?? 'preload 缺 image:fetch 调用')
+}
+
+// ---------- [OM] 官方模型服务：注册表解析闸门（纯函数） + 接线绊线 ----------
+// 行为面落在 out/main/official-models.js（net.fetch 是懒 require，纯 node 下 parse/init 都能调）；
+// 渲染层/主进程/preload 的接线用源码绊线钉住（同 [MI]/[Z] 段口径）。
+console.log('\n[OM] 官方模型服务：parseOfficialModelsIndex 闸门 / officialModels 通道与入口在场')
+{
+  let om = null
+  try {
+    om = await import('../out/main/official-models.js')
+  } catch (e) {
+    ok('out/main/official-models.js 存在（编译产物）', false, String(e && e.message))
+  }
+  if (om) {
+    const parse = om.parseOfficialModelsIndex
+    const dump = (t) => JSON.stringify(parse(t))
+    const goodIdx = {
+      service: 'AgentHub 官方模型服务',
+      endpoint: 'https://models.example.net/v1',
+      updatedNote: '首发',
+      models: [
+        { id: 'auto', name: '智能路由', desc: '自动分流', contextWindow: 32768 },
+        { id: 'qwen3.5-9b', name: '9B', desc: '日常', contextWindow: 65536 }
+      ]
+    }
+    ok('合法清单通过：endpoint/service/updatedNote 与条目字段原样保留',
+      (() => {
+        const r = parse(JSON.stringify(goodIdx))
+        return r.ok && r.endpoint === 'https://models.example.net/v1' && r.service === 'AgentHub 官方模型服务' &&
+          r.updatedNote === '首发' && r.models.length === 2 && r.models[0].id === 'auto' && r.models[1].contextWindow === 65536
+      })(), dump(goodIdx))
+    ok('http 端点整表拒收（官方服务明文传 key 不可接受）',
+      (() => {
+        const r = parse(JSON.stringify({ ...goodIdx, endpoint: 'http://models.example.net/v1' }))
+        return !r.ok && /https/.test(r.error ?? '') && r.models.length === 0
+      })(), dump({ ...goodIdx, endpoint: 'http://models.example.net/v1' }))
+    ok('缺 endpoint / models 非数组 / 裸数组形态全部 ok:false + 中文原因',
+      (() => {
+        const a = parse(JSON.stringify({ models: goodIdx.models }))
+        const b = parse(JSON.stringify({ endpoint: goodIdx.endpoint }))
+        const c = parse(JSON.stringify(goodIdx.models))
+        return !a.ok && !b.ok && !c.ok && !!a.error && !!b.error && !!c.error
+      })())
+    ok('坏条目跳过并点名（缺 name / contextWindow 非正整数 / id 不合法），好条目照常收下',
+      (() => {
+        const bad = [
+          { id: 'no-name', desc: 'x', contextWindow: 1 },
+          { id: 'zero-ctx', name: 'y', desc: 'x', contextWindow: 0 },
+          { id: '不合法 id!', name: 'z', desc: 'x', contextWindow: 8 },
+          ...goodIdx.models
+        ]
+        const r = parse(JSON.stringify({ ...goodIdx, models: bad }))
+        return r.ok && r.models.length === 2 && (r.skipped ?? []).some((s) => s.includes('no-name')) &&
+          (r.skipped ?? []).some((s) => s.includes('zero-ctx')) && !!r.error && /跳过/.test(r.error)
+      })())
+    ok('全部条目非法时 ok:false（界面不会拿到一张"合法但空"的官方清单）',
+      (() => {
+        const r = parse(JSON.stringify({ ...goodIdx, models: [{ id: 'x', desc: 'd', contextWindow: 4 }] }))
+        return !r.ok && r.models.length === 0
+      })(), '空清单被判成了 ok')
+    ok('非法 JSON 返回中文原因', (() => { const r = parse('这不是 JSON'); return !r.ok && /JSON/.test(r.error ?? '') })())
+    ok('MODELS_REGISTRY_URL 指向官方注册表仓库（防有人改一半换源）',
+      om.MODELS_REGISTRY_URL === 'https://raw.githubusercontent.com/mihayoufamily/agenthub-models/main/index.json',
+      String(om.MODELS_REGISTRY_URL))
+  }
+
+  // 绊线（源码级）：四层接线断任何一条立刻红
+  const omSrc = readSrcSafe('src/main/official-models.ts')
+  ok('绊线：缓存写向独立文件 official-models-cache.json（cachePath 的返回值，不与技能市场缓存混用）',
+    omSrc.error === null && /cachePath\(\)[\s\S]{0,120}official-models-cache\.json/.test(omSrc.text),
+    omSrc.error ?? 'cachePath 没有指向 official-models-cache.json')
+  const ipcSrcOM = readSrcSafe('src/main/ipc.ts')
+  ok('绊线：ipc.ts 注册 officialModels:list 通道并注入 userData（缓存落点）',
+    ipcSrcOM.error === null && ipcSrcOM.text.includes("'officialModels:list'") && ipcSrcOM.text.includes('initOfficialModels('),
+    ipcSrcOM.error ?? '缺 officialModels:list / initOfficialModels')
+  const preloadSrcOM = readSrcSafe('src/preload/index.ts')
+  ok('绊线：preload 暴露 officialModels.list（渲染层唯一入口，key 不经此通道）',
+    preloadSrcOM.error === null && preloadSrcOM.text.includes("invoke('officialModels:list'"),
+    preloadSrcOM.error ?? 'preload 缺 officialModels:list')
+  const amSrcOM = readSrcSafe('src/renderer/src/features/AgentModals.tsx')
+  ok('绊线：添加 Agent 弹窗有「官方模型」页签，且添加按钮没填 key 时禁用',
+    amSrcOM.error === null && amSrcOM.text.includes("['official', '官方模型']") &&
+      amSrcOM.text.includes('disabled={!apiKey.trim()}') && amSrcOM.text.includes('bridge.officialModels'),
+    amSrcOM.error ?? '缺官方模型页签 / key 门槛 / bridge 调用')
+  const oaSrcOM = readSrcSafe('src/main/adapters/openai.ts')
+  ok('绊线：humanizeError 的「已被吊销」规则排在通用 401 之前（先认官方服务语义再兜底）',
+    oaSrcOM.error === null && oaSrcOM.text.indexOf('已被吊销') > 0 &&
+      oaSrcOM.text.indexOf('已被吊销') < oaSrcOM.text.indexOf('认证失败：API Key 无效或已过期'),
+    oaSrcOM.error ?? '吊销规则缺失或次序不对')
+  ok('绊线：testConnection 失败时透出服务端错误正文（光 HTTP 401 用户无从判断找谁）',
+    oaSrcOM.error === null && /body\?\.error\?\.message/.test(oaSrcOM.text),
+    oaSrcOM.error ?? 'testConnection 不读错误正文')
 }
 
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)

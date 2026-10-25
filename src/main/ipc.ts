@@ -25,6 +25,8 @@ import { setBusy } from './lifecycle'
 import type { LedgerEntry } from './ledger'
 // 技能中心内核：frontmatter 解析的全仓唯一实现也在这里（本文件原先那一份已挪入，不许出现第二份）
 import * as market from './market'
+// 官方模型服务注册表：内置"官方模型"入口的数据源（端点+清单来自注册表仓库，不写死在代码里）
+import * as officialModels from './official-models'
 
 /**
  * 工作流产物目录（主进程唯一口径）：用户在设置里选的目录；未选则默认文档目录下的 AgentHub-artifacts。
@@ -155,6 +157,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // builtinDir 由 app.getAppPath() 推：packaged 时是 <便携根>/resources/app/builtin-skills，
   // dev 时是仓库根/builtin-skills，两种形态都对。存储访问收窄成两个动作注入，见 market.ts。
   market.init(join(app.getAppPath(), 'builtin-skills'), app.getPath('userData'))
+  officialModels.initOfficialModels(app.getPath('userData'))
   market.bindStore({ getSkills: () => getStore().getSkills(), saveSkill: (s) => getStore().saveSkill(s) })
 
   ipcMain.handle('app:info', () => ({
@@ -773,6 +776,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     if (typeof id !== 'string' || !MARKET_ID_RE.test(id)) return Promise.resolve({ ok: false, message: '技能 id 不合法' })
     return market.exportPack(id)
   })
+
+  // ---------- 官方模型服务（注册表）：端点与模型清单的唯一真相在 mihayoufamily/agenthub-models ----------
+  // 渲染层只拿展示数据与"生成预置 Agent"的三元组（baseUrl / modelId / 名称）；API Key 一律用户自己粘贴，
+  // 本通道不下发任何凭据，也不接受渲染层上传端点——换端点 = 改注册表仓库，不是改界面
+  ipcMain.handle('officialModels:list', () => officialModels.fetchOfficialModels())
 
   /**
    * 导入 Agent Skills 标准目录：读 <dir>/SKILL.md（frontmatter 的 name / description + 正文），

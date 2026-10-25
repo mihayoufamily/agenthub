@@ -1,5 +1,5 @@
 // Agent 相关弹窗集合：添加（扫描/演示/自定义模型/CLI）、管理顺序（拖拽+上下移）、交接
-import React, { useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { ScanResultItem, CliName } from '@shared/types'
 import { useAgents, CLI_META } from '../stores/agents'
 import { useSessions } from '../stores/sessions'
@@ -21,7 +21,7 @@ export function AgentModals({ kind, onClose }: { kind: AgentModalKind; onClose: 
 
 /* ---------------- 添加 Agent ---------------- */
 function AddAgentModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<'cand' | 'demo' | 'cli' | 'model' | 'scan'>('cand')
+  const [tab, setTab] = useState<'cand' | 'demo' | 'cli' | 'model' | 'official' | 'scan'>('cand')
   /** 候选列表 → 自定义模型预填（provider/baseUrl） */
   const [modelPrefill, setModelPrefill] = useState<{ provider: string; baseUrl: string } | null>(null)
   return (
@@ -32,6 +32,7 @@ function AddAgentModal({ onClose }: { onClose: () => void }) {
           ['demo', '演示 Agent'],
           ['cli', '本机 CLI'],
           ['model', '自定义模型'],
+          ['official', '官方模型'],
           ['scan', '扫描本机']
         ] as const).map(([k, label]) => (
           <button
@@ -56,6 +57,7 @@ function AddAgentModal({ onClose }: { onClose: () => void }) {
       {tab === 'demo' && <DemoTab onClose={onClose} />}
       {tab === 'cli' && <CliTab onClose={onClose} />}
       {tab === 'model' && <ModelTab key={modelPrefill?.baseUrl ?? 'blank'} prefill={modelPrefill ?? undefined} onClose={onClose} />}
+      {tab === 'official' && <OfficialTab onClose={onClose} />}
       {tab === 'scan' && <ScanTab onClose={onClose} />}
     </Modal>
   )
@@ -246,6 +248,98 @@ function ModelTab({ onClose, prefill }: { onClose: () => void; prefill?: { provi
           添加前会先真实请求 /models 验证，失败则不保存
         </span>
       </div>
+    </div>
+  )
+}
+
+/* ---------------- 官方模型服务（注册表预置端点与清单，用户只填 key） ---------------- */
+type OfficialListResult = Awaited<ReturnType<typeof bridge.officialModels.list>>
+
+function OfficialTab({ onClose }: { onClose: () => void }) {
+  const addCustom = useAgents((s) => s.addCustomModelAgent)
+  const [reg, setReg] = useState<OfficialListResult | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [apiKey, setApiKey] = useState('')
+  const [addingId, setAddingId] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    bridge.officialModels
+      .list()
+      .then((r) => { if (alive) { setReg(r); setLoading(false) } })
+      .catch(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [])
+
+  const add = async (m: OfficialListResult['models'][number], service?: string) => {
+    if (!reg?.endpoint) return
+    setAddingId(m.id)
+    setErr(null)
+    // 复用自定义模型通道：先真实测连接（带 key 打 /models），通过才保存凭据——不伪造可用状态
+    const r = await addCustom(
+      { provider: m.name || service || '官方模型', baseUrl: reg.endpoint, modelId: m.id },
+      apiKey.trim()
+    )
+    setAddingId(null)
+    if (r.ok && r.agent) {
+      useAgents.getState().select(r.agent.id)
+      useUi.getState().toast(`已添加「${r.agent.name}」——可以直接对话了`, 'ok')
+      onClose()
+    } else {
+      setErr(r.message)
+    }
+  }
+
+  return (
+    <div style={{ paddingBottom: 8 }}>
+      <div style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.7, marginBottom: 10 }}>
+        由服务提供方维护的 OpenAI 兼容模型服务：端点与模型清单来自官方注册表（应用自动拉取，无需手填），
+        你只需粘贴提供方发给你的 <b>API Key</b>，选一个模型一键添加。
+      </div>
+      {loading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-3)', fontSize: 12.5, padding: '10px 0' }}>
+          <Spinner size={14} /> 正在获取官方模型清单…
+        </div>
+      )}
+      {reg && !reg.ok && (
+        <div className="err" style={{ color: 'var(--danger)', fontSize: 12.5, lineHeight: 1.6 }}>
+          官方模型清单不可用：{reg.error ?? '未知原因'}
+        </div>
+      )}
+      {reg?.ok && (
+        <>
+          <div className="form-row">
+            <label>API Key</label>
+            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="粘贴服务提供方发给你的 key（sk-…）" />
+            <span className="help">
+              {reg.service ?? '官方模型服务'} · {reg.endpoint}
+              {reg.fromCache ? ' · 清单来自本地缓存' : ''}
+              {reg.updatedNote ? ` · ${reg.updatedNote}` : ''}
+            </span>
+          </div>
+          {reg.models.map((m) => (
+            <div key={m.id} className="agent-manage-row">
+              <div className="info">
+                <div className="nm">{m.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5 }}>
+                  {m.desc} · 上下文约 {Math.round(m.contextWindow / 1024)}K
+                </div>
+              </div>
+              <Button
+                variant="primary"
+                style={{ height: 28 }}
+                disabled={!apiKey.trim()}
+                loading={addingId === m.id}
+                onClick={() => void add(m, reg.service)}
+              >
+                添加
+              </Button>
+            </div>
+          ))}
+        </>
+      )}
+      {err && <div style={{ color: 'var(--danger)', fontSize: 12.5, marginTop: 8, lineHeight: 1.5 }}>{err}</div>}
     </div>
   )
 }

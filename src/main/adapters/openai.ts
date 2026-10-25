@@ -101,6 +101,9 @@ export function humanizeError(raw: string): string {
     [/MISSING_CREDENTIAL|missing.{0,20}credential/i, '缺少模型凭据：请设置对应环境变量（如 DEEPSEEK_API_KEY）或先在该 CLI 中完成配置'],
     [/permission.{0,30}denied|权限.{0,10}拒绝/i, 'CLI 拒绝了工具权限：非交互模式下没有审批界面（可调整其 permission-mode 设置）'],
     [/EADDRINUSE|address already in use|EADDRNOTAVAIL/i, '本地端口被占用：可能有其他 CLI 或 IDE 实例正在运行，请关闭后重试（或换一个工作目录）'],
+    // 官方模型服务网关的特有措辞（已被吊销/向服务提供方索取）：放在通用 401 之前——
+    // 这种 key 不是用户自己填错，是服务侧发了又收回，出路是"找服务提供方"而不是"检查拼写"
+    [/已被吊销|向服务提供方索取/, '官方服务 Key 无效或已被吊销：请联系服务提供方重新获取 key'],
     [/\b401\b|unauthorized|invalid.{0,10}api.?key/i, '认证失败：API Key 无效或已过期，请检查后重新填写'],
     [/\b404\b|not found/i, '接口地址或模型不存在：请检查 Base URL 与模型 ID'],
     [/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|network/i, '网络连接失败：请检查网络或服务地址']
@@ -130,7 +133,13 @@ export async function testConnection(cfg: CustomModelConfig, apiKey: string): Pr
     const res = await fetch(url, { headers: headers(cfg, apiKey), signal: ctrl.signal })
     clearTimeout(timer)
     if (!res.ok) {
-      return { ok: false, message: `HTTP ${res.status} ${res.statusText || ''}`.trim() }
+      // 带上服务端错误正文（如网关的"key 已被吊销"）：光一个 HTTP 401 用户无从判断该找谁
+      let why = res.statusText || ''
+      try {
+        const body = (await res.json()) as { error?: { message?: string } }
+        if (body?.error?.message) why = body.error.message.slice(0, 160)
+      } catch { /* 无 JSON 正文就只报状态短语 */ }
+      return { ok: false, message: `HTTP ${res.status} ${why}`.trim() }
     }
     const data = (await res.json()) as { data?: { id?: string }[] }
     // 不截断：这份列表是"模型 ID 是否存在"的判定依据，截断会把排名靠后的合法 ID 误判为不存在
