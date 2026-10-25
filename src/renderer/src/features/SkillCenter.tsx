@@ -4,11 +4,54 @@
 // 不引入新的全局 store（stores 本批次禁改，且 settings store 里本就没有 skills 状态）。
 import React, { useCallback, useEffect, useState } from 'react'
 import type { Skill } from '@shared/types'
+import { skillUsages, SKILL_TIMING_NOTE } from '@shared/skill-usages'
 import { bridge, market, type RegistryItem } from '../lib/ipc'
 import { useUi } from '../stores/ui'
+import { useAgents } from '../stores/agents'
+import { useWorkflow } from '../stores/workflow'
 import { Modal } from '../components/Modal'
 import { Button, Badge } from '../components/primitives'
 import { cls, fmtSize, fmtTime } from '../lib/utils'
+
+/* 生效范围行里 mode 的短文案（面板空间小，用短版；完整解释在 shared 的 SKILL_MODE_HINTS） */
+const MODE_TEXT: Record<'auto' | 'reference', string> = { auto: '自动注入全文', reference: '仅引用清单' }
+
+/**
+ * 生效范围面板：每个技能条目下方一块，"生效于谁 + 矛盾态点名"。
+ * 事实计算在 shared/skill-usages.ts（逻辑层断言钉着），这里只做展示与矛盾态判定。
+ * 数据源在组件内订阅两个 store（agents / workflow.config）：在 Agent 管理卡或工作流设置里
+ * 改了绑定，切回技能中心/设置页立刻反映，不需要各自调用方再传一次。
+ * SkillCenter 与设置页 SkillsSection 同一份渲染（导出共用，不复制第二份）。
+ */
+export function SkillUsagePanel({ skill }: { skill: Skill }) {
+  const agents = useAgents((s) => s.agents)
+  const config = useWorkflow((s) => s.config)
+  const usages = skillUsages(skill.id, { agents, roles: config })
+  const enabled = skill.enabled !== false
+  const places = usages.map((u) => u.place).join('、')
+  return (
+    <div className="skill-usage-panel">
+      {/* 矛盾态点名，二者只居其一、优先红：绑定还在但技能停用了，最怕的是用户以为还在注入 */}
+      {!enabled && usages.length > 0 ? (
+        <div className="skill-usage-conflict-danger">已绑定但停用中，不会被注入（绑定处：{places}）</div>
+      ) : enabled && usages.length === 0 ? (
+        <div className="skill-usage-conflict-warn">已启用，但当前没有任何地方使用它——去 Agent 管理卡绑定，或在输入框引用</div>
+      ) : usages.length > 0 ? (
+        <div className="skill-usage-line">
+          生效于：
+          {usages.map((u, i) => (
+            <span key={`${u.kind}:${u.place}`} className="skill-usage-place">
+              {i > 0 && '｜'}
+              {u.place}
+              {u.mode ? `（${MODE_TEXT[u.mode]}）` : ''}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="skill-usage-note">{SKILL_TIMING_NOTE}</div>
+    </div>
+  )
+}
 
 type TabKey = 'installed' | 'builtin' | 'market'
 
@@ -174,26 +217,31 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
               const src = sk.source ?? 'local'
               const on = sk.enabled !== false
               return (
-                <div key={sk.id} className="agent-manage-row" style={on ? undefined : { opacity: 0.55 }}>
-                  <label className="skill-switch" title={on ? '已启用：可被引用' : '已禁用：不出现在引用列表'}>
-                    <input type="checkbox" checked={on} onChange={() => void toggleEnabled(sk)} />
-                  </label>
-                  <div className="info">
-                    <div className="nm">
-                      {sk.name}
-                      <span className={cls('skill-center-src', `skill-center-src-${src}`)}>{SOURCE_TEXT[src]}</span>
+                <div key={sk.id}>
+                  <div className="agent-manage-row" style={on ? undefined : { opacity: 0.55 }}>
+                    <label className="skill-switch" title={on ? '已启用：可被引用' : '已禁用：不出现在引用列表'}>
+                      <input type="checkbox" checked={on} onChange={() => void toggleEnabled(sk)} />
+                    </label>
+                    <div className="info">
+                      <div className="nm">
+                        {sk.name}
+                        <span className={cls('skill-center-src', `skill-center-src-${src}`)}>{SOURCE_TEXT[src]}</span>
+                      </div>
+                      <div className="md">
+                        {sk.desc || '（无简介）'}
+                        {sk.version ? ` · v${sk.version}` : ''} · {sk.content.length} 字
+                      </div>
                     </div>
-                    <div className="md">
-                      {sk.desc || '（无简介）'}
-                      {sk.version ? ` · v${sk.version}` : ''} · {sk.content.length} 字
-                    </div>
+                    <Button variant="ghost" style={{ height: 26 }} onClick={() => setPreview({ kind: 'installed', skill: sk })}>
+                      预览
+                    </Button>
+                    <Button variant="ghost" style={{ height: 26 }} onClick={() => void exportPack(sk)}>
+                      导出 .zip
+                    </Button>
                   </div>
-                  <Button variant="ghost" style={{ height: 26 }} onClick={() => setPreview({ kind: 'installed', skill: sk })}>
-                    预览
-                  </Button>
-                  <Button variant="ghost" style={{ height: 26 }} onClick={() => void exportPack(sk)}>
-                    导出 .zip
-                  </Button>
+                  {/* 生效范围面板：绑定关系（Agent 卡 / 工作流角色）在面板内部订阅 store，
+                      在别处改了绑定，切回技能中心即自动反映 */}
+                  <SkillUsagePanel skill={sk} />
                 </div>
               )
             })}

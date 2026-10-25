@@ -612,3 +612,20 @@
 /* Modal 组件没有透传 className，技能中心要 760px 宽只能按 aria-label 精确放宽上限
    （.modal 默认 max-width 640px 会盖过内联 width）；等 Modal 支持 className 后应换成显式类 */
 .modal[aria-label='技能中心'] { max-width: min(92vw, 780px); }
+
+/* ===== 技能生效范围面板（SkillCenter 已安装 Tab / 设置页 SkillsSection 共用渲染；
+   Agent 管理卡与 ConfigPanel 角色绑定区只用其中小字样式）=====
+   颜色全部取 tokens 既有变量：红 = danger、黄 = warn、灰 = text-3 */
+
+/* 面板容器：贴在技能条目（.agent-manage-row）正下方，与行内容左缘对齐 */
+.skill-usage-panel { padding: 0 12px 8px 12px; margin: -4px 0 8px 0; display: flex; flex-direction: column; gap: 3px; }
+/* 生效范围行：'生效于：A（自动注入全文）｜B（仅引用清单）' */
+.skill-usage-line { font-size: 11.5px; color: var(--text-2); line-height: 1.6; word-break: break-all; }
+.skill-usage-place { color: inherit; }
+/* 矛盾态点名（二者只居其一，红优先）：已绑定但停用中 / 已启用但无人使用 */
+.skill-usage-conflict-danger { font-size: 11.5px; color: var(--danger); line-height: 1.6; word-break: break-all; }
+.skill-usage-conflict-warn { font-size: 11.5px; color: var(--warn); line-height: 1.6; word-break: break-all; }
+/* 统一的"何时生效"小字：生效面板底部 / 设置页分区说明 / Agent 管理卡绑定区共用 */
+.skill-usage-note { font-size: 11px; color: var(--text-3); line-height: 1.6; }
+/* ConfigPanel 角色绑定区是 flex-wrap 行内布局：小字独占一行排在技能清单之后 */
+.skill-usage-note-inline { flex-basis: 100%; }

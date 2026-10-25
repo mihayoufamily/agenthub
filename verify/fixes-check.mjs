@@ -3088,5 +3088,136 @@ console.log('\n[K2] git 回滚（仓库级快照：命令与 CLI 写盘也在半
   }
 }
 
+// ---------- [SK] 技能生效范围：事实计算层 + 统一文案常量（纯函数，src/shared/skill-usages.ts） ----------
+// 被测口径直接用编译产物 out/shared/skill-usages.js（前置：npm run build:main）。
+// 本段同时钉两类东西：① skillUsages 的事实语义（谁绑定列出谁、不掺 enabled、脏输入不抛）；
+// ② 三处界面共用的文案常量——用"源码绊线"防止有人手抄第二份措辞后漂移（口径同 market-check 的绊线）。
+console.log('\n[SK] 技能生效范围（skillUsages 事实清单 + 文案常量防漂移）')
+{
+  const su = await import('../out/shared/skill-usages.js')
+
+  // ① Agent 级绑定：auto 与 reference 两种模式都要被列出，place 里带得上 Agent 名（人要认得出"在哪"）
+  const agentsBase = [
+    { id: 'a1', name: '研究员', skillIds: ['sk-auto'], skillMode: 'auto' },
+    { id: 'a2', name: '写手', skillIds: ['sk-ref'], skillMode: 'reference' },
+    { id: 'a3', name: '没绑的', skillIds: ['sk-other'] }
+  ]
+  const r1 = su.skillUsages('sk-auto', { agents: agentsBase })
+  ok('Agent 级 auto 绑定被列出，place 含 Agent 名与工作站前缀',
+    r1.length === 1 && r1[0].kind === 'agent' && r1[0].place === '工作站 · 研究员' && r1[0].mode === 'auto', JSON.stringify(r1))
+  const r2 = su.skillUsages('sk-ref', { agents: agentsBase })
+  ok('Agent 级 reference 绑定被列出，place 含 Agent 名',
+    r2.length === 1 && r2[0].kind === 'agent' && r2[0].place === '工作站 · 写手' && r2[0].mode === 'reference', JSON.stringify(r2))
+  // skillMode 缺省按 'reference'（与 AgentConfig.skillMode 的缺省语义一致，老配置行为不变）
+  const r2b = su.skillUsages('sk-other', { agents: [{ id: 'a3', name: '没绑的', skillIds: ['sk-other'] }] })
+  ok('Agent 级 skillMode 缺省按 reference（老配置行为不变）',
+    r2b.length === 1 && r2b[0].mode === 'reference', JSON.stringify(r2b))
+
+  // ② 角色级绑定：place 含角色名（执行）与 agentName；角色级缺省按 auto（现行注入行为，见 workflow store）
+  const r3 = su.skillUsages('sk-role', {
+    agents: [],
+    roles: { executor: { agentName: '研究员', skillIds: ['sk-role'] } }
+  })
+  ok('角色级 executor 绑定被列出，place 含"执行"与 agentName，mode 缺省 auto',
+    r3.length === 1 && r3[0].kind === 'role' && r3[0].place === '工作流 · 执行（研究员）' && r3[0].mode === 'auto', JSON.stringify(r3))
+  const r3b = su.skillUsages('sk-role2', {
+    agents: [],
+    roles: { planner: { skillIds: ['sk-role2'] }, reviewer: { agentName: '审校员', skillIds: ['sk-role2'] } }
+  })
+  ok('规划/审核角色绑定也被列出；agentName 缺省时 place 不带括号',
+    r3b.length === 2 &&
+      r3b.some((u) => u.place === '工作流 · 规划' && u.mode === 'auto') &&
+      r3b.some((u) => u.place === '工作流 · 审核（审校员）'), JSON.stringify(r3b))
+
+  // ③ enabled 不掺入：本函数的输入形状里根本没有 enabled 字段——绑定了就列出。
+  // "绑了但停用"这类矛盾状态由界面用 usages.length 与 skill.enabled 组合判断（单一职责，见模块 JSDoc）
+  const r4 = su.skillUsages('sk-x', { agents: [{ id: 'a', name: '任意', skillIds: ['sk-x'] }] })
+  const usageShapeClean = r4.every((u) => !('enabled' in u) && ['kind', 'place', 'mode'].every((k) => k in u))
+  ok('enabled 不掺入：绑定了就列出，usage 上没有 enabled 字段',
+    r4.length === 1 && usageShapeClean, JSON.stringify(r4))
+
+  // ④ 双通道都绑 → 两条 usage：工作站对话与工作流该角色是真实的不同位置，不做并集
+  const r5 = su.skillUsages('sk-both', {
+    agents: [{ id: 'a1', name: '研究员', skillIds: ['sk-both'], skillMode: 'auto' }],
+    roles: { executor: { agentName: '研究员', skillIds: ['sk-both'] } }
+  })
+  ok('Agent 级 + 角色级双通道都绑 → 两条 usage（不并集）',
+    r5.length === 2 && r5[0].kind === 'agent' && r5[1].kind === 'role', JSON.stringify(r5))
+
+  // ⑤ 角色未传（工作站视角调用）→ 只扫 agents
+  const r6 = su.skillUsages('sk-both', { agents: [{ id: 'a1', name: '研究员', skillIds: ['sk-both'] }] })
+  ok('roles 未传时只扫 agents（工作站视角）', r6.length === 1 && r6[0].kind === 'agent', JSON.stringify(r6))
+
+  // ⑥ 脏输入安全：配置是用户手可以碰的，脏一条不能让界面崩
+  let dirty1 = null
+  let dirty2 = null
+  let dirty3 = null
+  try {
+    dirty1 = su.skillUsages('sk-d', { agents: '不是数组' })
+    dirty2 = su.skillUsages('', { agents: agentsBase })
+    dirty3 = su.skillUsages('sk-d', { agents: [null, 42, { skillIds: ['sk-d'] }, { name: '残缺', skillIds: '不是数组' }] })
+  } catch (e) {
+    ok('脏输入不抛（异常即 FAIL）', false, String(e))
+  }
+  ok('脏输入安全：agents 非数组 / skillId 空串 / 元素残缺 → 空数组不抛',
+    Array.isArray(dirty1) && dirty1.length === 0 &&
+      Array.isArray(dirty2) && dirty2.length === 0 &&
+      Array.isArray(dirty3) && dirty3.length === 1 && dirty3[0].place.includes('未命名 Agent'),
+    JSON.stringify({ dirty1, dirty2, dirty3 }))
+
+  // ⑦ skillToggleToast 四种组合逐字断言（含全角标点）：文案是"动作 + 后果 + 恢复路径"的一句话闭环，
+  // 措辞漂一格用户看到的承诺就变了，所以逐字钉死
+  ok('toast：停用 + 有绑定（逐字）',
+    su.skillToggleToast(false, 3) === '已停用：下一次对话起不再注入（仍有 3 处绑定，重新打开即恢复）',
+    su.skillToggleToast(false, 3))
+  ok('toast：停用 + 无绑定（逐字）',
+    su.skillToggleToast(false, 0) === '已停用：下一次对话起不再注入（当前没有绑定处）',
+    su.skillToggleToast(false, 0))
+  ok('toast：启用 + 有绑定（逐字）',
+    su.skillToggleToast(true, 2) === '已启用：下一次对话起按各绑定处的模式注入（共 2 处）',
+    su.skillToggleToast(true, 2))
+  ok('toast：启用 + 无绑定（逐字）',
+    su.skillToggleToast(true, 0) === '已启用：下一次对话起按各绑定处的模式注入（当前没有绑定处，去 Agent 管理卡绑定或在输入框引用）',
+    su.skillToggleToast(true, 0))
+
+  // ⑧ 文案防漂移绊线（源码级，口径同 market-check）：三处界面必须 import 常量，不许手抄第二份。
+  // "正在流式的回复不受影响"是 SKILL_TIMING_NOTE 的独特片段——渲染层源码里出现次数必须为 0，
+  // 出现即说明有人把整句复制过去了（要改措辞时就会漏改）
+  const rendererRoot = join(fileURLToPath(new URL('..', import.meta.url)), 'src', 'renderer')
+  const rendererTexts = []
+  const walkSrc = (d) => {
+    let entries = []
+    try { entries = readdirSync(d, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const p = join(d, e.name)
+      if (e.isDirectory()) walkSrc(p)
+      else if (e.name.endsWith('.ts') || e.name.endsWith('.tsx')) {
+        try { rendererTexts.push(readFileSync(p, 'utf8')) } catch { /* 读不动的那份不装作读到了 */ }
+      }
+    }
+  }
+  walkSrc(rendererRoot)
+  const UNIQUE_PHRASE = '正在流式的回复不受影响'
+  const phraseHits = rendererTexts.filter((t) => t.includes(UNIQUE_PHRASE)).length
+  ok('绊线：渲染层源码里没有手抄 SKILL_TIMING_NOTE 的独特片段（必须 import 常量）',
+    rendererTexts.length > 0 && phraseHits === 0,
+    `扫描 ${rendererTexts.length} 个文件，命中 ${phraseHits} 处`)
+  ok('绊线本身有牙：SKILL_TIMING_NOTE 常量确实含该独特片段（防止绊线空转）',
+    su.SKILL_TIMING_NOTE.includes(UNIQUE_PHRASE), su.SKILL_TIMING_NOTE)
+
+  // SKILL_MODE_HINTS 在 Agent 管理卡源码里被引用（模式解释只此一份）。
+  // ConfigPanel 刻意不在此列：WorkflowRoleConfig 没有 skillMode 字段（角色级绑定缺省按 auto 注入，
+  // 见 skill-usages.ts 的映射注释），角色绑定区没有模式可解释——写断言前先核实形状，别钉空绊线。
+  // 注意：渲染层接线由并行批次同刻进行；若此处红可能是对方尚未落地，重试一次后如实报。
+  const cardSrc = readSrcSafe('src/renderer/src/components/AgentManageCard.tsx')
+  ok('绊线：AgentManageCard 源码引用 SKILL_MODE_HINTS（不许手抄模式解释）',
+    cardSrc.error === null && cardSrc.text.includes('SKILL_MODE_HINTS'),
+    cardSrc.error ?? '未引用')
+  ok('SKILL_MODE_HINTS 两个键的文案齐全且非空',
+    typeof su.SKILL_MODE_HINTS?.auto === 'string' && su.SKILL_MODE_HINTS.auto.length > 0 &&
+      typeof su.SKILL_MODE_HINTS?.reference === 'string' && su.SKILL_MODE_HINTS.reference.length > 0,
+    JSON.stringify(su.SKILL_MODE_HINTS))
+}
+
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

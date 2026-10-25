@@ -14,6 +14,9 @@ import type { CompatState, SandboxFallbackPolicy } from '@shared/compat'
 import { HOTKEY_DEFAULTS, HOTKEY_LABELS } from '@shared/types'
 import { Icon } from '../components/Icons'
 import { Switch, Button, Badge, statusText, Spinner } from '../components/primitives'
+// 生效范围面板组件与契约符号：面板在 SkillCenter（两处共用一份渲染），纯函数与文案常量在 shared
+import { SkillUsagePanel } from './SkillCenter'
+import { SKILL_TIMING_NOTE, skillToggleToast, skillUsages } from '@shared/skill-usages'
 import { UsagePanel } from '../components/UsagePanel'
 import { bridge } from '../lib/ipc'
 import { fmtTime, fmtTokens, uid, cls, formatKeyBinding, validateKeyBinding } from '../lib/utils'
@@ -251,9 +254,16 @@ function SkillsSection() {
   }
 
   const toggleEnabled = async (sk: Skill) => {
+    // toast 前先算一次当前绑定数（现算现用）：说清楚这次切换会影响到几处绑定，而不是只喊"已启用"
+    const usageCount = skillUsages(sk.id, {
+      agents: useAgents.getState().agents,
+      roles: useWorkflow.getState().config
+    }).length
     const r = await bridge.skills.save({ ...sk, enabled: sk.enabled === false }).catch(() => null)
-    if (r?.ok) reload()
-    else useUi.getState().toast(r?.message ?? '操作失败', 'error')
+    if (r?.ok) {
+      useUi.getState().toast(skillToggleToast(sk.enabled === false, usageCount), 'ok')
+      reload()
+    } else useUi.getState().toast(r?.message ?? '操作失败', 'error')
   }
 
   const importSkillDir = async () => {
@@ -301,6 +311,8 @@ function SkillsSection() {
       </div>
       <div className="desc" style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 8 }}>
         Skill 是一段可复用的提示词/领域知识（Markdown）。在聊天输入框点"引用 Skill"选择后，内容会随该条消息注入对话上下文（模型与 CLI 均生效）。引用记录随消息保存，可追溯。
+        {/* 统一的"何时生效"一句话：与技能中心、Agent 管理卡同一份文案（shared/skill-usages 契约） */}
+        <div className="skill-usage-note">{SKILL_TIMING_NOTE}</div>
       </div>
 
       {editing && (
@@ -335,26 +347,30 @@ function SkillsSection() {
       {skills?.map((sk) => {
         const on = sk.enabled !== false
         return (
-          <div key={sk.id} className="agent-manage-row" style={on ? undefined : { opacity: 0.55 }}>
-            <label className="skill-switch" title={on ? '已启用：可被引用，未引用时也会以一行清单告知模型' : '已禁用：不出现在引用列表，也不会被注入'}>
-              <input type="checkbox" checked={on} onChange={() => void toggleEnabled(sk)} />
-            </label>
-            <div className="info">
-              <div className="nm">
-                {sk.name}
-                {sk.format === 'agentskills' && <span className="skill-tag" title="来自 SKILL.md 的标准技能包">标准</span>}
+          <div key={sk.id}>
+            <div className="agent-manage-row" style={on ? undefined : { opacity: 0.55 }}>
+              <label className="skill-switch" title={on ? '已启用：可被引用，未引用时也会以一行清单告知模型' : '已禁用：不出现在引用列表，也不会被注入'}>
+                <input type="checkbox" checked={on} onChange={() => void toggleEnabled(sk)} />
+              </label>
+              <div className="info">
+                <div className="nm">
+                  {sk.name}
+                  {sk.format === 'agentskills' && <span className="skill-tag" title="来自 SKILL.md 的标准技能包">标准</span>}
+                </div>
+                <div className="md">
+                  {sk.desc || '（无简介）'} · {sk.content.length} 字 · {fmtTime(sk.updatedAt ?? sk.createdAt)}
+                  {sk.dir ? ` · ${sk.dir}${sk.files?.length ? `（附带 ${sk.files.length} 个文件）` : ''}` : ''}
+                </div>
               </div>
-              <div className="md">
-                {sk.desc || '（无简介）'} · {sk.content.length} 字 · {fmtTime(sk.updatedAt ?? sk.createdAt)}
-                {sk.dir ? ` · ${sk.dir}${sk.files?.length ? `（附带 ${sk.files.length} 个文件）` : ''}` : ''}
-              </div>
+              <Button variant="ghost" style={{ height: 26 }} onClick={() => openEdit(sk)}>编辑</Button>
+              <Button variant="ghost" style={{ height: 26, color: 'var(--danger)' }} onClick={async () => {
+                await bridge.skills.remove(sk.id).catch(() => null)
+                useUi.getState().toast(`已删除 Skill：${sk.name}`, 'ok')
+                reload()
+              }}>删除</Button>
             </div>
-            <Button variant="ghost" style={{ height: 26 }} onClick={() => openEdit(sk)}>编辑</Button>
-            <Button variant="ghost" style={{ height: 26, color: 'var(--danger)' }} onClick={async () => {
-              await bridge.skills.remove(sk.id).catch(() => null)
-              useUi.getState().toast(`已删除 Skill：${sk.name}`, 'ok')
-              reload()
-            }}>删除</Button>
+            {/* 与技能中心同一份生效范围面板（组件内自订阅 store，绑定一改即刷新） */}
+            <SkillUsagePanel skill={sk} />
           </div>
         )
       })}

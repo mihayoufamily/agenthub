@@ -3,6 +3,8 @@ import type { Skill } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
+// 契约符号：纯函数与文案常量统一在 shared（逻辑层有防漂移绊线，不许渲染层手抄）
+import { SKILL_MODE_HINTS, SKILL_TIMING_NOTE } from '@shared/skill-usages'
 
 /**
  * 侧栏 ⋯ 展开的 Agent 管理卡片：常驻提示词 + Skill 绑定 + 原有的重命名/移除。
@@ -44,10 +46,21 @@ export function AgentManageCard({ agentId, onRename, onRemove }: { agentId: stri
       />
       <label className="ac-label">Skill 注入方式</label>
       <div data-skill-mode className="ac-seg">
-        <button type="button" className={mode === 'reference' ? 'on' : ''} onClick={() => updateAgent(agent.id, { skillMode: 'reference' })}>
+        {/* hover 提示按"点了会切到哪档"给：常驻的 ac-note 只描述当前档，两处口径同源于 SKILL_MODE_HINTS */}
+        <button
+          type="button"
+          className={mode === 'reference' ? 'on' : ''}
+          title={SKILL_MODE_HINTS.reference}
+          onClick={() => updateAgent(agent.id, { skillMode: 'reference' })}
+        >
           仅可引用
         </button>
-        <button type="button" className={mode === 'auto' ? 'on' : ''} onClick={() => updateAgent(agent.id, { skillMode: 'auto' })}>
+        <button
+          type="button"
+          className={mode === 'auto' ? 'on' : ''}
+          title={SKILL_MODE_HINTS.auto}
+          onClick={() => updateAgent(agent.id, { skillMode: 'auto' })}
+        >
           自动注入
         </button>
       </div>
@@ -64,6 +77,8 @@ export function AgentManageCard({ agentId, onRename, onRemove }: { agentId: stri
           </label>
         ))}
       </div>
+      {/* 绑定区收尾的"何时生效"：用户在这里勾完最想知道的就是"什么时候开始算数" */}
+      <div className="skill-usage-note">{SKILL_TIMING_NOTE}</div>
       <button className="foot-btn" onClick={onRename}>
         重命名
       </button>

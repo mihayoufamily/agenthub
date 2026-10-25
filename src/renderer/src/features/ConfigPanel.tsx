@@ -8,6 +8,8 @@ import { Button, Switch } from '../components/primitives'
 import { bridge } from '../lib/ipc'
 import { cls } from '../lib/utils'
 import type { Skill } from '@shared/types'
+// 契约符号：文案常量统一在 shared（逻辑层有防漂移绊线）
+import { SKILL_TIMING_NOTE } from '@shared/skill-usages'
 
 export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const config = useWorkflow((s) => s.config)
@@ -80,6 +82,9 @@ export function ConfigPanel({ open, onClose }: { open: boolean; onClose: () => v
                 </label>
               )
             })}
+            {/* 角色级绑定只有 skillIds、没有 auto/reference 模式切换（WorkflowRoleConfig 现状如实），
+                所以这里不解释模式，只放统一的"何时生效"小字 */}
+            <div className="skill-usage-note skill-usage-note-inline">{SKILL_TIMING_NOTE}</div>
           </div>
         )}
       </div>
