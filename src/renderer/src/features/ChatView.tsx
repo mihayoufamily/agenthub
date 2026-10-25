@@ -16,6 +16,7 @@ import { UsagePanel, rollup } from '../components/UsagePanel'
 import { DonutRings } from '../components/DonutRings'
 import { CheckpointBar } from '../components/CheckpointBar'
 import { digestThinking } from '../lib/thinking'
+import { useSmoothText } from '../lib/smoothText'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
 import { contextWindowOf, estimateTokens, estimateCost, fmtCost, visionOf } from '@shared/pricing'
 // 工具卡里回显 Hook 命令走与设置页**同一个**显示口径（修复波 A · 项 6）：
@@ -411,6 +412,10 @@ function ContextUsageBar({
  *  props 全是稳定值（msg 引用 store 只在该条变化时替换，agentName/agentColor 是字符串，
  *  无内联回调），内容没变的行可整行跳过重绘。 */
 const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }: { msg: ChatMessage; agentName: string; agentColor: string }) {
+  // 流式柔和输出：只对"正在流式的助手消息"开启打字机层（完整原文已在 store 里，这里只管显示节奏）；
+  // "减少动态效果"用户直接看原文——动效偏好优先于手感
+  const reducedMotion = useSettings((s) => s.prefs?.reducedMotion === true)
+  const shownText = useSmoothText(msg.text, msg.role === 'assistant' && msg.streaming === true && !reducedMotion)
   if (msg.role === 'user') {
     return (
       <div className="msg user">
@@ -446,8 +451,15 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }
         {msg.reasoning && msg.reasoning.trim() && <ReasoningBlock text={msg.reasoning} streaming={msg.streaming && !msg.text} />}
         {(msg.text || !msg.toolCalls?.length) && (
           <div className={cls('bubble word-break')}>
-            <MessageBody text={msg.text} />
-            {msg.streaming && <span className="caret" />}
+            {/* 首字未到（思考/网络等待）时显示"思考中"转圈而不是空气泡；正文到达后走柔和逐字揭示 */}
+            {msg.streaming && !shownText ? (
+              <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
+            ) : (
+              <>
+                <MessageBody text={shownText} />
+                {msg.streaming && <span className="caret" />}
+              </>
+            )}
             {msg.error && <div className="err">⚠ {msg.error}</div>}
             {msg.demo && !msg.streaming && (
               <div style={{ marginTop: 6 }}>
@@ -674,6 +686,7 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
   return (
     <div className="reasoning-block">
       <button className="rb-head" onClick={() => setOpen((v) => !v)} title="思考模型的思考过程（随消息保存；工具循环默认不回传给接口，避免严格接口报 400，可用 AGENTHUB_PASS_REASONING=1 开启）">
+        {streaming && <span className="spin-dot" />}
         <Icon name={open ? 'chevron' : 'up'} size={11} />
         <span>{streaming ? '思考中…' : '思考过程'}</span>
         <span className="rb-meta">

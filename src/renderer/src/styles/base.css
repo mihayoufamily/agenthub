@@ -1,6 +1,33 @@
 /* ===== 基础样式 ===== */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* 流式"思考中"转圈：圆环旋转（聊天气泡等待态 / 思考块头部共用）。
+   reduced-motion 双保险：应用设置在 store 层关掉打字机，这里的媒体查询再关掉旋转本身 */
+.spin-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--brand-yellow);
+  border-radius: 50%;
+  animation: spin-rotate 0.9s linear infinite;
+  flex-shrink: 0;
+}
+.reasoning-block .spin-dot { width: 10px; height: 10px; }
+@keyframes spin-rotate { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spin-dot { animation: none; }
+}
+/* 气泡内"思考中…"等待态：首字未到时替代空气泡 */
+.thinking-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3);
+  font-size: 13px;
+  padding: 2px 0;
+}
+
 html, body, #root {
   height: 100%;
   overflow: hidden;
