@@ -7,8 +7,9 @@ import { useEffect, useRef, useState } from 'react'
  * @param enabled 仅对流式中的消息开启；关闭时直接返回全文（流结束/减少动态效果/历史消息）
  * @returns 当前应显示的文本切片
  *
- * 速率设计：基础 60 字/秒起步，落后越多转越快（保证缓冲既不无限堆积、也不突然整段蹦出），
- * 上限 1200 字/秒——即使网络一次吐一大段，追平过程仍然连续可读。
+ * 速率设计：基础 34 字/秒起步（用户反馈"再慢一点"——从容可读的节奏），落后越多转越快
+ * （保证缓冲既不无限堆积、也不突然整段蹦出），上限 900 字/秒——即使网络一次吐一大段，
+ * 追平过程仍然连续可读。揭示边缘的逐字淡入由 FadeTail 组件负责（本 hook 只管节奏）。
  * rAF 循环读 ref 而不是依赖重跑：delta 每个 chunk 到达都会变 full，依赖数组若含 full 会
  * 每块重启一次循环；ref 方式下循环只在 enabled 翻转时启停，帧内永远读最新值。
  */
@@ -33,7 +34,7 @@ export function useSmoothText(full: string, enabled: boolean): string {
       const target = fullRef.current.length
       const behind = target - shownRef.current
       if (behind > 0) {
-        const speed = Math.min(60 + behind * 2.5, 1200)
+        const speed = Math.min(34 + behind * 2.5, 900)
         shownRef.current = Math.min(target, shownRef.current + (speed * dt) / 1000)
         setShown(fullRef.current.slice(0, Math.floor(shownRef.current)))
       }

@@ -12,6 +12,7 @@ import { Modal } from '../components/Modal'
 import { Icon } from '../components/Icons'
 import { CliModelOptions } from '../components/CliModels'
 import { ThinkingText } from '../components/Thinking'
+import { FadeTail } from '../components/FadeTail'
 import { UsagePanel, rollup } from '../components/UsagePanel'
 import { DonutRings } from '../components/DonutRings'
 import { CheckpointBar } from '../components/CheckpointBar'
@@ -415,7 +416,8 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }
   // 流式柔和输出：只对"正在流式的助手消息"开启打字机层（完整原文已在 store 里，这里只管显示节奏）；
   // "减少动态效果"用户直接看原文——动效偏好优先于手感
   const reducedMotion = useSettings((s) => s.prefs?.reducedMotion === true)
-  const shownText = useSmoothText(msg.text, msg.role === 'assistant' && msg.streaming === true && !reducedMotion)
+  const smoothOn = msg.role === 'assistant' && msg.streaming === true && !reducedMotion
+  const shownText = useSmoothText(msg.text, smoothOn)
   if (msg.role === 'user') {
     return (
       <div className="msg user">
@@ -456,7 +458,7 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor }
               <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
             ) : (
               <>
-                <MessageBody text={shownText} />
+                <MessageBody text={shownText} revealEdge={smoothOn} />
                 {msg.streaming && <span className="caret" />}
               </>
             )}
@@ -581,13 +583,21 @@ function SessionPanel({ list, activeId, anchorRef, onSwitch, onNew, onRename, on
   )
 }
 
-/** 文本 + ```代码块``` 渲染（代码块带复制按钮，不横向撑破） */
-export function MessageBody({ text }: { text: string }) {
+/** 文本 + ```代码块``` 渲染（代码块带复制按钮，不横向撑破）；
+ *  revealEdge：流式揭示边缘的逐字淡入（只作用于最后一段纯文本——揭示边缘永远在那里） */
+export function MessageBody({ text, revealEdge }: { text: string; revealEdge?: boolean }) {
   const parts = text.split(/```/g)
+  const lastTextPart = revealEdge ? parts.reduce((acc, p, i) => (i % 2 !== 1 ? i : acc), -1) : -1
   return (
     <>
       {parts.map((p, i) => {
-        if (i % 2 !== 1) return <React.Fragment key={i}>{p}</React.Fragment>
+        if (i % 2 !== 1) {
+          return (
+            <React.Fragment key={i}>
+              {i === lastTextPart ? <FadeTail text={p} enabled={revealEdge} /> : p}
+            </React.Fragment>
+          )
+        }
         // 复制与显示用同一份剥过语言行的文本：原先复制的是原文，比屏幕上多一行语言标识
         // （无语言块则是多一个空行），粘出来就对不上所见
         const body = p.replace(/^\w*\n/, '')

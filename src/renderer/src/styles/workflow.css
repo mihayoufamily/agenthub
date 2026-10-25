@@ -62,6 +62,12 @@
 .cfg-chip b { color: var(--text); font-weight: 600; }
 .cfg-chip.open { border-color: var(--brand-yellow); background: var(--surface-2); }
 
+/* 压缩防线：配置条 chips 被挤到不够宽时省略号收口，绝不横向溢出（2026-10-25 真机 1280 档
+   实测：pinned 态 chip 内容 300 > 槽位 215 会撑出 scroll-overflow——全量文本永远在浮层里） */
+.wf-configbar > * { min-width: 0; max-width: 100%; }
+.cfg-chip { min-width: 0; max-width: 100%; overflow: hidden; }
+.cfg-chip > b, .cfg-chip > span:not(.role-tag) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 配置条层叠修复：configbar 与 wf-start 均带动画形成 stacking context，
    后出现的"开始任务"会盖住配置条内浮层——给配置条更高层级（文档四.1） */
 .wf-configbar { position: relative; z-index: 2; }

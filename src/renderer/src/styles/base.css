@@ -27,6 +27,18 @@
   font-size: 13px;
   padding: 2px 0;
 }
+/* 流式揭示边缘的逐字淡入：新出现的字符从模糊到清晰"浮现"（FadeTail 只包边缘 14 字） */
+.ch-fade {
+  opacity: 0;
+  animation: ch-in 320ms ease-out forwards;
+}
+@keyframes ch-in {
+  from { opacity: 0; filter: blur(3px); }
+  to { opacity: 1; filter: blur(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ch-fade { animation: none; opacity: 1; }
+}
 
 html, body, #root {
   height: 100%;

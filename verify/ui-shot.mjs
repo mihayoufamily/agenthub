@@ -717,6 +717,13 @@ const main = async () => {
     // 两档各自可复现。断言本体（layoutAudit 的 total===0）一字未改，也没缩成"只量 scrollWidth"，
     // 只是被测宽度从"随用户窗口漂移"变成"钉死"，并同样要求 composer 在场（不满足前提的绿不算测到）。
     await setViewport(1280, 800)
+    // 与 960 那条同款前置：移开指针 + Escape 关掉点击固定的浮层 + 要求浮层不在场。
+    // 2026-10-25 实测：pinned 态角色 chip 会带着 'open' 类进测量（悬停 200ms 定时器/点击固定
+    // 都可能留下它），chip 内容 300 > 被压到的槽位 215，溢出检查随"上一个步骤有没有碰过 chip"忽红忽绿。
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 6, y: 6, button: 'none' })
+    await js(cdp, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`)
+    await sleep(900)
+    const openPopsWide = await js(cdp, `(() => [...document.querySelectorAll('.cfg-chip.open, .role-pop, .wf-detail')].length)()`)
     const wfAudit = await layoutAudit()
     const wfWideBox = await js(cdp, `(() => {
       const s = document.querySelector('.screen.workflow')
@@ -724,8 +731,9 @@ const main = async () => {
       return { vw: document.documentElement.clientWidth, screen: s ? { clientWidth: s.clientWidth, scrollWidth: s.scrollWidth } : null, composer: c ? Math.round(c.getBoundingClientRect().width) : null }
     })()`)
     ok('工作流首页无横向溢出（显式定视口 1280×800 · 默认窗宽档，不是"用户上次拖多宽"）',
+      openPopsWide === 0 &&
       wfWideBox.composer != null && wfAudit.total === 0,
-      `${JSON.stringify(wfAudit.issues?.slice(0, 4))} 视口/内容列/composer=${JSON.stringify(wfWideBox)}`)
+      `${JSON.stringify(wfAudit.issues?.slice(0, 4))} 浮层=${openPopsWide} 视口/内容列/composer=${JSON.stringify(wfWideBox)}`)
     await cdp.send('Emulation.clearDeviceMetricsOverride')
     await sleep(400)
     const saved = await js(cdp, `(() => {

@@ -2,19 +2,23 @@
 import React, { useMemo, useState } from 'react'
 import { digestThinking } from '../lib/thinking'
 import { useSmoothText } from '../lib/smoothText'
+import { FadeTail } from './FadeTail'
 import { useSettings } from '../stores/settings'
 
 export function ThinkingText({ text, streaming }: { text: string; streaming?: boolean }) {
   const [showRest, setShowRest] = useState(false)
   const reducedMotion = useSettings((s) => s.prefs?.reducedMotion === true)
   // 流式期间柔和逐字揭示（与聊天气泡同一节奏）；"减少动态效果"用户直接看原文
-  const shown = useSmoothText(text, streaming === true && !reducedMotion)
+  const smoothOn = streaming === true && !reducedMotion
+  const shown = useSmoothText(text, smoothOn)
   const d = useMemo(() => digestThinking(text), [text])
   // 流式期间不过筛：用户正在看它实时生长，裁剪会造成"内容跳变"
   const filtered = !streaming && d.restCount > 0 && !showRest
   return (
     <div className="thinking-view">
-      <div className="tv-body">{filtered ? d.keepText : shown}</div>
+      <div className="tv-body">
+        <FadeTail text={filtered ? d.keepText : shown} enabled={smoothOn} />
+      </div>
       {d.restCount > 0 && !streaming && (
         <button className="link-btn" onClick={() => setShowRest((v) => !v)}>
           {showRest ? '收起其余思考' : `展开其余 ${d.restCount} 段思考`}
