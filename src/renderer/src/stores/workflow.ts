@@ -9,6 +9,11 @@ import type {
 } from '@shared/types'
 import { unionSkillIds, partitionSkillsForInjection } from '@shared/skills-union'
 import { dirDelta } from '@shared/dir-delta'
+import {
+  BUSY_STATUSES, clearGateForRun, restoreSnapshot, isTerminal, pickNextResumeRole,
+  enqueue, takeNext, withPlanStartFiles, withPlanCliDelta, planAuditOf, PLAN_DELTA_CAP,
+  type QueuedTask, type RunSnapshot
+} from '@shared/engine-transitions'
 import { bridge } from '../lib/ipc'
 import { renderConventionsBlock } from '@shared/conventions'
 import { matchFileRef } from '@shared/acceptance'
@@ -83,7 +88,11 @@ interface WorkflowState {
   /** 删除任务（连同其落盘记录）；打开中的任务被删则回到新建态 */
   removeTask: (id: string) => Promise<void>
 
-  start: () => Promise<void>
+  /**
+   * 开始任务。queued 缺省 = 从草稿起（UI 入口）；传入队列条目 = 终态后自动接队的内部路径
+   * （不经 draft：目标、附件正文、计划态单次档都已在入队那一刻定格）。
+   */
+  start: (queued?: QueuedTask) => Promise<void>
   stop: (reason: 'user' | 'timeout') => void
   /** 中断续跑：按已有卡片推断停在哪一步，从那一步之后继续（不重放已经发生过的调用） */
   resumeInterrupted: () => Promise<void>
@@ -97,6 +106,16 @@ interface WorkflowState {
   restore: () => Promise<void>
   saveRun: () => void
   isDemoRun: () => boolean
+
+  /**
+   * 任务队列（内存态，不持久化）：引擎同时只跑一条链（单执行循环不变），
+   * 排队只是"当前任务到达终态后自动开始下一条"，省得人盯着等。
+   */
+  queue: QueuedTask[]
+  /** 把当前草稿 + 文本附件 + 计划态单次档打包入队；入队成功清空草稿与单次档 */
+  queueCurrent: () => void
+  /** 从队列移除一条（首页队列条的逐条删除） */
+  removeQueued: (index: number) => void
 }
 
 /** 当前进行中的真实模型请求（stop 时取消） */
@@ -105,9 +124,11 @@ let activeModelReqId: string | null = null
 /**
  * 是否"正在执行"：引擎只有一个执行循环，所以跑着的时候不许切任务/新建。
  * 停在人工确认门（gate 已挂出）不算执行中——那时是空转等人点。
+ * 忙状态列表抽到 shared/engine-transitions（BUSY_STATUSES）：快照测试拿它核对
+ * "终态与忙态互斥"，两处各写一份没有测试拦得住漂移。
  */
 export function runBusy(run: WorkflowRun | null): boolean {
-  return !!run && !run.gate && ['preparing', 'running', 'waiting_review'].includes(run.status)
+  return !!run && !run.gate && BUSY_STATUSES.includes(run.status)
 }
 
 /**
@@ -154,7 +175,8 @@ function failRun(
 function makeWatchdog(get: () => WorkflowState, timeoutMs: number): ReturnType<typeof setTimeout> {
   return setTimeout(() => {
     const s = get()
-    if (s._started && !s._cancelled && ['preparing', 'running', 'waiting_review'].includes(s.run?.status ?? '')) {
+    // 忙态判定与 runBusy 同源（BUSY_STATUSES）：看门狗只在"链确实还在跑"时才该开火
+    if (s._started && !s._cancelled && !!s.run && BUSY_STATUSES.includes(s.run.status)) {
       s.stop('timeout')
     }
   }, timeoutMs)
@@ -172,7 +194,9 @@ function announce(run: WorkflowRun) {
   // 所以原先那句 `waiting_review && gate` 基本永远为假——不是"计划门不发通知"，是所有确认门都不发。
   const atGate = !!run.gate && (run.status === 'waiting_user' || run.status === 'waiting_review')
   const isPlanGate = run.gate?.kind === 'plan'
-  const terminal = ['completed', 'failed', 'cancelled', 'timeout', 'rework_limit', 'token_limit', 'budget_limit'].includes(run.status)
+  // 终态口径来自 shared/engine-transitions（isTerminal）：通知、队列自动开始、出口卡
+  // 三处必须认同一份终态列表，不能各背一份
+  const terminal = isTerminal(run.status)
   if (!atGate && !terminal) return
   const key = `${run.id}:${run.status}`
   if (key === lastAnnounce) return
@@ -193,6 +217,41 @@ function announce(run: WorkflowRun) {
       ? '回到 AgentHub 通过确认门，或填返工意见'
       : '在左侧「工作流」里点开查看结果与产物'
   void bridge.app.notify(title, body)
+}
+
+/**
+ * 队列自动开始的防重入开关：终态后自动开始只允许成功一次。
+ * 触发点不止一处（saveRun 的终态检查、start/resumeRework 释放占用位的 finally、
+ * 门上停止后的 saveRun），没有这把开关的话同一次终态可能被检查两次；真正起链的那次
+ * 占住它直到 start 返回，其余检查在 _started / 这把开关面前自然退避。
+ */
+let autoStartInFlight = false
+
+/**
+ * 终态收尾后的队列检查：当前 run 是真终态（不含挂门的 waiting_user 与重启的
+ * interrupted）且队列非空时，取队头直接起链。触发点见各调用处注释。
+ */
+async function pumpQueue(
+  set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void,
+  get: () => WorkflowState
+) {
+  if (autoStartInFlight || get()._started) return
+  const run = get().run
+  if (!run || !isTerminal(run.status)) return
+  const head = takeNext(get().queue)
+  if (!head) return
+  set({ queue: head.queue })
+  autoStartInFlight = true
+  try {
+    useUi.getState().toast(`队列：开始「${head.item.goal.slice(0, 30)}」`, 'info')
+    // 走 start 的 queued 入口：目标/附件正文/计划态档都在入队时定格，不经 draft
+    await get().start(head.item)
+  } finally {
+    autoStartInFlight = false
+    // 开关释放后再查一遍：刚跑完的这条链自己的收尾检查（saveRun / start 的 finally）
+    // 当时都被这把开关挡住（它还占着），队列里剩下的任务靠这里继续排空
+    void pumpQueue(set, get)
+  }
 }
 
 function makeCard(role: RoleCard['role'], round: number, cfg: WorkflowConfig, demo: boolean): RoleCard {
@@ -248,6 +307,18 @@ function extractSupplements(run: WorkflowRun | null): string[] {
   if (!run) return []
   const prefix = '补充要求（下一轮生效）：'
   return (run.notes ?? []).filter((n) => n.startsWith(prefix)).map((n) => n.slice(prefix.length))
+}
+
+/**
+ * 文本附件正文的组装（start 与 queueCurrent 共用一段逻辑，抽成一个小函数）：
+ * 只收读取成功（status ok）的**文本**附件；读取失败/超限的附件不发送。
+ * 图片附件不走这里（模型走 base64、CLI 只给路径，且队列不保存图片）。
+ */
+function attachmentTextOf(attachments: Attachment[]): string {
+  return attachments
+    .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
+    .map((a) => `\n[附件：${a.name}]\n${a.content}`)
+    .join('')
 }
 
 /** 单个角色阶段结果；null = 已取消或已失败（状态已更新，调用方直接返回） */
@@ -460,6 +531,15 @@ async function runPlanRound(
   // 只写"这条链的 run"（入口捕获 id）：计划轮也是长链，迟到的写不许落进切换后的别的任务
   const setRun = setRunOf(set, run.id)
   const isCancelled = () => get()._cancelled
+  // 计划态对 CLI 角色的补偿（拦不住就透明）：三个角色里有 CLI 角色时，起跑前拍一份目录
+  // 清单存进 run。模型 Agent 的写类工具主进程真拦，CLI 角色的写盘由它自己的子进程执行、
+  // 这里拦不到——只能事后把路径差集如实列给人看。基线只在计划阶段第一次起跑时拍：
+  // 「按意见重出计划」每轮重拍基线会把上一轮计划期间 CLI 写出的路径从差集里洗掉，
+  // 等于替它藏证据；批准前的所有计划轮共用同一条基线。
+  const hasCliRole = (['planner', 'executor', 'reviewer'] as const).some((k) => {
+    const a = useAgents.getState().agents.find((x) => x.id === cfg[k].agentId)
+    return a?.kind === 'cli'
+  })
   // 产物目录沿用任务记录上那一个（旧记录没记时按当前配置解析一次并回填）
   const outputDir = run.outputDir || (await bridge.artifacts.dir())
   if (!run.outputDir) setRun((r) => ({ ...r, outputDir }))
@@ -479,18 +559,39 @@ async function runPlanRound(
     ...(opts.feedback ? { reworkFeedback: opts.feedback } : {})
   }
   const before = await planSnapshot(outputDir)
+  // 启动清单存 run（上限 2000 条，超了截断并记标记）：计划门挂出时拿它与当前清单求差集。
+  // 清单没取到（ok=false）也照存空表——"看不见"与"没改动"必须分开，下面差集处会说清。
+  if (hasCliRole && !planAuditOf(get().run ?? run).planStartFiles) {
+    setRun((r) => withPlanStartFiles(r, before.files, before.truncated))
+  }
   setRun((r) => ({ ...r, status: 'running', stage: 'planning' }))
   const out = await runStage('planner', run.round, cfg, ctx, setRun, isCancelled, get, { planMode: true })
   // 失败 / Token 与预算上限都由 runStage 落到 run 上，这里不另写一套、也不粉饰成"已出计划"
   if (isCancelled() || !out) return
   const after = await planSnapshot(outputDir)
-  setRun((r) => ({
-    ...r,
-    planText: out.conclusion.trim(),
-    stage: 'awaiting_plan_approval',
-    status: 'waiting_user',
-    gate: { id: uid('gate'), round: r.round, passed: [], issues: [], kind: 'plan', cliChanges: planChanges(before, after) }
-  }))
+  // 门挂出时算一次路径差集（新增/消失，各上限 200 条）：基线是起跑前存的那份，
+  // 没有基线（无 CLI 角色）就不算也不存——没有 CLI 角色时本来就拦得住，无需这套补偿
+  const baseline = planAuditOf(get().run ?? run)
+  let planDelta: { added: string[]; removed: string[] } | null = null
+  let planDeltaTruncated = false
+  if (baseline.planStartFiles) {
+    const d = dirDelta(baseline.planStartFiles, after.files)
+    planDelta = { added: d.added, removed: d.removed }
+    planDeltaTruncated =
+      before.truncated || after.truncated || baseline.planStartFilesTruncated === true ||
+      d.added.length > PLAN_DELTA_CAP || d.removed.length > PLAN_DELTA_CAP
+  }
+  setRun((r) => withPlanCliDelta(
+    {
+      ...r,
+      planText: out.conclusion.trim(),
+      stage: 'awaiting_plan_approval',
+      status: 'waiting_user',
+      gate: { id: uid('gate'), round: r.round, passed: [], issues: [], kind: 'plan', cliChanges: planChanges(before, after) }
+    },
+    planDelta,
+    planDeltaTruncated
+  ))
   get().saveRun()
 }
 
@@ -850,6 +951,7 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
   run: null,
   tasks: [],
   presets: [],
+  queue: [],
   _cancelled: false,
   _started: false,
   _carryOver: null,
@@ -1032,18 +1134,23 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     void bridge.runs.save(run).then(() => { void get().refreshTasks() })
     // 后台跑完/停下/到确认门时发通知（界面内 toast 用户可能根本看不见）
     announce(run)
+    // 队列检查点：每个终态分支写完 saveRun 都经过这里（announce 旁边），不必每个分支各写一遍。
+    // 链还在跑时占用位 _started 未释放，这次检查自然退避，释放那一拍由 finally 再触发；
+    // pumpQueue 自己会再核对终态与队列——waiting_user 挂门与 interrupted 不是终态，不接队
+    void pumpQueue(set, get)
   },
 
-  start: async () => {
+  start: async (queued) => {
     if (get()._started) return // 防重复提交
-    const goal = get().draft.trim()
+    const goal = (queued?.goal ?? get().draft).trim()
     if (!goal) {
       useUi.getState().toast('请先描述任务目标', 'warn')
       return
     }
     const problem = get().validate()
     if (problem) {
-      useUi.getState().toast(`无法开始：${problem}`, 'error')
+      // 队列任务起不来要点名是哪一条：自动开始的失败静默掉，人永远不知道有条任务没跑
+      useUi.getState().toast(queued ? `队列：任务「${goal.slice(0, 30)}」未能开始：${problem}` : `无法开始：${problem}`, 'error')
       return
     }
 
@@ -1059,17 +1166,18 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     try {
       const demo = get().isDemoRun()
       const cfg = { ...get().config }
-      // 这一次要不要先出计划：全局开关开着，或用户勾了"本任务先出计划"（勾一次即清，不落盘）
-      const usePlan = !!cfg.planFirst || get().planNextTask
-      if (get().planNextTask) set({ planNextTask: false })
+      // 这一次要不要先出计划：全局开关按当前配置生效；单次档——草稿路径看 planNextTask
+      // （勾一次即清），队列路径看入队那一刻定格的那份（出队不再看当前开关）。
+      // 全局 planFirst 对队列任务按出队时刻的配置走：队列条目只定格了单次档这一项（类型如此）。
+      const usePlan = !!cfg.planFirst || (queued ? queued.planNextTask === true : get().planNextTask)
+      if (!queued && get().planNextTask) set({ planNextTask: false })
       // 生效的产物目录由主进程裁决（配置留空 = 文档目录下的 AgentHub-artifacts）
       const outputDir = await bridge.artifacts.dir()
-      const carryOver = get()._carryOver
-      // 文本附件内容（真实调用首轮注入规划角色；读取失败/超限的附件不发送）
-      const attachmentText = get().attachments
-        .filter((a) => a.status === 'ok' && a.kind === 'text' && a.content !== undefined)
-        .map((a) => `\n[附件：${a.name}]\n${a.content}`)
-        .join('')
+      // 「以此为目标开新任务」的上下文属于草稿路径；队列任务不带它（入队时没打包这一项）
+      const carryOver = queued ? null : get()._carryOver
+      // 文本附件内容（真实调用首轮注入规划角色；读取失败/超限的附件不发送）。
+      // 队列任务直接用入队时拼好的那份，不再读当前附件栏——那已经是下一条任务的草稿了
+      const attachmentText = queued ? (queued.attachmentText ?? '') : attachmentTextOf(get().attachments)
       // 产物目录里若放着项目约定文件，整轮任务自动带上（三个角色都带：规划要按约定定验收标准）
       const conventions = await dirContextBlock(outputDir)
       const run: WorkflowRun = {
@@ -1088,8 +1196,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
         ...(usePlan ? { planFirst: true } : {})
       }
       chainRunId = run.id
-      // _started 已在函数开头同步占住，这里只挂 run、清本轮标志
-      set({ run, _cancelled: false, _carryOver: null })
+      // _started 已在函数开头同步占住，这里只挂 run；草稿路径顺手清掉已消费的 carryOver，
+      // 队列路径不动它——那是用户草稿流的上下文，不归这条自动链消费
+      set({ run, _cancelled: false, ...(queued ? {} : { _carryOver: null }) })
       useSettings.getState().addMemory('goal', `任务目标：${goal}`, false)
       get().saveRun()
 
@@ -1239,6 +1348,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     } finally {
       if (watchdog) clearTimeout(watchdog)
       set({ _started: false })
+      // 占用位释放后的那一拍接队：终态分支里的 saveRun 检查时占用位还在（退避了），
+      // 这里是链式队列的推进点之一；非终态收尾（挂门/中断）pumpQueue 自己会跳过
+      void pumpQueue(set, get)
     }
   },
 
@@ -1295,13 +1407,11 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     // 不还原的话 run 永停 running，runBusy 恒真，切换/新建/删除全被空占，只能手动 stop。
     const snap = { status: run.status, stage: run.stage, gate: run.gate }
     // 置 running 的同一次 set 清门 + 带 runId 归属：门还挂着却在跑是矛盾态（runBusy 把带门当空闲），
-    // 切换/新建的守卫会失效；引擎写也只许落进这条 run
-    setRunOf(set, run.id)((r) => ({
-      ...r,
-      status: 'running',
-      stage: role === 'planner' ? 'planning' : role === 'executor' ? 'executing' : 'reviewing',
-      gate: undefined
-    }))
+    // 切换/新建的守卫会失效；引擎写也只许落进这条 run（清门+置 running+设 stage 的形状在
+    // clearGateForRun，与续跑/批准分支同一份）
+    setRunOf(set, run.id)((r) =>
+      clearGateForRun(r, 'running', role === 'planner' ? 'planning' : role === 'executor' ? 'executing' : 'reviewing')
+    )
     void resumeRework(get, set, { startRole: role, only: true, snap })
   },
 
@@ -1331,33 +1441,30 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
       useUi.getState().toast('这个任务的计划还没批准，续跑会绕过批准门，所以不放行。要接着做请新建任务。', 'warn')
       return
     }
-    // 只按卡片推断"该从谁接着跑"：已经产出过结论的角色不重放，避免重复扣额度与重复写文件。
-    // "产出过结论" = status done 且结论非空：崩溃在执行中途时最后一张卡还在 streaming/error、
-    // 结论为空——那一步等于没发生，要重跑它，不是跳过去直接送审。
-    const last = [...run.cards]
-      .reverse()
-      .find((c) => (c.role === 'planner' || c.role === 'executor' || c.role === 'reviewer') && c.status === 'done' && (c.conclusion ?? '').trim().length > 0)
-    if (!last) {
-      setRunOf(set, run.id)((r) => ({ ...r, status: 'running', stage: 'planning', gate: undefined }))
-      void resumeRework(get, set, { startRole: 'planner' })
-      return
-    }
-    if (last.role === 'reviewer') {
+    // "该从谁接"的推断抽到 shared/engine-transitions（pickNextResumeRole）：按最后一张
+    // 三角色卡判定——真产出过结论（done 且结论非空）从下一环接着跑；还 streaming/error
+    // 或结论为空的那一步等于没发生，重跑它，而不是拿更早的旧结论往下跳（旧口径会拿
+    // 上一轮的审核卡重挂门，门里摊给人看的结论是旧的）。审核已产出 → 重挂门，绝不
+    // 自作主张交付或返工；一张相关卡都没有 → 从规划起跑。
+    const pick = pickNextResumeRole(run.cards)
+    if (pick?.produced && pick.producedRole === 'reviewer' && pick.card) {
       // 审核已经跑完：把当时那份结论重新摊在人面前决定，而不是自作主张交付或返工
-      const verdicts = last.checklist ?? []
+      const verdicts = pick.card.checklist ?? []
       const issues = verdicts.filter((v) => v.verdict === 'issue')
       setRunOf(set, run.id)((r) => ({
         ...r,
         status: 'waiting_user',
         stage: null,
-        gate: { id: uid('gate'), round: r.round, passed: verdicts.filter((v) => v.verdict === 'pass'), issues: issues.length ? issues : [{ text: '审核未给出逐项结论，请人工核对', done: false, verdict: 'issue' as const }], ...(verdicts.length ? {} : { reworkFeedback: last.conclusion.slice(0, 200) }) }
+        gate: { id: uid('gate'), round: r.round, passed: verdicts.filter((v) => v.verdict === 'pass'), issues: issues.length ? issues : [{ text: '审核未给出逐项结论，请人工核对', done: false, verdict: 'issue' as const }], ...(verdicts.length ? {} : { reworkFeedback: pick.card!.conclusion.slice(0, 200) }) }
       }))
       get().saveRun()
       useUi.getState().toast('这一轮的审核已完成：请在确认门决定交付还是返工', 'info')
       return
     }
-    const startRole: WorkflowRole = last.role === 'planner' ? 'executor' : 'reviewer'
-    setRunOf(set, run.id)((r) => ({ ...r, status: 'running', stage: startRole === 'executor' ? 'executing' : 'reviewing', gate: undefined }))
+    const startRole: WorkflowRole = pick?.role ?? 'planner'
+    setRunOf(set, run.id)((r) =>
+      clearGateForRun(r, 'running', startRole === 'planner' ? 'planning' : startRole === 'executor' ? 'executing' : 'reviewing')
+    )
     void resumeRework(get, set, { startRole })
   },
 
@@ -1403,9 +1510,9 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
         return
       }
       useSettings.getState().addMemory('confirm', '用户批准了计划，任务从执行角色继续（同一 run，不重放计划轮）', false)
-      // 置 running 的同一次 set 清门：起链后 runBusy 必须为真（runBusy 把带门当空闲），
-      // 切换/新建的守卫才拦得住
-      setRun((r) => ({ ...r, gate: undefined, status: 'running', stage: 'executing', planApproved: true, notes: [...(r.notes ?? []), '计划已获批准，从执行角色继续（同一任务，不重跑计划轮）'] }))
+      // 置 running 的同一次 set 清门（clearGateForRun，与续跑/重跑同一形状）：起链后 runBusy
+      // 必须为真（runBusy 把带门当空闲），切换/新建的守卫才拦得住
+      setRun((r) => clearGateForRun({ ...r, planApproved: true, notes: [...(r.notes ?? []), '计划已获批准，从执行角色继续（同一任务，不重跑计划轮）'] }, 'running', 'executing'))
       get().saveRun()
       void resumeRework(get, set, { startRole: 'executor' })
       return
@@ -1413,8 +1520,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     if (action === 'rework') {
       useSettings.getState().addMemory('confirm', `用户返工意见：${feedback || '（未填写）'}`, false)
       const nextRound = clamp(run.round + 1, 1, cfg.maxRounds)
-      // 同一次 set 清门置 running（理由同上）：引擎不能悬在"门还挂着但已在跑"的矛盾态
-      setRun((r) => ({ ...r, gate: undefined, status: 'running', round: nextRound, notes: [...(r.notes ?? []), `第 ${run.round} 轮返工意见：${feedback || '（未填写）'}`] }))
+      // 同一次 set 清门置 running（clearGateForRun，理由同上）：引擎不能悬在"门还挂着但已在跑"的矛盾态
+      setRun((r) => clearGateForRun({ ...r, round: nextRound, notes: [...(r.notes ?? []), `第 ${run.round} 轮返工意见：${feedback || '（未填写）'}`] }, 'running', 'executing'))
       get().saveRun()
       // v1 由独立协程续跑（执行→审核），返工意见注入真实角色上下文
       void resumeRework(get, set, { feedback })
@@ -1422,8 +1529,8 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     }
     // deliver
     useSettings.getState().addMemory('confirm', '用户确认通过并交付', false)
-    // 起交付链前清门置 running（理由同上）
-    setRun((r) => ({ ...r, gate: undefined, status: 'running' }))
+    // 起交付链前清门置 running（clearGateForRun；stage 保持原样不动，交付卡自己会设 delivering）
+    setRun((r) => clearGateForRun(r, 'running', r.stage))
     // 传真实的取消探针：确认交付的流式期间点"停止"必须被尊重——原先刻意恒 false，
     // 用户的停止会被交付收尾覆盖成 completed、还多发一条"已完成"通知
     await deliver(setRun, () => get()._cancelled, get)
@@ -1466,6 +1573,34 @@ export const useWorkflow = create<WorkflowState>()((set, get) => ({
     useUi.getState().setScreen('workflow')
     if (fresh) useUi.getState().toast('已经是新任务：在输入框里描述目标即可开始', 'info')
   },
+
+  queueCurrent: () => {
+    const goal = get().draft.trim()
+    if (!goal) {
+      useUi.getState().toast('请先描述任务目标', 'warn')
+      return
+    }
+    // 入队那一刻定格：目标、文本附件正文（与 start 同一段组装逻辑）、计划态单次档。
+    // 图片附件不入队（队列在内存里、不保存图片数据）；队列不持久化，重启即清空。
+    const attachmentText = attachmentTextOf(get().attachments)
+    const item: QueuedTask = {
+      goal,
+      queuedAt: Date.now(),
+      ...(attachmentText ? { attachmentText } : {}),
+      ...(get().planNextTask ? { planNextTask: true } : {})
+    }
+    const r = enqueue(get().queue, item)
+    if (r.rejected) {
+      useUi.getState().toast(r.rejected, 'warn')
+      return
+    }
+    // 入队成功清空草稿、附件与单次档：文本已拼进队列条目，图片留在这里只会
+    // 悄悄混进用户接下来写的另一个任务。花钱的事在入队时就说明白，不等开跑才说
+    set({ queue: r.queue, draft: '', attachments: [], planNextTask: false })
+    useUi.getState().toast(`已排入队列（第 ${r.queue.length} 个）：当前任务结束后自动开始，将消耗一次真实调用`, 'ok')
+  },
+
+  removeQueued: (index) => set((s) => ({ queue: s.queue.filter((_, i) => i !== index) })),
 
   exportRun: async () => {
     const run = get().run
@@ -1525,7 +1660,7 @@ interface RoundOpts {
   /** 只跑这一个角色，不往下走审核、也不动确认门 */
   only?: boolean
   /** 单角色重跑前任务状态快照（rerunRole 捕获；resumeChain 收尾时把状态与门还原回它） */
-  snap?: { status: WorkflowRun['status']; stage: Stage | null; gate: ReviewGate | undefined }
+  snap?: RunSnapshot
 }
 
 /**
@@ -1557,6 +1692,8 @@ async function resumeRework(get: () => WorkflowState, set: (partial: Partial<Wor
   } finally {
     clearTimeout(watchdog)
     set({ _started: false })
+    // 与 start() 的 finally 同理：占用位释放后接队，队列里排着的任务在终态后自动开始
+    void pumpQueue(set, get)
   }
 }
 
@@ -1606,12 +1743,12 @@ async function resumeChain(get: () => WorkflowState, set: (partial: Partial<Work
   }
 
   // 只重跑单个角色：到这里就收，判定与确认门都留给原来的卡片（不改写历史——新增卡片保留）。
-  // 状态与门还原到重跑前（快照来自 rerunRole）：waiting_user 带门 → 门重新挂上让人拿最新结论
-  // 再决定；completed → 仍 completed、引擎位释放。不还原则 run 永停 running，runBusy 恒真，
-  // 切换/新建/删除全被空占，只能手动 stop
+  // 状态与门还原到重跑前（快照来自 rerunRole，restoreSnapshot 是统一形状）：
+  // waiting_user 带门 → 门重新挂上让人拿最新结论再决定；completed → 仍 completed、引擎位释放。
+  // 不还原则 run 永停 running，runBusy 恒真，切换/新建/删除全被空占，只能手动 stop
   if (only || !review) {
     if (snap) {
-      setRun((r) => ({ ...r, status: snap.status, stage: snap.stage, ...(snap.gate ? { gate: snap.gate } : { gate: undefined }) }))
+      setRun((r) => restoreSnapshot(r, snap))
     }
     get().saveRun()
     useUi.getState().toast(`已重跑「${ROLE_LABEL[startRole]}」角色：新增一张卡片，后续结论按最新一张算`, 'ok')

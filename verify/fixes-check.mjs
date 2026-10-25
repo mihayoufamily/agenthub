@@ -196,6 +196,29 @@ for (const [name, url] of blocked) {
   const noWeb = await execTool({ dir: tmp, allowWeb: false }, 'web_fetch', JSON.stringify({ url: 'https://example.com/' }))
   ok('未授权联网时拒绝', !noWeb.ok && noWeb.output.includes('未授权联网'), noWeb.output)
 }
+{
+  // DNS 固定的可测半边（2026-10-25）：请求本体走 electron net，Chromium 网络栈取不到自定义
+  // lookup/agent，"把校验过的 IP 钉进连接层"落不了地；本层能收窄的是校验侧——
+  // safeWebUrl 用 dnsLookup(host, { all: true }) 把解析出的**全部**地址过一遍 isNonPublicHost，
+  // 任一地址内网即拒（混一条内网地址/轮询到内网的 rebinding 都进不了请求侧）。
+  const { isNonPublicHost } = await import('../out/main/tools.js')
+  const toolsSrc = readSrcSafe('src/main/tools.ts')
+  ok('web_fetch 的 SSRF 校验覆盖解析出的全部地址（dnsLookup all:true + 任一地址内网即拒）',
+    toolsSrc.error === null &&
+      /dnsLookup\([\s\S]{0,80}?\{\s*all:\s*true\s*\}\)/.test(toolsSrc.text) &&
+      /addrs\.some\(\(a\) => isNonPublicHost\(a\.address\)\)/.test(toolsSrc.text),
+    toolsSrc.error ?? 'all:true 或 anyOf 拒绝没在 src/main/tools.ts 里找到')
+  ok('isNonPublicHost（纯函数）：内网/环回/元数据/内网名字一律判非公网',
+    typeof isNonPublicHost === 'function' &&
+      isNonPublicHost('127.0.0.1') && isNonPublicHost('10.0.0.5') && isNonPublicHost('172.16.0.1') &&
+      isNonPublicHost('192.168.1.1') && isNonPublicHost('169.254.169.254') && isNonPublicHost('::1') &&
+      isNonPublicHost('::ffff:10.0.0.5') && isNonPublicHost('localhost') && isNonPublicHost('x.localhost') &&
+      isNonPublicHost('') === true)
+  ok('isNonPublicHost（纯函数）：公网地址与公网域名不误判',
+    typeof isNonPublicHost === 'function' &&
+      !isNonPublicHost('8.8.8.8') && !isNonPublicHost('1.1.1.1') && !isNonPublicHost('example.com') &&
+      !isNonPublicHost('2606:4700::1111') && !isNonPublicHost('172.32.0.1'))
+}
 
 // ---------- D/E. mock OpenAI 兼容服务：用量明细 + 模型白名单 ----------
 console.log('\n[D] 用量明细（入/出）随事件上报 + [E] 模型白名单不截断')
@@ -1070,7 +1093,15 @@ console.log('\n[P] 接线：验收对照与回滚入口真的进了界面')
 console.log('\n[Q] 编排能力：不重放已发生的调用、重跑只加卡片、技能按角色注入')
 {
   const wfSrc = readFileSync(new URL('../src/renderer/src/stores/workflow.ts', import.meta.url), 'utf-8')
-  ok('续跑只按卡片推断下一步，不重放已发生的调用', wfSrc.includes('只按卡片推断') && wfSrc.includes('resumeInterrupted'))
+  // 2026-10-25 引擎纯函数化后，"按卡片推断"抽进了 shared/engine-transitions.ts 的 pickNextResumeRole，
+  // 且口径收紧为"最后一张**真产出过结论**的卡（done + 结论非空）"——崩溃在半路的角色要重跑而不是跳过。
+  // 行为断言在 engine-check（六个竞态序列），这里钉接线与共享实现两半。
+  const etSrc = readFileSync(new URL('../src/shared/engine-transitions.ts', import.meta.url), 'utf-8')
+  ok('续跑只按卡片推断下一步，且只认真产出过结论的卡（推断在 shared 纯函数、引擎走它）',
+    wfSrc.includes('pickNextResumeRole') &&
+      etSrc.includes('pickNextResumeRole') &&
+      /status === 'done'/.test(etSrc) && /\bconclusion\b/.test(etSrc),
+    `引擎接线=${wfSrc.includes('pickNextResumeRole')} 纯函数在=${etSrc.includes('pickNextResumeRole')} done+结论口径=${/status === 'done'/.test(etSrc) && /\bconclusion\b/.test(etSrc)}`)
   ok('审核已完成的中断：重新开确认门让人决定，不自作主张交付', wfSrc.includes('这一轮的审核已完成'))
   ok('单角色重跑走 only 链条，不碰确认门', wfSrc.includes('only ? [startRole]') && wfSrc.includes('不动确认门与交付'))
   ok('重跑是"新增一张卡片"而不是原地改写', wfSrc.includes('新增一张卡片，后续结论按最新一张算'))
@@ -1669,7 +1700,7 @@ console.log('\n[Y] navDecision')
   const PKG_ASAR_ROOT = 'D:/AgentHub/resources/app.asar/dist/renderer'
   const PF_ROOT = 'C:\\Program Files\\Agent Hub\\resources\\app\\dist\\renderer'
   ok('开发源下的页面放行', wn.navDecision(`${dev}/index.html`, dev) === 'allow')
-  ok('生产 file:// 下的页面放行', wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null) === 'allow')
+  ok('生产 file:// 下的页面放行（生产调用点恒传真实根：显式传根时原有行为不变）', wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null, PKG_ROOT) === 'allow')
   ok('file:// 指向 app 目录之外也拦（不是所有本地文件都算自己页面）', wn.navDecision('file:///C:/Windows/System32/hosts', null) === 'block')
   ok('http(s) 外链转系统浏览器', wn.navDecision('https://github.com/mihayoufamily/agenthub', dev) === 'external')
   ok('javascript: 协议直接拦掉', wn.navDecision('javascript:alert(1)', dev) === 'block')
@@ -1678,43 +1709,53 @@ console.log('\n[Y] navDecision')
   ok('空串当拦', wn.navDecision('', dev) === 'block')
   ok('devServerUrl 为 null 时 http://localhost 不放行', wn.navDecision('http://localhost:5173/', null) === 'external')
 
-  // 评审补漏（4 个绕过串 + 1 个合法深路径）：归一化后必须挡住 ..、%2e%2e、反斜杠遍历
-  ok('file:// 用 .. 从 renderer 目录逃出后拦掉（归一化后 marker 消失）',
-    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/../../../../Windows/System32/hosts', null) === 'block')
+  // 评审补漏（4 个绕过串 + 1 个合法深路径）：显式传锚后，归一化必须挡住 ..、%2e%2e、反斜杠遍历
+  // （无锚那路已 fail-closed 必拦，这里传锚才是"归一化真的有牙"的证据）
+  ok('file:// 用 .. 从 renderer 目录逃出后拦掉（锚定后归一化落在根外）',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/../../../../Windows/System32/hosts', null, PKG_ROOT) === 'block')
   ok('file:// 用 %2e%2e 编码点段逃逸也拦掉',
-    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e/%2e%2e/%2e%2e/Windows/System32/hosts', null) === 'block')
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e/%2e%2e/%2e%2e/Windows/System32/hosts', null, PKG_ROOT) === 'block')
   ok('file:// 用 Windows 反斜杠 ..\\.. 逃逸也拦掉',
-    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/..\\..\\Windows\\System32\\hosts', null) === 'block')
-  // 弱回退（调用方没传真实根时）：仍以 marker 结尾匹配，故任意根的 renderer 产物串放行。
-  // 生产调用点一定会传 ownRootPath（见下面锚定段），这条只钉住「无锚点」这一路的行为不塌。
-  ok('无锚点弱回退：任意根下的 renderer 产物串仍放行',
-    wn.navDecision('file:///C:/Users/anything/resources/app/dist/renderer/x.html', null) === 'allow')
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/..\\..\\Windows\\System32\\hosts', null, PKG_ROOT) === 'block')
+  // 无锚（调用方没传真实根）一律 block：原来的 marker 结尾弱回退已删除——
+  // `file:////evil.example\share\…` 这类远程共享串的 marker 摆在 pathname 里，弱回退认不出来照样
+  // 放行（README ❌ 区挂号的实测漏点）。fail-closed 之后这条断言由"无锚放行"反转为"无锚必拦"。
+  ok('无锚点不再退回弱回退：任意根下的 renderer 产物串一律 block（fail-closed）',
+    wn.navDecision('file:///C:/Users/anything/resources/app/dist/renderer/x.html', null) === 'block')
   // 合法 renderer 根之后再用 .. 逃逸 → 归一化后落在 renderer 之外，必须拦
   ok('renderer 合法根之后用 .. 逃逸也拦掉',
-    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/notes/../../evil.html', null) === 'block')
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/notes/../../evil.html', null, PKG_ROOT) === 'block')
   // 归一化不能误伤合法深路径（回归护栏）
-  ok('renderer 子目录下的合法页面仍放行',
-    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/sub/dir/page.html', null) === 'allow')
+  ok('renderer 子目录下的合法页面仍放行（显式传根）',
+    wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/sub/dir/page.html', null, PKG_ROOT) === 'allow')
 
   // ---- 修复轮 2 · 评审项 1：file:// 带主机名＝Windows UNC（\\主机\共享），不是本机文件 ----
-  // 这些串在 fix base（^file:/// 空主机锚定）下是 block，轮 1 换成「协议＋pathname marker」后被放宽了。
-  // 前两条故意不传锚定根：marker 就摆在 pathname 里，能拦住只可能是主机名这一关起效。
+  // fail-closed 之后无锚必然 block（那就证明不了任何事），所以这组**显式传锚**：锚内不含主机、
+  // 锚定比对按 pathname 段走，拦下它们只能是"主机名这一关"独立起效。
   ok('file://evil.example/… 的远程共享页面拦掉（攻击者可选主机名与共享名）',
-    wn.navDecision('file://evil.example/resources/app/dist/renderer/payload.html', null) === 'block')
+    wn.navDecision('file://evil.example/resources/app/dist/renderer/payload.html', null, PKG_ROOT) === 'block')
   ok('file://10.0.0.5/share/… 的 IP 形态远程共享也拦掉',
-    wn.navDecision('file://10.0.0.5/share/resources/app/dist/renderer/x.html', null) === 'block')
+    wn.navDecision('file://10.0.0.5/share/resources/app/dist/renderer/x.html', null, PKG_ROOT) === 'block')
   // Windows 里粘贴 UNC 通常是反斜杠形态；URL 解析把它折成 host=evil.example + pathname=/share/…
-  ok('file:\\\\evil.example\\share\\… 反斜杠 UNC 也过空主机这一关（无锚点也拦）',
-    wn.navDecision('file:\\\\evil.example\\share\\resources\\app\\dist\\renderer\\x.html', null) === 'block')
-  // 四反斜杠形态 Node 解析成空主机＋pathname=//主机/共享/…，marker 弱回退认不出来（放行），
-  // 只有锚定真实根能拦——这条正是「生产必须传 ownRootPath」的理由，钉住锚定这一侧
-  ok('file:// 主机/共享（pathname 以 // 开头）靠锚定根拦掉（弱回退认不出，故必须传根）',
+  ok('file:\\\\evil.example\\share\\… 反斜杠 UNC 也过空主机这一关（显式传锚也拦）',
+    wn.navDecision('file:\\\\evil.example\\share\\resources\\app\\dist\\renderer\\x.html', null, PKG_ROOT) === 'block')
+  // 四反斜杠形态 Node 解析成空主机＋pathname=//主机/共享/…：弱回退当年认不出来（放行，实测漏点），
+  // 弱回退已删除——无锚 fail-closed 就拦（README ❌ 区挂号的那个串）；下一条是显式传锚的对照。
+  ok('file:////evil.example\\share\\…（pathname 以 // 开头）无锚 fail-closed 拦掉',
+    wn.navDecision('file:' + String.fromCharCode(92).repeat(4) + 'evil.example' + String.fromCharCode(92)
+      + 'share' + String.fromCharCode(92) + 'resources' + String.fromCharCode(92) + 'app'
+      + String.fromCharCode(92) + 'dist' + String.fromCharCode(92) + 'renderer' + String.fromCharCode(92) + 'x.html',
+      null) === 'block')
+  // 同一串显式传锚：按段比对照样拦——锚定这一侧不受"主机名闸门替它挡"的影响
+  ok('file:// 主机/共享（pathname 以 // 开头）锚定真实根后按段比对拦掉',
     wn.navDecision('file:' + String.fromCharCode(92).repeat(4) + 'evil.example' + String.fromCharCode(92)
       + 'share' + String.fromCharCode(92) + 'resources' + String.fromCharCode(92) + 'app'
       + String.fromCharCode(92) + 'dist' + String.fromCharCode(92) + 'renderer' + String.fromCharCode(92) + 'x.html',
       null, PKG_ROOT) === 'block')
 
   // ---- 修复轮 2 · 评审项 2：分隔符一起编码掉，new URL() 看不见就折不掉 ----
+  // （这组不传锚：fail-closed 后无锚必然 block，钉的是"无锚必拦"这一路；解码真的有牙由上面
+  //   传锚的 %2e%2e 组与下面锚定真实根的两条承担）
   ok('%2e%2e%2f 编码分隔符遍历（无锚点）拦掉',
     wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/%2e%2e%2f%2e%2e%2fWindows%2fSystem32%2fhosts', null) === 'block')
   ok('..%2f 编码分隔符逃逸（无锚点）拦掉',
@@ -1756,11 +1797,11 @@ console.log('\n[Y] navDecision')
   ok('传了 ownRootPath 后开发源页面仍放行',
     wn.navDecision(`${dev}/index.html`, dev, PKG_ROOT) === 'allow')
 
-  // ---- 修复波 A · 项 9（Ruling S）：把"每个调用点都传锚"变成机器检查的不变量 ----
+  // ---- 修复波 A · 项 9（Ruling S）+ 本轮收口：弱回退整个删掉了 ----
   // 评审复现了 navDecision('file:////evil.example/share/resources/app/dist/renderer/x.html', null) → allow
-  // （带锚则 block），但三个生产调用点全部传了真实根，从 src/ 不可达。裁决：与其现在改约 10 条
-  // 无锚断言，不如把"调用点必须传锚"钉成不变量，ownRootPath 改必填留给 v0.5.0。
-  // 无锚弱回退的逻辑本身与那约 10 条无锚断言都**不动**（上面那些还在）。
+  // （带锚则 block），当时的裁决是把"调用点必须传锚"钉成不变量；本轮进一步把无锚弱回退从 winnav
+  // 本身删掉——无锚（含非字符串/空串）一律 block（上面的反转断言钉行为）。不变量继续保留：
+  // 它钉的是调用点侧——就算将来有人把锚改回可选或塞回弱回退，"生产三处恒传真锚"也会先在这里红。
   const nonStringAnchors = [5, 0, true, false, {}, [], [PKG_ROOT], () => PKG_ROOT]
   const anchorResults = nonStringAnchors.map((a) => {
     try { return wn.navDecision('file:///D:/AgentHub/resources/app/dist/renderer/index.html', null, a) }
@@ -1825,7 +1866,7 @@ console.log('\n[Y] navDecision')
   // 复审（修复波后）指出：只看"第三个实参文本在场"的话，显式写 `undefined` / `null` 也能过，
   // 而那正是"无锚"——弱回退依旧可达。这里把字面量一并排除。
   const weakNav = navHits.filter((c) => c.argc !== 3 || /^(undefined|null)$/.test(c.third))
-  ok('不变量：src/** 里每一处 navDecision( 调用都带**真锚**（第三个实参在场，且不是字面 undefined/null）——生产三处恒传真实根，无锚弱回退因此从 src/ 不可达',
+  ok('不变量：src/** 里每一处 navDecision( 调用都带**真锚**（第三个实参在场，且不是字面 undefined/null）——生产三处恒传真实根；无锚弱回退已删除，这条继续钉住调用点不回退',
     navHits.length >= 3 && weakNav.length === 0,
     `${navHits.length} 处调用；不合格 ${JSON.stringify(weakNav.map((c) => `${c.file} argc=${c.argc} third=${c.third} ${c.text}`))}；全部=${JSON.stringify(navHits.map((c) => `${c.file} argc=${c.argc} third=${c.third}`))}`)
 }
@@ -2271,12 +2312,17 @@ console.log('\n[Z3] 脱敏与渲染口径统一（工具卡 / MCP 信任弹窗 a
       (setZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length >= 1 &&
       (chatZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length >= 1,
     `SettingsPage 调用数=${(setZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length} ChatView 调用数=${(chatZ3.text.match(/redactCommandForDisplay\(/g) ?? []).length}`)
-  ok('MCP 信任弹窗的 argv 改成 JSON 风格（与设置页预览同一种），ipc.ts 里不再有裸空格 join argv',
-    z3Err === '' &&
-      /command: s\.launch\?\.bin[\s\S]{0,200}?JSON\.stringify\(\[/.test(ipcZ3.text) &&
+  // 2026-10-25 MCP 加 HTTP 传输后，信任弹窗的 command 从 ipc.ts 内联表达式改为 mcp.trustCommand()
+  // 单点分派（stdio = 原 argv JSON 形态逐字不变；http = "远程 HTTP server：…发往 <origin>"）。
+  const mcpZ3 = readSrcSafe('src/main/mcp.ts')
+  ok('MCP 信任弹窗走 mcp.trustCommand 单点分派：stdio 保持 argv JSON 形态、http 如实报去向，ipc.ts 里不再有裸空格 join',
+    z3Err === '' && mcpZ3.error === null &&
+      /command: mcp\.trustCommand\(s\)/.test(ipcZ3.text) &&
+      /JSON\.stringify\(\[/.test(mcpZ3.text) &&
+      /远程 HTTP server/.test(mcpZ3.text) &&
       !/\.join\(' '\)/.test(ipcZ3.text) &&
       /JSON\.stringify\(\[p\.file, \.\.\.p\.args\]\)/.test(setZ3.text),
-    `弹窗用 JSON.stringify=${/command: s\.launch\?\.bin[\s\S]{0,200}?JSON\.stringify\(\[/.test(ipcZ3.text)}；ipc.ts 里裸空格 join 还在=${/\.join\(' '\)/.test(ipcZ3.text)}；设置页预览那一份=${/JSON\.stringify\(\[p\.file, \.\.\.p\.args\]\)/.test(setZ3.text)}`)
+    `ipc 分派=${/command: mcp\.trustCommand\(s\)/.test(ipcZ3.text)} stdio JSON 形态=${/JSON\.stringify\(\[/.test(mcpZ3.text)} http 去向文案=${/远程 HTTP server/.test(mcpZ3.text)} 裸 join 残留=${/\.join\(' '\)/.test(ipcZ3.text)}；设置页预览那一份=${/JSON\.stringify\(\[p\.file, \.\.\.p\.args\]\)/.test(setZ3.text)}`)
   ok('did-fail-load 只挂一个监听器（原来两个：一个只打日志、一个才出错页）',
     z3Err === '' && (mainZ3.text.match(/on\('did-fail-load'/g) ?? []).length === 1,
     `监听器数=${(mainZ3.text.match(/on\('did-fail-load'/g) ?? []).length}`)
@@ -2907,12 +2953,139 @@ console.log('\n[批次 C/D 评审留账] 这几条钉住已修的 Minor，不许
     /!!run\.gate && \(run\.status === 'waiting_user' \|\| run\.status === 'waiting_review'\)/.test(wfSrc.text) &&
       /run\.gate\?\.kind === 'plan'/.test(wfSrc.text),
     'announce 的门判定或计划门分支没到位')
-  // 单次"本任务先出计划"：读一次就清，不落盘——否则下一次提交会被上一次的勾选悄悄带走
-  ok('单次计划开关读一次即清（不污染下一次提交，也不进持久化配置）',
-    /const usePlan = !!cfg\.planFirst \|\| get\(\)\.planNextTask/.test(wfSrc.text) &&
-      /if \(get\(\)\.planNextTask\) set\(\{ planNextTask: false \}\)/.test(wfSrc.text) &&
+  // 单次"本任务先出计划"：读一次就清，不落盘——否则下一次提交会被上一次的勾选悄悄带走。
+  // 2026-10-25 加任务队列后 start 多了 queued 来源：草稿路径读 get().planNextTask、队列路径读
+  // 入队时定格的 item.planNextTask（队列条目在入队那刻拷走开关，读到的是"当时用户勾的"）。
+  ok('单次计划开关读一次即清（草稿路径读后即清；队列路径在入队那刻定格并随入队清空）',
+    /const usePlan = !!cfg\.planFirst \|\| \(queued \? queued\.planNextTask === true : get\(\)\.planNextTask\)/.test(wfSrc.text) &&
+      /if \(!queued && get\(\)\.planNextTask\) set\(\{ planNextTask: false \}\)/.test(wfSrc.text) &&
+      /planNextTask: true \} : \{\}/.test(wfSrc.text) &&
       !/planNextTask: get\(\)\.config/.test(wfSrc.text),
-    `读取=${/const usePlan = !!cfg\.planFirst \|\| get\(\)\.planNextTask/.test(wfSrc.text)} 清除=${/if \(get\(\)\.planNextTask\) set\(\{ planNextTask: false \}\)/.test(wfSrc.text)}`)
+    `读取=${/const usePlan = !!cfg\.planFirst \|\| \(queued \? queued\.planNextTask === true : get\(\)\.planNextTask\)/.test(wfSrc.text)} 清除=${/if \(!queued && get\(\)\.planNextTask\) set\(\{ planNextTask: false \}\)/.test(wfSrc.text)} 入队定格=${/planNextTask: true \} : \{\}/.test(wfSrc.text)}`)
+}
+
+// ---------- [B] __ahub_debug 验证态闸门（渲染层判定接线，源码绊线） ----------
+console.log('\n[B] __ahub_debug 只在验证态安装（--ahub-verify → 页面 URL → 渲染层判定）')
+{
+  // 真机套件要 spawn 应用，这里用源码绊线钉住接线本身（同 [Z] 段口径）：
+  // 断言"安装点被谁包住、两条加载路径都带参数"；行为的另一半由带 --ahub-verify 的真机套件覆盖。
+  // 闸门先例：ipc.ts 的 config:importJson 只在 argv 带 --ahub-verify 时注册——app.isPackaged
+  // 不能当闸门（被测的部署构建本来就是 packaged），__ahub_debug 收口走的是同一口径。
+  const appSrcV = readSrcSafe('src/renderer/src/App.tsx')
+  const debugSrcV = readSrcSafe('src/renderer/src/lib/debug.ts')
+  const mainSrcV = readSrcSafe('src/main/index.ts')
+  const hookCalls = (appSrcV.text.match(/installDebugHooks\(\)/g) || []).length
+  ok('App.tsx 的 installDebugHooks 安装点被 isVerifyRuntime() 包住（全文件仅此一处调用，发布版不再无条件装验证钩子）',
+    appSrcV.error === null &&
+      /if\s*\(\s*isVerifyRuntime\(\)\s*\)\s*installDebugHooks\(\)/.test(appSrcV.text) &&
+      hookCalls === 1,
+    `${appSrcV.error ?? ''}守卫=${/isVerifyRuntime\(\)\s*\)\s*installDebugHooks/.test(appSrcV.text)} 调用次数=${hookCalls}`)
+  ok('debug.ts 导出 isVerifyRuntime 纯判定（读页面 URL 的 ahub-verify 参数，不碰 app.isPackaged）',
+    debugSrcV.error === null &&
+      /export function isVerifyRuntime\(\)/.test(debugSrcV.text) &&
+      /URLSearchParams\(location\.search\)\.has\('ahub-verify'\)/.test(debugSrcV.text) &&
+      !/isPackaged/.test(debugSrcV.text.split('export function isVerifyRuntime')[1] ?? ''),
+    debugSrcV.error ?? '')
+  ok('index.ts 两条加载路径都按验证态追加 ahub-verify=1（生产 loadFile 用 options.search、开发 loadURL 拼查询串）',
+    mainSrcV.error === null &&
+      /isVerifyLaunch \? \{ search: '\?ahub-verify=1' \} : undefined/.test(mainSrcV.text) &&
+      /loadURL\(devServerUrl \+ \(devServerUrl\.includes\('\?'\) \? '&ahub-verify=1' : '\?ahub-verify=1'\)\)/.test(mainSrcV.text),
+    `${mainSrcV.error ?? ''}search 接线=${/isVerifyLaunch \? \{ search: '\?ahub-verify=1' \}/.test(mainSrcV.text)} loadURL 接线=${/loadURL\(devServerUrl \+/.test(mainSrcV.text)}`)
+}
+
+// ---------- [K2] git 仓库级回滚（检查点 2.0：run_command / CLI 写盘也管得到） ----------
+// 与 [K] 段互补：[K] 钉 COW 回滚（工具层），这里钉 git 模式——快照、还原、清理、
+// 留档、拒绝无快照、尊重 .gitignore，以及 mode 缺省路径未被破坏。仓库建在系统临时目录
+// 里（git init 不算对用户仓库的写操作），基线一个提交，全部断言只看文件系统与返回值。
+console.log('\n[K2] git 回滚（仓库级快照：命令与 CLI 写盘也在半径内）')
+{
+  const cp = await import('../out/main/checkpoints.js')
+  const { resolve: resolvePath } = await import('node:path')
+  const gitProbe = spawnSync('git', ['--version'], { windowsHide: true, encoding: 'utf8' })
+  const gitThere = gitProbe.status === 0 && !gitProbe.error
+  // 环境先例照 [Z4]：eslint 装不上就 FAIL 不 skip；git 不在 PATH 上同理——
+  // 跳过不算 PASS，本段行为用例不再执行（跑了只会堆一堆难懂的失败）。
+  ok('git 在 PATH 上（不可用时本段 FAIL 并说明，不 skip）', gitThere, gitProbe.error ? String(gitProbe.error) : `exit=${gitProbe.status} ${gitProbe.stderr}`)
+  if (gitThere) {
+    const root = mkdtempSync(join(tmpdir(), 'ahub-k2-'))
+    const repo = join(root, 'repo')
+    mkdirSync(repo, { recursive: true })
+    const g = (args) => {
+      const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true })
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')} 失败：${r.stderr}`)
+      return r.stdout
+    }
+    g(['init', '-q'])
+    g(['config', 'user.email', 'k2@test.local'])
+    g(['config', 'user.name', 'k2'])
+    g(['config', 'core.autocrlf', 'false']) // 本仓断言按 \n 精确比对内容，不吃全局 autocrlf 的换行转换
+    writeFileSync(join(repo, 'tracked.txt'), '基线\n', 'utf-8')
+    writeFileSync(join(repo, '.gitignore'), 'ignored.txt\n', 'utf-8')
+    g(['add', '-A'])
+    g(['commit', '-qm', '基线提交'])
+    cp.init(join(root, 'cps'))
+
+    // ① git 仓库里 start() 记下快照（top 是仓库根；tree 拍的是工作区不是 HEAD）
+    const m1 = await cp.start('cp-git', repo)
+    ok('git 仓库里 start() 记下 git 快照（top/tree/at/head）',
+      !!m1?.git?.top && !!m1?.git?.tree && typeof m1?.git?.at === 'number' && 'head' in (m1?.git ?? {}), JSON.stringify(m1?.git))
+    ok('快照的 top 是仓库根（回滚半径是整个仓库）', !!m1?.git?.top && resolvePath(m1.git.top) === resolvePath(repo), JSON.stringify(m1?.git?.top))
+
+    // ② 造三种现场：工具层改已跟踪文件、工具层新建、run_command 写盘（工具层清单管不到的那种）
+    const execCp = (tool, args) => execTool({ dir: repo, allowCommands: false }, tool, JSON.stringify(args), undefined, { checkpoint: 'cp-git' })
+    await execCp('write_file', { path: 'tracked.txt', content: '工具层改的\n' })
+    await execCp('write_file', { path: 'tool-new.txt', content: '工具层新建\n' })
+    const cmd = await execTool({ dir: repo, allowCommands: true, commandPolicy: 'auto' }, 'run_command', JSON.stringify({ command: 'echo cli wrote > cli.txt' }), undefined, { checkpoint: 'cp-git' })
+    ok('run_command 真的在仓库里落了盘（前置：现场成立）', cmd.ok && existsSync(join(repo, 'cli.txt')), cmd.output)
+
+    // ③ git 回滚：三种现场全部回到基线（含 run_command 那个——这正是工具层回滚覆盖不到的）
+    const cowBefore = JSON.stringify(cp.manifestOf('cp-git'))
+    const r1 = await cp.rollback('cp-git', 'git')
+    ok('git 回滚报成功', r1.ok, JSON.stringify(r1))
+    ok('工具层改的已跟踪文件回到基线内容', readFileSync(join(repo, 'tracked.txt'), 'utf8') === '基线\n', readFileSync(join(repo, 'tracked.txt'), 'utf8'))
+    ok('run_command 写的文件被清掉（工具层回滚管不到的那半边）', !existsSync(join(repo, 'cli.txt')))
+    ok('工具层新建的文件也被清掉', !existsSync(join(repo, 'tool-new.txt')))
+
+    // ④ extra 文件留档：删除前 copy 进检查点 files 目录（backupPath 命名风格），可人工找回
+    const archived = readdirSync(join(root, 'cps', 'cp-git', 'files'))
+    ok('被删的新建文件在检查点目录留了档（cli.txt / tool-new.txt）',
+      archived.some((f) => f.includes('cli.txt')) && archived.some((f) => f.includes('tool-new.txt')), archived.join(','))
+
+    // ⑤ git 模式不改 COW 清单：两种模式各自独立，回滚后清单仍可回看
+    //（run_command 不进清单，工具层两次写盘 = 2 条 entries；比的是整份清单与回滚前逐字节一致）
+    ok('git 回滚不动 COW 清单（与回滚前逐字节一致，可回看）', JSON.stringify(cp.manifestOf('cp-git')) === cowBefore)
+
+    // ⑥ 快照后被删的已跟踪文件由 git 回滚找回来（restore 的 source tree 里有它）
+    const m2 = await cp.start('cp-del', repo)
+    ok('第二个检查点也拍到 git 快照', !!m2?.git?.tree, JSON.stringify(m2?.git))
+    rmSync(join(repo, 'tracked.txt')) // 快照之后再删（等价于命令删的）——先删再拍快照就成了"基线本来没有"
+    const r2 = await cp.rollback('cp-del', 'git')
+    ok('被删的已跟踪文件由 git 回滚找回来', r2.ok && existsSync(join(repo, 'tracked.txt')) && readFileSync(join(repo, 'tracked.txt'), 'utf8') === '基线\n', JSON.stringify(r2))
+
+    // ⑦ .gitignore：ignored 文件不进快照，回滚也不碰它（删不得——它从来不在快照清单里）
+    const m3 = await cp.start('cp-ign', repo)
+    writeFileSync(join(repo, 'ignored.txt'), '忽略我\n', 'utf-8') // 模拟 CLI 写了一个被 ignore 的文件
+    const r3 = await cp.rollback('cp-ign', 'git')
+    ok('被 .gitignore 忽略的文件不进快照、回滚后仍在（尊重 ignore）',
+      !!m3?.git?.tree && r3.ok && existsSync(join(repo, 'ignored.txt')) && readFileSync(join(repo, 'ignored.txt'), 'utf8') === '忽略我\n', JSON.stringify(r3))
+
+    // ⑧ 非 git 目录：manifest 无 git 字段 → git 回滚如实拒绝；COW 回滚照常
+    const plain = join(root, 'plain')
+    mkdirSync(plain, { recursive: true })
+    writeFileSync(join(plain, 'cow.txt'), '任务前\n', 'utf-8')
+    const m4 = await cp.start('cp-plain', plain)
+    ok('非 git 目录的检查点不记 git 字段', !!m4 && !('git' in m4), JSON.stringify(m4))
+    const reject = await cp.rollback('cp-plain', 'git')
+    ok('git 回滚对无快照的检查点如实拒绝（不假装成功）', !reject.ok && reject.message.includes('没有 git 快照'), reject.message)
+    await execTool({ dir: plain, allowCommands: false }, 'write_file', JSON.stringify({ path: 'cow.txt', content: '改了\n' }), undefined, { checkpoint: 'cp-plain' })
+    // ⑨ mode 缺省路径不变：直接调 rollback(id)（不传第二个参数），行为与 [K] 段钉住的旧断言一致
+    const r4 = await cp.rollback('cp-plain')
+    ok('mode 缺省时 COW 回滚照常（旧路径未被破坏）', r4.ok && r4.restored === 1 && readFileSync(join(plain, 'cow.txt'), 'utf8') === '任务前\n', JSON.stringify(r4))
+
+    rmSync(root, { recursive: true, force: true })
+  } else {
+    console.log('  （git 不在 PATH 上：[K2] 行为用例整体跳过，环境断言已计一次 FAIL，不计 PASS）')
+  }
 }
 
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)

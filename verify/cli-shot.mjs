@@ -17,7 +17,7 @@ const OUT = resolve(dirname(fileURLToPath(import.meta.url)), 'shots-cli')
 const main = async () => {
   if (!existsSync(EXE)) { console.error('未找到便携版：' + EXE); process.exit(2) }
   mkdirSync(OUT, { recursive: true })
-  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
+  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
   let cdp
   // 修复波 B · 项 1c：纯截图套件此前一条计数都不打印，run-all 只能报 `-/-`——
   // "跑没跑过、跑到第几步"在汇总里完全隐形（项 2 要开"没打印计数即 FAIL"，所以先把口径补齐）。

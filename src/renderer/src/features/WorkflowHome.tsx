@@ -1,4 +1,4 @@
-// 工作流首页：标题 + 中央大输入框 + 配置条（悬停 200ms 打开可选浮层 / 点击固定）+ 开始
+// 工作流首页：标题 + 中央大输入框 + 配置条（悬停 200ms 打开可选浮层 / 点击固定）+ 开始 + 任务队列
 import React, { useEffect, useRef, useState } from 'react'
 import { useWorkflow, runBusy } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
@@ -11,6 +11,7 @@ import { ConfigPanel } from './ConfigPanel'
 import { RolePicker, type RoleKey } from './RolePicker'
 import { OutputDirChip } from '../components/OutputDir'
 import { PresetChip, STATUS_TEXT } from './WfChips'
+import { MAX_QUEUE } from '@shared/engine-transitions'
 import { cls } from '../lib/utils'
 
 export function WorkflowHome() {
@@ -24,6 +25,10 @@ export function WorkflowHome() {
   const tasks = useWorkflow((s) => s.tasks)
   const openTask = useWorkflow((s) => s.openTask)
   const removeTask = useWorkflow((s) => s.removeTask)
+  const run = useWorkflow((s) => s.run)
+  const queue = useWorkflow((s) => s.queue)
+  const queueCurrent = useWorkflow((s) => s.queueCurrent)
+  const removeQueued = useWorkflow((s) => s.removeQueued)
   const enterToSend = useSettings((s) => s.prefs?.enterToSend ?? true)
   const agents = useAgents((s) => s.agents)
 
@@ -88,6 +93,19 @@ export function WorkflowHome() {
     }
     void start()
   }
+
+  // 排入队列：忙时"开始"旁的替代动作。目标为空的检查 queueCurrent 里也有一道，
+  // 这里先拦是不让空目标打出一条没有信息量的 toast 路径
+  const onQueue = () => {
+    if (!draft.trim()) {
+      useUi.getState().toast('请先描述任务目标', 'warn')
+      return
+    }
+    queueCurrent()
+  }
+
+  // 引擎只有一个执行循环：跑着的时候"开始"会被占用位挡下，这时排队是唯一的提交通道
+  const busy = runBusy(run)
 
   const demo = isDemoRun() && !!config.planner.agentId
 
@@ -177,11 +195,45 @@ export function WorkflowHome() {
           <button className="btn btn-primary wf-start" style={{ height: 40, minWidth: 120 }} onClick={onBegin}>
             开始任务
           </button>
+          {/* 忙时"开始"会被单执行循环挡下，排队是唯一的提交通道；样式与相邻按钮一致 */}
+          {busy && (
+            <button
+              className="btn btn-secondary wf-start"
+              style={{ height: 40, minWidth: 120 }}
+              onClick={onQueue}
+              title="当前任务正在执行；排入队列后它会在当前任务到达终态（完成/失败/停止等）后自动开始，将消耗一次真实调用"
+            >
+              排入队列
+            </button>
+          )}
         </div>
 
         {demo && (
           <div style={{ marginTop: 18 }}>
             <span className="demo-badge">当前配置为演示模式 · 无真实 Agent 也能跑通全流程</span>
+          </div>
+        )}
+
+        {/* 任务队列条：条数 + 各条目标前 30 字 + 逐条删除。
+            边界（与 store 注释同一口径）：队列只存在内存里，重启即清空；
+            不保存图片附件；计划态开关在入队那一刻定格 */}
+        {queue.length > 0 && (
+          <div className="wf-history" data-queue-bar="1">
+            <div className="wf-history-head">
+              <b>任务队列（{queue.length}/{MAX_QUEUE}）</b>
+              <span>当前任务到达终态后自动开始下一条；队列不持久化，重启即清空</span>
+            </div>
+            {queue.map((q, i) => (
+              <div key={`${q.queuedAt}-${i}`} className="wf-history-row">
+                <div className="wf-history-main" title={q.goal} style={{ cursor: 'default' }}>
+                  <span className="txt-ellipsis">{q.goal.length > 30 ? q.goal.slice(0, 30) + '…' : q.goal}</span>
+                  <em>排队中 · 当前任务结束后自动开始（将消耗一次真实调用）{q.planNextTask ? ' · 先出计划' : ''}</em>
+                </div>
+                <button className="wf-preset-rm" title="移出队列" aria-label="移出队列" onClick={() => removeQueued(i)}>
+                  ×
+                </button>
+              </div>
+            ))}
           </div>
         )}
 

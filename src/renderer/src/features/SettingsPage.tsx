@@ -6,7 +6,7 @@ import { useUi } from '../stores/ui'
 import { useWorkflow, runBusy } from '../stores/workflow'
 import type { Skill, HotkeyAction, ApprovalRecord, HookRule, McpServer, McpProbe, RejectedEntry } from '@shared/types'
 import { validateHook, HOOK_COMMAND_MAX_LENGTH, HOOK_RULES_MAX } from '@shared/hooks'
-import { MCP_SHAPE_REJECT_MESSAGE, MCP_SERVERS_MAX } from '@shared/mcp-list'
+import { MCP_SHAPE_REJECT_MESSAGE, MCP_HTTP_URL_REJECT_MESSAGE, MCP_SERVERS_MAX, validHttpUrl } from '@shared/mcp-list'
 import { cmdUnsafeReason, toLaunchPlan } from '@shared/argv'
 import { fingerprintCommand, redactCommandForDisplay } from '@shared/approvals'
 import { compatBadgeText, SANDBOX_FALLBACK_OPTIONS } from '@shared/compat'
@@ -655,8 +655,21 @@ function HookSection() {
   )
 }
 
-/* ---- MCP server（tools-only + stdio） ---- */
-const EMPTY_MCP = { name: '', command: '' }
+/* ---- MCP server（tools-only；stdio 本机进程 + http 远程） ---- */
+const EMPTY_MCP = { name: '', command: '', url: '' }
+
+/**
+ * http 记录在设置页要显示的"实际连接对象"（与 mcp.ts 的 httpDisplay 同一句话、同一个 origin 口径）。
+ * URL 非法就原样亮出来——不替用户粉饰一份看起来合法的地址。
+ */
+function mcpHttpOrigin(url: string | undefined): string {
+  const u = (url ?? '').trim()
+  try {
+    return u ? new URL(u).origin : '（URL 未填）'
+  } catch {
+    return u || '（URL 未填）'
+  }
+}
 
 /**
  * comspec 分支保存前预检：与主进程 planSpawn 用的是同一个 cmdUnsafeReason（argv.ts 只此一份）。
@@ -680,6 +693,8 @@ function McpSection() {
   const [busy, setBusy] = useState('')
   // 「重填」的目标旧条目（null=没有在重填）。见 refill 的注释：移除推迟到保存那一刻。
   const [refillTarget, setRefillTarget] = useState<McpServer | null>(null)
+  // 新增表单的启动方式：本机进程（stdio）或远程 HTTP。重填一条 http 记录时会跟着切过去
+  const [mode, setMode] = useState<'stdio' | 'http'>('stdio')
   // 被主进程点名拒收的条目（第 21 条超限、形状不合格）：旧写法是 .slice(0, 20) 静默丢掉
   const [rejected, setRejected] = useState<RejectedEntry[]>([])
 
@@ -708,42 +723,71 @@ function McpSection() {
    * 草稿丢了（重挂）不要紧：旧条目还在，再点一次「重填」即可。
    */
   const refill = (s: McpServer) => {
-    setDraft({ name: s.name, command: s.command })
+    // http 记录回填的是 URL（它没有命令行）；启动方式跟着切，避免"URL 填进了 http 表单、
+    // 界面却停在 stdio 模式"的错位
+    if (s.transport === 'http') {
+      setDraft({ name: s.name, command: '', url: s.url ?? '' })
+      setMode('http')
+    } else {
+      setDraft({ name: s.name, command: s.command, url: '' })
+      setMode('stdio')
+    }
     setRefillTarget(s)
   }
 
   const add = async () => {
-    const plan = toLaunchPlan(draft.command)
-    if (!draft.name.trim() || !plan) {
-      // 与主进程 mcp:set 的拒收原因是**同一份**文案（shared/mcp-list.MCP_SHAPE_REJECT_MESSAGE）：
-      // 表单里说 A、保存时说 B 会让人以为是两回事
-      useUi.getState().toast(MCP_SHAPE_REJECT_MESSAGE, 'warn')
-      return
-    }
-    const unsafe = comspecUnsafe(plan)
-    if (unsafe.length > 0) {
-      // 表单里已经染红写明了（mcp-cmd-unsafe），这里再挡一次保存：不能让"看着存上了其实起不来"过关
-      useUi.getState().toast(`该参数经 cmd 无法安全表示，已拦下：${unsafe[0].token}`, 'warn')
-      return
+    let entry: McpServer
+    if (mode === 'http') {
+      const url = draft.url.trim()
+      if (!draft.name.trim() || !validHttpUrl(url)) {
+        // 与主进程 mcp:set 的 http 拒收原因是**同一份**文案（shared/mcp-list.MCP_HTTP_URL_REJECT_MESSAGE）
+        useUi.getState().toast(draft.name.trim() ? MCP_HTTP_URL_REJECT_MESSAGE : MCP_SHAPE_REJECT_MESSAGE, 'warn')
+        return
+      }
+      entry = {
+        id: uid('mcp'),
+        name: draft.name.trim().slice(0, 40),
+        command: '',
+        transport: 'http' as const,
+        url,
+        formatVersion: 2 as const,
+        enabled: true,
+        createdAt: Date.now()
+      }
+    } else {
+      const plan = toLaunchPlan(draft.command)
+      if (!draft.name.trim() || !plan) {
+        // 与主进程 mcp:set 的拒收原因是**同一份**文案（shared/mcp-list.MCP_SHAPE_REJECT_MESSAGE）：
+        // 表单里说 A、保存时说 B 会让人以为是两回事
+        useUi.getState().toast(MCP_SHAPE_REJECT_MESSAGE, 'warn')
+        return
+      }
+      const unsafe = comspecUnsafe(plan)
+      if (unsafe.length > 0) {
+        // 表单里已经染红写明了（mcp-cmd-unsafe），这里再挡一次保存：不能让"看着存上了其实起不来"过关
+        useUi.getState().toast(`该参数经 cmd 无法安全表示，已拦下：${unsafe[0].token}`, 'warn')
+        return
+      }
+      entry = {
+        id: uid('mcp'),
+        name: draft.name.trim().slice(0, 40),
+        command: draft.command.trim(),
+        launch: { bin: plan.file, args: plan.args },
+        formatVersion: 2 as const,
+        enabled: true,
+        createdAt: Date.now()
+      }
     }
     // 重填保存：旧条目此刻才被新记录顶掉（remove-and-refill 的形状不变，只是移除推迟到这一笔保存里）
     const replacing = refillTarget && list.some((x) => x.id === refillTarget.id) ? refillTarget : null
     const rest = replacing ? list.filter((x) => x.id !== replacing.id) : list
-    const next = await save([...rest, {
-      id: uid('mcp'),
-      name: draft.name.trim().slice(0, 40),
-      command: draft.command.trim(),
-      launch: { bin: plan.file, args: plan.args },
-      formatVersion: 2 as const,
-      enabled: true,
-      createdAt: Date.now()
-    }])
+    const next = await save([...rest, entry])
     setDraft(EMPTY_MCP)
     setRefillTarget(null)
     if (replacing) {
       useUi.getState().toast(`已用新记录顶掉旧条目「${replacing.name}」：旧记录与它的信任授权一起移除`, 'info')
     }
-    // 加完就探一次：列不到工具的话，第一次真正调用时会连不上，早知道比晚知道好
+    // 加完就探一次：列不到工具的话，第一次真正调用时会连不上，早知道比晚知道好（http 走同一探测通道）
     const first = next[next.length - 1]
     if (first) void probe(first)
   }
@@ -762,9 +806,11 @@ function McpSection() {
       <div className="group-title">MCP server</div>
       <div className="desc" style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 10 }}>
         只接 <b>tools</b>：把外部 MCP server 的工具并进模型可调用的清单，不接它的 prompts/resources，也不让它往上下文里塞系统提示。
-        第一版<b>只支持 stdio</b>（本机拉起一条命令，换行分隔的 JSON-RPC）；远程 HTTP/SSE 没做。
+        启动方式两种：<b>本机进程</b>（stdio，拉起一条命令，换行分隔的 JSON-RPC）与<b>远程 HTTP</b>
+        （POST JSON-RPC 到你填的地址，响应可能是 JSON 或 SSE 流，URL 直连、不经 shell/cmd）。
         <br />
-        <b style={{ color: 'var(--danger)' }}>风险：</b>MCP server 就是本机任意代码执行，它的工具以那条命令的权限运行。
+        <b style={{ color: 'var(--danger)' }}>风险：</b>本机进程方式下 MCP server 就是任意代码执行，它的工具以那条命令的权限运行；
+        远程 HTTP 方式下，数据与工具调用会发往它配置的地址。
         首次连接会弹窗要你确认；点「始终信任」后这个 server 的工具整组放行（下面可撤销）。
         哪些 Agent 能用，在各自「文件/命令工具」面板里勾选，没勾的看不到。
       </div>
@@ -793,20 +839,38 @@ function McpSection() {
               <Button variant="ghost" onClick={() => void save(list.filter((x) => x.id !== s.id))}>删除</Button>
             </div>
             <code style={{ display: 'block', fontSize: 11.5, marginTop: 4, wordBreak: 'break-all', color: s.legacyInvalid ? 'var(--text-3)' : 'var(--text-2)' }}>
-              {s.launch ? `${s.launch.bin} ${s.launch.args.join(' ')}`.trim() : s.command}
+              {s.transport === 'http' ? `HTTP ${s.url || '（URL 未填）'}` : s.launch ? `${s.launch.bin} ${s.launch.args.join(' ')}`.trim() : s.command}
             </code>
-            {s.legacyInvalid && (
+            {s.transport === 'http' && (
+              // http 没有命令行可披露，等价物是目标地址（origin）——数据与工具调用真正发往的地方
+              <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4 }} data-mcp-http-origin={s.id}>
+                远程 HTTP server：数据与工具调用将发往 {mcpHttpOrigin(s.url)}
+              </div>
+            )}
+            {s.httpInvalid && (
+              <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }} data-testid="mcp-http-invalid">
+                HTTP 地址缺失或不是合法的 http(s) URL，已停用。请重填后保存，或删除这条。
+              </div>
+            )}
+            {s.httpInvalid && (
+              <Button variant="ghost" style={{ marginTop: 4 }} data-testid="mcp-http-refill" onClick={() => refill(s)}>
+                重填
+              </Button>
+            )}
+            {/* legacy 横幅只属于 stdio：http 记录不使用 command 启动，那条"旧版单命令"的话对它不成立 */}
+            {s.legacyInvalid && s.transport !== 'http' && (
               <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }} data-testid="mcp-legacy">
                 旧版单命令配置，已停用。v0.4.0 不再把整条命令交 shell 解析，请重填后保存。
               </div>
             )}
-            {s.legacyInvalid && (
+            {s.legacyInvalid && s.transport !== 'http' && (
               <Button variant="ghost" style={{ marginTop: 4 }} data-testid="mcp-refill" onClick={() => refill(s)}>
                 重填
               </Button>
             )}
             {p && (
               <div style={{ marginTop: 4, fontSize: 11.5, color: p.ok ? 'var(--text-3)' : 'var(--danger)' }} data-mcp-probe={s.id}>
+                {p.display ? <span data-mcp-probe-display={s.id}>{p.display}；</span> : null}
                 {p.message}
                 {p.ok && !!p.tools?.length && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
@@ -824,9 +888,17 @@ function McpSection() {
       })}
 
       <div className="group-title" style={{ marginTop: 12 }}>新增一个</div>
-      <div style={{ display: 'flex', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <input placeholder="名称" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} style={{ width: 140, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-name" />
-        <input placeholder='启动命令，例如 node "C:\path\to\server.js" 或 npx -y @some/mcp-server' value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-command" />
+        <div className="seg" data-testid="mcp-mode">
+          <button className={mode === 'stdio' ? 'active' : ''} onClick={() => setMode('stdio')}>本机进程</button>
+          <button className={mode === 'http' ? 'active' : ''} onClick={() => setMode('http')}>远程 HTTP</button>
+        </div>
+        {mode === 'stdio' ? (
+          <input placeholder='启动命令，例如 node "C:\path\to\server.js" 或 npx -y @some/mcp-server' value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-command" />
+        ) : (
+          <input placeholder="服务地址，例如 http://127.0.0.1:3000/mcp 或 https://mcp.example.com" value={draft.url} onChange={(e) => setDraft({ ...draft, url: e.target.value })} style={{ flex: 1, height: 28, font: 'inherit', fontSize: 12.5 }} data-testid="mcp-url" />
+        )}
         <Button variant="primary" disabled={list.length >= MCP_SERVERS_MAX} onClick={() => void add()}>添加并探测</Button>
       </div>
       {list.length >= MCP_SERVERS_MAX && (
@@ -837,7 +909,7 @@ function McpSection() {
       {refillTarget && list.some((x) => x.id === refillTarget.id) && (
         <div style={{ fontSize: 11.5, color: 'var(--warn)', marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' }} data-testid="mcp-refill-note">
           <span>
-            正在重填「{refillTarget.name}」：原命令已填回上面的表单，旧条目暂时留在列表里（失效+停用）。
+            正在重填「{refillTarget.name}」：{refillTarget.transport === 'http' ? '原地址' : '原命令'}已填回上面的表单，旧条目暂时留在列表里（失效+停用）。
             保存后新记录会顶掉它——旧记录和它的信任授权一起删除；不保存就一切照旧。
           </span>
           <Button variant="ghost" style={{ height: 24, flexShrink: 0 }} data-testid="mcp-refill-cancel" onClick={() => setRefillTarget(null)}>
@@ -846,6 +918,17 @@ function McpSection() {
         </div>
       )}
       {(() => {
+        // http 模式没有 argv 可预演：预演的是"实际连接对象"（origin），与列表行同一句话
+        if (mode === 'http') {
+          const u = draft.url.trim()
+          const bad = !!u && !validHttpUrl(u)
+          return (
+            <div style={{ fontSize: 11.5, color: bad ? 'var(--danger)' : 'var(--text-3)', marginTop: 4 }} data-testid="mcp-http-preview">
+              实际连接：<code style={{ wordBreak: 'break-all' }}>{mcpHttpOrigin(draft.url)}</code>（数据与工具调用将发往这个地址；URL 直连，不经 shell/cmd，没有本机进程）
+              {bad && <div data-testid="mcp-http-url-bad">{MCP_HTTP_URL_REJECT_MESSAGE}</div>}
+            </div>
+          )
+        }
         const p = toLaunchPlan(draft.command)
         if (!p) return <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>填一条启动命令，下面会实时显示实际会执行的 argv。</div>
         const unsafe = comspecUnsafe(p)
@@ -1003,6 +1086,15 @@ function DataSection() {
   const info = useSettings((s) => s.appInfo)
   const [editId, setEditId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
+  // 损坏备份：主进程 readJson 解析失败时会把坏文件改名 *.corrupt-<时间戳> 保留；这里列出并支持一键恢复
+  const [corrupt, setCorrupt] = useState<Array<{ corruptPath: string; originalPath: string; ts: number }>>([])
+  const [corruptLoaded, setCorruptLoaded] = useState(false)
+  const loadCorrupt = () => {
+    void bridge.data.corruptList().then((list) => {
+      setCorrupt(list)
+      setCorruptLoaded(true)
+    })
+  }
   return (
     <div>
       <div className="set-group">
@@ -1012,6 +1104,39 @@ function DataSection() {
             <Icon name="folder" size={13} /> 打开数据目录
           </Button>
         </Row>
+        <Row
+          label="损坏备份恢复"
+          desc="配置/会话/任务/日志解析失败时，坏文件会改名为 *.corrupt-<时间戳> 保留在这里；恢复会用备份覆盖现有的同名原文件（不校验现有文件），恢复后需重启应用才重新读取"
+        >
+          <Button variant="secondary" style={{ height: 28 }} onClick={loadCorrupt}>检查损坏备份</Button>
+        </Row>
+        {corruptLoaded && corrupt.length === 0 && (
+          <div className="desc" style={{ padding: '2px 0 8px' }}>没有待处理的损坏备份。</div>
+        )}
+        {corrupt.map((c) => (
+          <div key={c.corruptPath} className="mem-row">
+            <span className="txt word-break">
+              {c.originalPath}
+              <span style={{ color: 'var(--text-3)' }}>（备份于 {c.ts > 0 ? fmtTime(c.ts) : '未知时间'}）</span>
+            </span>
+            <span className="acts">
+              <Button
+                variant="secondary"
+                style={{ height: 24, padding: '0 8px' }}
+                onClick={async () => {
+                  // 覆盖式恢复不可逆（现有原文件被备份顶掉），走一次确认；确认后主进程不再追问
+                  if (!window.confirm(`用备份恢复\n${c.originalPath}？\n\n将覆盖现有文件（恢复后需重启应用生效）。确定继续？`)) return
+                  const r = await bridge.data.corruptRestore(c.corruptPath).catch(() => null)
+                  if (!r) { useUi.getState().toast('恢复失败：主进程无响应', 'error'); return }
+                  useUi.getState().toast(r.message, r.ok ? 'ok' : 'error')
+                  if (r.ok) loadCorrupt()
+                }}
+              >
+                恢复
+              </Button>
+            </span>
+          </div>
+        ))}
         <Row label="配置导入 / 导出" desc="含 Agent、角色配置与偏好；API Key 不导出，导入后需重新填写">
           <Button variant="secondary" style={{ height: 28 }} onClick={() => void settings.exportConfig()}>导出</Button>
           <Button variant="secondary" style={{ height: 28 }} onClick={() => void settings.importConfig()}>导入</Button>
@@ -1254,7 +1379,8 @@ function AboutSection() {
         </Button>
       </Row>
       <div className="desc" style={{ lineHeight: 1.7 }}>
-        更新方式：手动下载——应用只检查并提示新版本，不自动下载或安装；启动时亦会静默检查（3 天一次，失败不打扰）。
+        更新方式：发现新版本会在界面顶部显示提示横幅，可在应用内下载便携更新包（下载后校验 SHA-256）——
+        应用只下载与校验，绝不自动安装或替换程序，安装请自行解压替换；启动时亦会静默检查（3 天一次，失败不打扰）。
         {info && <span style={{ color: 'var(--text-3)' }}>（生成于 {fmtTime(Date.now())}）</span>}
       </div>
     </div>

@@ -8,9 +8,16 @@
  * （write_file / replace_in_file / delete_file / move 与 AgentHub 自己的文本落盘）。
  * run_command 与 CLI Agent 自己写的文件不在这条链上，回滚不了——界面必须这么说，
  * 不能给一个"一键回滚"的假安全感。
+ *
+ * 检查点 2.0 补上那半边：工作目录在 git 仓库里时，start() 额外用 git 把当前工作区
+ * 拍成一棵 tree 对象（不动用户的 index、不产生提交）；rollback(id, 'git') 按这棵
+ * tree 做仓库级还原——命令与 CLI 写的文件同样被还原/清掉。git 快照失败时 COW 检查点
+ * 照常工作，只是"更彻底"的那个按钮不出现。
  */
 import { promises as fs, existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve as resolvePath, relative as relOf, isAbsolute } from 'node:path'
 import type { FileChange, CheckpointManifest } from '../shared/types'
 
@@ -100,6 +107,81 @@ function safeId(id: string): boolean {
   return /^[A-Za-z0-9._-]{1,64}$/.test(id) && !/^\.+$/.test(id)
 }
 
+// ---------- git 仓库级快照（检查点 2.0） ----------
+
+/**
+ * git 快照字段。shared/types.ts 的 CheckpointManifest 本批不动（类型由后续批次收口），
+ * 这里用局部交叉类型扩它：运行时直接挂在 manifest 对象上随 JSON 一起落盘。
+ */
+export interface CheckpointGitSnapshot {
+  /** 仓库根（回滚的半径是整个仓库，不只是检查点的工作目录） */
+  top: string
+  /** 快照时工作区的 tree 对象（git write-tree 的产物，不产生提交） */
+  tree: string
+  /** 快照时的 HEAD；空仓库等拿不到时如实记 null */
+  head: string | null
+  at: number
+}
+type ManifestWithGit = CheckpointManifest & { git?: CheckpointGitSnapshot }
+
+const GIT_TIMEOUT_MS = 15000
+const GIT_SNAPSHOT_PROBE_MS = 5000
+
+/** 跑一条 git 命令（不经 shell，参数数组直传；失败抛错由调用方决定要不要降级） */
+function gitRun(top: string, args: string[], env?: NodeJS.ProcessEnv, timeout = GIT_TIMEOUT_MS): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd: top, timeout, windowsHide: true, maxBuffer: 64 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout) =>
+      err ? reject(err) : resolve(String(stdout))
+    )
+  })
+}
+
+/** 用 GIT_INDEX_FILE 指到临时 index，把当前工作区拍成 tree——完全不碰用户自己的暂存区 */
+async function worktreeTree(top: string, env: NodeJS.ProcessEnv): Promise<string> {
+  await gitRun(top, ['add', '-A', '--'], env)
+  const tree = (await gitRun(top, ['write-tree'], env)).trim()
+  if (!tree) throw new Error('git write-tree 返回空')
+  return tree
+}
+
+/**
+ * start() 建完 manifest 后给 git 仓库拍快照。
+ * `git add -A` 走临时 index 会尊重 .gitignore：ignored 文件不进快照，回滚也不会碰它们。
+ * 任何一步失败都不记 git 字段（界面自然不出现 git 回滚按钮），只留一行日志，
+ * 绝不影响 COW 检查点本身——2.0 是增强，不是前置条件。
+ */
+async function captureGitSnapshot(m: ManifestWithGit): Promise<void> {
+  try {
+    const top = (await gitRun(m.dir, ['rev-parse', '--show-toplevel'], undefined, GIT_SNAPSHOT_PROBE_MS)).trim()
+    if (!top) return
+    // 临时 index 放在检查点 files 目录里：prune 清副本时顺手一起清掉，不留垃圾
+    const env = { ...process.env, GIT_INDEX_FILE: join(baseDir, m.id, 'files', '.git-index') }
+    const tree = await worktreeTree(top, env)
+    let head: string | null = null
+    try {
+      head = (await gitRun(top, ['rev-parse', 'HEAD'])).trim() || null
+    } catch {
+      head = null // 空仓库没有 HEAD：如实记 null，不影响快照与回滚
+    }
+    m.git = { top, tree, head, at: Date.now() }
+  } catch (e) {
+    console.warn(`[checkpoint] git 快照未记录（git 回滚按钮不会出现，COW 检查点不受影响）：${(e as Error).message}`)
+  }
+}
+
+/** ls-tree -r -z：相对路径 + blob sha（-z 免去路径引号转义，路径里带空格也稳） */
+async function lsTree(top: string, tree: string): Promise<{ path: string; sha: string }[]> {
+  const out = await gitRun(top, ['ls-tree', '-r', '-z', tree])
+  return out
+    .split('\0')
+    .filter(Boolean)
+    .map((line) => {
+      const tab = line.indexOf('\t')
+      const meta = line.slice(0, tab).split(' ')
+      return { sha: meta[2] ?? '', path: line.slice(tab + 1) }
+    })
+}
+
 function readManifest(id: string): CheckpointManifest | null {
   if (!baseDir || !safeId(id)) return null
   try {
@@ -134,7 +216,8 @@ function writeManifest(m: CheckpointManifest) {
 export async function start(id: string, dir: string): Promise<CheckpointManifest | null> {
   if (!baseDir || !safeId(id)) return null
   const cur = readManifest(id)
-  // 已有清单（返工/续跑）就复用：基线必须停在任务开始前那一刻，不能被新一轮覆盖
+  // 已有清单（返工/续跑）就复用：基线必须停在任务开始前那一刻，不能被新一轮覆盖。
+  // git 快照同理不重拍——恢复点始终是第一次开工前，续跑不该把"开始前"往后挪。
   if (cur) return cur.baseline ? cur : captureBaseline(cur)
   const m: CheckpointManifest = { id, dir: resolvePath(dir || '.'), createdAt: Date.now(), backed: [], entries: [] }
   try {
@@ -142,8 +225,10 @@ export async function start(id: string, dir: string): Promise<CheckpointManifest
   } catch {
     return null
   }
+  // git 快照在 COW 清单首次落盘前拍：失败只写一行日志，COW 检查点照常建
+  await captureGitSnapshot(m as ManifestWithGit)
   writeManifest(m)
-  return captureBaseline(m)
+  return captureBaseline(m as ManifestWithGit)
 }
 
 /** 该路径是否已经存过原始副本（决定"这是不是它在本检查点里的第一次改动"） */
@@ -232,13 +317,18 @@ export interface RollbackResult {
 }
 
 /**
- * 回滚到本检查点开始前的状态：
- * ① 有原件副本的按路径还原（覆盖/删除过的都靠它复原）；
- * ② move 的把目标挪回来源；
- * ③ 新建的文件删掉（它在本检查点之前不存在）。
- * 只动检查点清单里记过的路径，不做任何"顺手清理"。
+ * 回滚到本检查点开始前的状态。
+ * mode 缺省 'tool'：只走 COW 清单，行为与检查点 1.0 完全一致；
+ * mode 'git'：按 start() 拍下的 git tree 做仓库级还原（含命令与 CLI 写盘），
+ * 与 COW 互相独立——git 模式不改 COW 清单，两种模式可各自调用。
  */
-export async function rollback(id: string): Promise<RollbackResult> {
+export async function rollback(id: string, mode: 'tool' | 'git' = 'tool'): Promise<RollbackResult> {
+  if (mode === 'git') return rollbackGit(id)
+  return rollbackTool(id)
+}
+
+/** COW 回滚：只动检查点清单里记过的路径，不做任何"顺手清理"。 */
+async function rollbackTool(id: string): Promise<RollbackResult> {
   const m = readManifest(id)
   const empty: RollbackResult = { ok: false, restored: 0, removed: 0, moved: 0, failed: [] }
   if (!m) return { ...empty, message: '找不到这个检查点（可能已清理，或当时未启用）' }
@@ -303,6 +393,75 @@ export async function rollback(id: string): Promise<RollbackResult> {
     message: ok
       ? `已还原 ${restored} 个文件、撤回 ${moved} 次移动、删除 ${removed} 个新建文件`
       : `部分失败：${failed.map((f) => `${f.rel}（${f.message}）`).join('；')}`
+  }
+}
+
+/**
+ * git 回滚（mode='git'）：把仓库工作区恢复到 start() 拍下的那棵 tree。
+ * 覆盖面是"全部已跟踪文件"——run_command 与 CLI Agent 写的文件只要落在仓库里、
+ * 未被 ignore，就在还原与清理的半径内（这正是它比 COW 回滚彻底的原因）。
+ * 不改 COW 清单；不走任何 git 写历史的操作（无 commit/stash/branch）。
+ */
+async function rollbackGit(id: string): Promise<RollbackResult> {
+  const m = readManifest(id) as ManifestWithGit | null
+  const empty: RollbackResult = { ok: false, restored: 0, removed: 0, moved: 0, failed: [] }
+  if (!m) return { ...empty, message: '找不到这个检查点（可能已清理，或当时未启用）' }
+  if (!m.git) return { ...empty, message: '这个检查点没有 git 快照（目录不是 git 仓库或快照失败）' }
+  const { top, tree } = m.git
+  try {
+    // a. 拍"当前"工作区 tree：同一套临时 index 手法，index 文件放系统 tmp（带 id 与时间戳，防并发互踩）
+    const env = { ...process.env, GIT_INDEX_FILE: join(tmpdir(), `ahub-git-index-${m.id}-${Date.now()}`) }
+    const curTree = await worktreeTree(top, env)
+    // b. 两份相对路径清单（git 输出一律 / 分隔）
+    const snapList = await lsTree(top, tree)
+    const curList = await lsTree(top, curTree)
+    // c. 差集：extra = 当前有而快照没有（快照后新建）；missing = 快照有而当前没有（快照后被删）
+    const snapSet = new Set(snapList.map((e) => e.path))
+    const curSet = new Set(curList.map((e) => e.path))
+    const extra = curList.filter((e) => !snapSet.has(e.path))
+    const missing = snapList.filter((e) => !curSet.has(e.path))
+    // d. 内容恢复：restore 只认"快照 tree 里存在"的路径——被改的还原、被删的（missing 在
+    //    source tree 里）一并重建；index 一并被重置到快照。这是设计行为，不是事故，
+    //    界面确认弹窗里逐条写明。快照之后才诞生的文件不归它管，落到 extra 由下一步删。
+    await gitRun(top, ['restore', `--source=${tree}`, '--worktree', '--staged', '--', '.'])
+    const failed: RollbackResult['failed'] = []
+    // restored 口径：内容与快照不同的已跟踪文件 + 被重建的 missing（按 blob sha 数出来，不拍脑袋）
+    const curSha = new Map(curList.map((e) => [e.path, e.sha]))
+    const restored =
+      snapList.filter((e) => curSha.get(e.path) !== e.sha).length + missing.length
+    // e. 删除快照后新建的文件。不走回收站：extra 文件不在任何 git 对象里，直接删就真没了——
+    //    删除前先把原件 copy 进检查点 files 目录留档（命名沿用 backupPath 风格），"删除"仍可人工找回。
+    let removed = 0
+    for (const { path: rel } of extra) {
+      const abs = resolvePath(top, rel)
+      // f. 路径安全闸：逃逸出仓库根的路径一律拒绝并计入 failed（正常 ls-tree 不会给出这种路径，闸是兜底）
+      if (relativeOf(top, abs) === null) {
+        failed.push({ rel, message: '路径逃出仓库根，拒绝删除' })
+        continue
+      }
+      try {
+        const archive = backupPath(m.id, `git-extra/${rel}`)
+        await fs.mkdir(dirname(archive), { recursive: true })
+        await fs.copyFile(abs, archive)
+        await fs.rm(abs, { force: true })
+        removed++
+      } catch (err) {
+        failed.push({ rel, message: (err as Error).message })
+      }
+    }
+    const ok = failed.length === 0
+    return {
+      ok,
+      restored,
+      removed,
+      moved: 0,
+      failed,
+      message: ok
+        ? `已按 git 快照还原全部已跟踪文件、删除 ${removed} 个快照后新建的文件（原件留档在检查点目录）、暂存区已重置`
+        : `部分失败：${failed.map((f) => `${f.rel}（${f.message}）`).join('；')}`
+    }
+  } catch (e) {
+    return { ...empty, message: `git 回滚失败：${(e as Error).message}` }
   }
 }
 

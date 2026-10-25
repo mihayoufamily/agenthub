@@ -1,6 +1,6 @@
-import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
+﻿import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { join, isAbsolute } from 'node:path'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, stat, readdir } from 'node:fs/promises'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
@@ -11,13 +11,13 @@ import { configurePriceOverrides, partitionPriceOverrides } from '../shared/over
 import { partitionHookRules, sanitizeHookList } from '../shared/hooks'
 import { sanitizeMcpList, partitionMcpServers } from '../shared/mcp-list'
 import { normalizePolicy, VERIFY_SWITCH } from '../shared/compat'
-import { execTool, type CommandApprover } from './tools'
+import { execTool, sandboxPath, type CommandApprover } from './tools'
 import * as approvals from './approvals'
 import * as mcp from './mcp'
 import * as checkpoints from './checkpoints'
 import { readConventions } from './conventions'
 import { buildRepoMap } from './repomap'
-import { checkUpdate } from './updater'
+import { checkUpdate, downloadPortable, isDownloading, updatesDir } from './updater'
 import * as ledger from './ledger'
 import { setBusy } from './lifecycle'
 import type { LedgerEntry } from './ledger'
@@ -148,6 +148,29 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   // ---------- 更新检查与开机自启 ----------
   ipcMain.handle('update:check', (_e, manual: boolean) => checkUpdate(manual === true))
+
+  /**
+   * 下载便携更新包：只下载与校验哈希，绝不执行/替换（承诺写进了 UI 文案）。
+   * 下载是长任务，invoke 立即返回 {ok}；进度与完成/失败经 update:event 推送，渲染层订阅。
+   */
+  ipcMain.handle('update:download', () => {
+    const win = getWin()
+    if (!win) return { ok: false, message: '窗口不可用' }
+    // 重复调用在入口就拒（inFlight 闸门在 updater 模块内，防两个流写同一个文件）
+    if (isDownloading()) return { ok: false, message: '已有下载在进行中，请等待完成' }
+    void downloadPortable((p) => win.webContents.send('update:event', p))
+      .then((r) => win.webContents.send('update:event', r))
+      .catch((e) => win.webContents.send('update:event', { type: 'error', message: (e as Error)?.message ?? String(e) }))
+    return { ok: true }
+  })
+
+  ipcMain.handle('update:openDownloadDir', async () => {
+    // 打开下载目录前确保它存在：目录从未下载过时 openPath 会对不存在的路径报错
+    const dir = updatesDir()
+    try { mkdirSync(dir, { recursive: true }) } catch { /* 建不出就按原样 open，让 shell 报真实错误 */ }
+    const err = await shell.openPath(dir)
+    return err ? { ok: false, message: err } : { ok: true }
+  })
 
   ipcMain.handle('autostart:get', () => app.getLoginItemSettings().openAtLogin)
 
@@ -340,6 +363,14 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     })
   }
 
+  // ---------- 损坏备份（*.corrupt-<ts>）的发现与恢复 ----------
+  ipcMain.handle('data:corruptList', () => getStore().listCorruptBackups())
+  ipcMain.handle('data:corruptRestore', (_e, corruptPath: unknown) => {
+    // 这里只挡"非空字符串"这一层入口形状；路径形态/目录白名单闸门都在 store.restoreCorruptBackup
+    if (typeof corruptPath !== 'string' || !corruptPath.trim()) return { ok: false, message: 'corruptPath 必须是非空字符串' }
+    return getStore().restoreCorruptBackup(corruptPath)
+  })
+
   // ---------- 凭据 ----------
   ipcMain.handle('credential:save', (_e, keyId: string, secret: string) => {
     getStore().saveCredential(keyId, secret)
@@ -476,11 +507,9 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
               // bin+args（command 可能为空，旧写法会弹出空白）；旧格式显示原命令并标注已停用。
               // argv 用 JSON 数组形态显示（与设置页「实际执行」预览同一种口径，修复波 A · 项 6）：
               // 人工授权闸口正是必须显示 argv 边界的地方，裸空格 join 会让含空格的参数看起来像两个 token。
-              command: s.launch?.bin
-                ? JSON.stringify([s.launch.bin, ...(Array.isArray(s.launch.args) ? s.launch.args : [])])
-                : `${(s.command ?? '').trim()}${s.legacyInvalid ? '（已停用，v0.4.0 不再用旧单命令启动）' : ''}`,
+              command: mcp.trustCommand(s),
               dir: grant?.dir ?? '',
-              reason: `首次连接 MCP server「${s.name}」：它的工具会以这条命令的权限在本机执行`,
+              reason: s.transport === 'http' ? `首次连接远程 MCP server「${s.name}」：工具调用与数据将发往它所在的远程服务（不是本机进程）` : `首次连接 MCP server「${s.name}」：它的工具会以这条命令的权限在本机执行`,
               uncovered: [],
               kind: 'mcp',
               mcpServerId: s.id,
@@ -672,8 +701,11 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     const m = checkpoints.manifestOf(String(id ?? ''))
     return { manifest: m, summary: checkpoints.summarize(m), delta: await checkpoints.deltaOf(String(id ?? '')) }
   })
-  ipcMain.handle('checkpoint:rollback', async (_e, id: string) => {
-    return checkpoints.rollback(String(id ?? ''))
+  ipcMain.handle('checkpoint:rollback', async (_e, id: string, mode?: string) => {
+    // mode 原样透传（'tool' 缺省 / 'git' 由另一批次在 checkpoints.ts 扩展）：当前的单参签名先
+    // 用 as 兜住第二个实参（JS 运行时多传不报错，TS 层面也不红），合入后这里无需再改
+    const rb = checkpoints.rollback as (id: string, mode?: 'tool' | 'git') => ReturnType<typeof checkpoints.rollback>
+    return rb(String(id ?? ''), mode === 'git' ? 'git' : 'tool')
   })
   ipcMain.handle('checkpoint:prune', async (_e, id: string) => {
     await checkpoints.prune(String(id ?? ''))
@@ -719,6 +751,81 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
 
   /** 工作目录的 repo map（大项目里让模型先看到地图，而不是靠 grep 摸黑） */
   ipcMain.handle('repomap:get', async (_e, dir?: string) => buildRepoMap(typeof dir === 'string' ? dir : undefined))
+
+  // ---------- Agent 工作目录只读通道（@ 文件引用用；渲染层只发 agentId + 相对路径） ----------
+  /** 单次列目录上限：超出截断并说明。@引用是给人翻文件用的，不是目录索引服务 */
+  const FS_LIST_MAX = 500
+  /** 单次读取上限（字节）：与附件按钮的文本上限同量级，更大的文件请走附件流程 */
+  const FS_READ_MAX = 64 * 1024
+
+  /** 从存储配置解析 Agent 的工作根：类型不同的 Agent 给如实的拒绝理由，不猜 */
+  function resolveAgentRoot(agentId: unknown): { ok: true; dir: string } | { ok: false; message: string } {
+    if (typeof agentId !== 'string' || !agentId.trim()) return { ok: false, message: 'agentId 必须是非空字符串' }
+    const a = getStore().getConfig().agents.find((x) => x.id === agentId)
+    if (!a) return { ok: false, message: `未找到 Agent：${agentId}` }
+    // CLI Agent 的工作目录由它自己的进程管理，AgentHub 不在它头上架文件通道
+    if (a.cliConfig) return { ok: false, message: 'CLI Agent 的工作目录由它自己的进程管理，@引用暂不支持，请用附件按钮' }
+    if (a.isDemo) return { ok: false, message: '演示 Agent 没有真实工作目录，@引用不可用，请用附件按钮' }
+    const dir = a.tools?.dir?.trim()
+    if (!dir) return { ok: false, message: '该 Agent 未配置文件工具目录（在 Agent 设置开启文件工具并选择目录后，@引用可用）' }
+    return { ok: true, dir }
+  }
+
+  /** 共同的路径安全闸：rel 必须相对、必须留在该 Agent 的工作根内（词法前缀 + 最近存在祖先 realpath，与工具层 sandboxPath 同一套实现） */
+  function guardRel(agentId: unknown, rel: unknown): { ok: true; abs: string } | { ok: false; message: string } {
+    if (typeof rel !== 'string') return { ok: false, message: 'rel 必须是字符串' }
+    // 绝对路径一律拒收：这是"工作目录内的相对引用"通道，不是任意路径读取器
+    if (rel.length > 0 && isAbsolute(rel)) return { ok: false, message: 'rel 必须是相对路径' }
+    const root = resolveAgentRoot(agentId)
+    if (!root.ok) return root
+    // 空串按根目录（列目录用）；sandboxPath 会做 ../ 逃逸与 symlink 逃逸两道校验
+    const abs = sandboxPath({ dir: root.dir, access: 'sandbox' }, rel === '' ? '.' : rel)
+    if (!abs) return { ok: false, message: '路径越出该 Agent 的工作目录，已拒绝' }
+    return { ok: true, abs }
+  }
+
+  ipcMain.handle('fs:listDir', async (_e, agentId: unknown, rel: unknown) => {
+    const g = guardRel(agentId, rel)
+    if (!g.ok) return g
+    try {
+      const st = await stat(g.abs)
+      if (!st.isDirectory()) return { ok: false, message: '该路径不是目录' }
+      const dirents = await readdir(g.abs, { withFileTypes: true })
+      // 目录在前、名称排序后再截断：截掉的总是"排最后的文件"，不是随机丢
+      const sorted = [...dirents].sort((a, b) =>
+        a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1
+      )
+      const truncated = sorted.length > FS_LIST_MAX
+      const list = truncated ? sorted.slice(0, FS_LIST_MAX) : sorted
+      const entries: { name: string; isDir: boolean; size: number }[] = []
+      for (const d of list) {
+        let size = 0
+        try {
+          size = (await stat(join(g.abs, d.name))).size
+        } catch { /* stat 失败（权限/竞态删除）按 0 报，条目本身照常列出 */ }
+        entries.push({ name: d.name, isDir: d.isDirectory(), size })
+      }
+      return { ok: true, entries, ...(truncated ? { message: `条目超过 ${FS_LIST_MAX}，已按目录优先、名称排序截断` } : {}) }
+    } catch (e) {
+      return { ok: false, message: (e as Error).message }
+    }
+  })
+
+  ipcMain.handle('fs:readTextFile', async (_e, agentId: unknown, rel: unknown) => {
+    const g = guardRel(agentId, rel)
+    if (!g.ok) return g
+    try {
+      const st = await stat(g.abs)
+      if (st.isDirectory()) return { ok: false, message: '该路径是目录，请选择文件' }
+      if (st.size > FS_READ_MAX) {
+        return { ok: false, message: `文件超过 ${Math.round(FS_READ_MAX / 1024)}KB 读取上限，请改用附件按钮发送` }
+      }
+      const content = await readFile(g.abs, 'utf8')
+      return { ok: true, content }
+    } catch (e) {
+      return { ok: false, message: (e as Error).message }
+    }
+  })
 
   /** 产物目录的文件清单（核对"验收项↔文件"用，不能只信角色说的话）。传 dir 时列那个目录（任务自己的产物目录），否则列当前配置的 */
   ipcMain.handle('artifact:ls', async (_e, dir?: string) => {

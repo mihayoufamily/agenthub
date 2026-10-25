@@ -656,14 +656,18 @@ export interface HookRun {
 
 /**
  * MCP server 配置（tools-only：只用它提供的工具，不接它的 prompts/resources）。
- * 第一版只支持 stdio：本机拉起一条命令，按换行分隔的 JSON-RPC 通信。
- * 远程 HTTP/SSE 刻意不做——那要多一套鉴权与网络风险。
+ * 传输两种：stdio（缺省，本机拉起一条命令，按换行分隔的 JSON-RPC 通信）与
+ * http（远程 Streamable HTTP 网关，POST JSON-RPC，响应可能是 JSON 或 SSE 流）。
  * 信任标记不在这里：它存在主进程的 approvals.json，渲染层改不动，
  * 免得配置通道变成"自我授权"。
  */
 export interface McpServer {
   id: string
   name: string
+  /** 传输方式；缺省视为 stdio——旧记录没这个字段，零迁移照常走本机进程 */
+  transport?: 'stdio' | 'http'
+  /** transport 为 http 时的服务地址（必须是 http(s) 绝对 URL）；stdio 记录不使用这个字段 */
+  url?: string
   /** 旧版整条启动命令（shell 语法）。v0.4.0 起仅作只读原文与失效判定依据，不再用于启动 */
   command: string
   /** v0.4.0 起的启动方式：可执行文件 + 参数数组，spawn 时不经 shell 解释 */
@@ -676,8 +680,10 @@ export interface McpServer {
   env?: Record<string, string>
   /** 缺省视为启用 */
   enabled?: boolean
-  /** initialize / tools/list / tools/call 的超时（毫秒，默认 15 秒） */
+  /** initialize / tools/list / tools/call 的超时（毫秒，默认 15 秒；仅 stdio 路径读取，http 路径三段各有定死口径） */
   timeoutMs?: number
+  /** transport 为 http 但 url 缺失/非法：已停用，等用户重填（判定口径见 shared/mcp-list.stampMcpLegacy） */
+  httpInvalid?: boolean
   createdAt?: number
 }
 
@@ -688,6 +694,8 @@ export interface McpProbe {
   tools?: { name: string; description?: string }[]
   serverTitle?: string
   serverVersion?: string
+  /** http server 的"实际连接对象"（等价于 stdio 的命令行）：设置页按这个口径展示数据去向 */
+  display?: string
 }
 
 /**

@@ -1,4 +1,4 @@
-// 命令审批真机验证：没批准就绝不该跑起来，批准之后才跑，危险形态点了"始终允许"也不写白名单。
+﻿// 命令审批真机验证：没批准就绝不该跑起来，批准之后才跑，危险形态点了"始终允许"也不写白名单。
 // 用法：node verify/approval-shot.mjs [--port=9236]
 // 走 tools:exec 这条入口（同一套审批闸门），不碰用户的 Agent 配置与白名单。
 // 启动带 --ahub-verify：config:importJson（整份导入通道）只在主进程 argv 有这个验证开关时才注册
@@ -126,7 +126,7 @@ try {
   await new Promise((r) => mockLlm.listen(0, '127.0.0.1', r))
   llmBase = `http://127.0.0.1:${mockLlm.address().port}/v1`
   dir = mkdtempSync(join(tmpdir(), 'ahub-approval-'))
-  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
+  proc = spawn(argv.exe ? String(argv.exe) : 'D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
   const page = await waitHttp(PORT, 30000)
   const cdp = new CdpClient(page.webSocketDebuggerUrl)
   cdpRef = cdp
@@ -506,7 +506,7 @@ try {
   // 这条就是"用户正常双击永远不会看到假徽章"的真机证据（[12] 是两个条件都齐的正向）。
   try { proc.kill() } catch { /* noop */ }
   requireAppGone('第一个实例（主实例）')
-  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 1}`], { stdio: 'ignore', env: { ...launchEnv(), AGENTHUB_FORCE_SANDBOX_CRASH: '1' } })
+  proc = spawn(argv.exe ? String(argv.exe) : 'D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 1}`], { stdio: 'ignore', env: { ...launchEnv(), AGENTHUB_FORCE_SANDBOX_CRASH: '1' } })
   const page2 = await waitHttp(PORT + 1, 40000)
   const cdp2 = new CdpClient(page2.webSocketDebuggerUrl)
   await cdp2.connect()
@@ -529,7 +529,7 @@ try {
   console.log('\n[12] 兼容模式徽章：门控降级后顶栏出现，且设置里可改策略')
   try { proc.kill() } catch { /* noop */ }
   requireAppGone('第二个实例（不带 --ahub-verify 的那个）')
-  proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 2}`, '--ahub-verify'], {
+  proc = spawn(argv.exe ? String(argv.exe) : 'D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT + 2}`, '--ahub-verify'], {
     stdio: 'ignore',
     env: { ...launchEnv(), AGENTHUB_FORCE_SANDBOX_CRASH: '1' }
   })

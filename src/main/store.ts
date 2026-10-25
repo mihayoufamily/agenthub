@@ -1,7 +1,7 @@
 import { app, safeStorage } from 'electron'
 import { migrateV0toV1, migrateV1toV2, migrateV2toV3, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
-import { join } from 'node:path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync, renameSync } from 'node:fs'
+import { join, dirname, basename } from 'node:path'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync, renameSync, copyFileSync, readdirSync } from 'node:fs'
 import type { AppConfig, AgentSession, WorkflowRun, MemoryEntry, Prefs, Skill } from '../shared/types'
 
 /** 迁移链要处理的原始配置形状：可能有未知键，也可能缺字段，一切以"保留"为先 */
@@ -29,9 +29,12 @@ interface StoreDirs {
 
 export class Store {
   dirs: StoreDirs
+  /** userData 根目录：损坏备份扫描要覆盖根与三个子目录，构造时记下来免得各处再取 */
+  rootDir: string
 
   constructor() {
     const base = app.getPath('userData')
+    this.rootDir = base
     const sessionsDir = join(base, 'sessions')
     const runsDir = join(base, 'runs')
     const logsDir = join(base, 'logs')
@@ -78,6 +81,64 @@ export class Store {
       try { if (statSync(p).size > 2 * 1024 * 1024) writeFileSync(p, '') } catch { /* 文件还不存在 */ }
       writeFileSync(p, `[${new Date().toISOString()}] ${String(line).slice(0, 2000)}\n`, { flag: 'a' })
     } catch { /* 日志失败不阻塞 */ }
+  }
+
+  // ---------- 损坏备份（readJson 解析失败时留下的 *.corrupt-<ts>）的发现与恢复 ----------
+  /** 扫描范围：userData 根 + sessions/ runs/ logs/——readJson 落盘的所有 JSON 都在这四处 */
+  private corruptScanDirs(): string[] {
+    return [this.rootDir, this.dirs.sessions, this.dirs.runs, this.dirs.logs]
+  }
+
+  listCorruptBackups(): { corruptPath: string; originalPath: string; ts: number }[] {
+    const out: { corruptPath: string; originalPath: string; ts: number }[] = []
+    for (const dir of this.corruptScanDirs()) {
+      let files: string[] = []
+      try {
+        files = readdirSync(dir) as string[]
+      } catch { /* 目录不在了不算错：那里本来就没有备份 */ }
+      for (const f of files) {
+        // 贪婪匹配取最后一个 .corrupt-：正常文件名里再出现 ".corrupt-" 也按最后一段后缀算（与本写入端一致）
+        const m = /^(.+)\.corrupt-(.*)$/.exec(f)
+        if (!m) continue
+        const ts = Number(m[2])
+        out.push({ corruptPath: join(dir, f), originalPath: join(dir, m[1]), ts: Number.isFinite(ts) ? ts : 0 })
+      }
+    }
+    // 按时间戳排序（解析不出按 0 排在最前）：顺序稳定，界面不必再排一遍
+    return out.sort((a, b) => a.ts - b.ts)
+  }
+
+  restoreCorruptBackup(corruptPath: string): { ok: boolean; message: string } {
+    // 安全闸 ①：路径非空且真实存在
+    if (typeof corruptPath !== 'string' || !corruptPath.trim()) return { ok: false, message: '备份路径为空' }
+    if (!existsSync(corruptPath)) return { ok: false, message: `备份文件不存在：${corruptPath}` }
+    // 安全闸 ②：必须匹配 *.corrupt-<ts> 形态（basename 上判，目录部分交给下一道闸）
+    const name = basename(corruptPath)
+    const m = /^(.+)\.corrupt-[^\\/]*$/.exec(name)
+    if (!m) return { ok: false, message: '不是损坏备份文件（应为 *.corrupt-<时间戳> 形态）' }
+    const dir = dirname(corruptPath)
+    const originalPath = join(dir, m[1])
+    // 安全闸 ③：推导出的原路径必须与备份同目录（join(dir, …) 天然满足，这里显式复核，
+    // 防未来有人改了推导逻辑引入目录跳转）；再加一道白名单：只允许动 userData 根与三个数据子目录，
+    // 否则"任意 *.corrupt-* 文件覆盖任意同目录文件"会放大成对 userData 之外路径的覆盖写。
+    if (dirname(originalPath) !== dir || !this.corruptScanDirs().includes(dir)) {
+      return { ok: false, message: '备份路径不在本应用数据目录内，已拒绝恢复' }
+    }
+    // 恢复 = 用备份覆盖现有的原文件。覆盖前**不**校验现有文件是否可读——用户在界面上已确认要恢复，
+    // 而它此刻大概率也是读不出来的坏文件，这正是恢复的意义；再多问一道只会把确认流程变成摆设。
+    try {
+      copyFileSync(corruptPath, originalPath)
+    } catch (e) {
+      return { ok: false, message: `恢复失败：${(e as Error).message}` }
+    }
+    // 改名 *.restored-<ts> 防止重复列出；挪不动（文件被占用等）也不回滚恢复本身，只如实说明
+    try {
+      renameSync(corruptPath, `${corruptPath}.restored-${Date.now()}`)
+    } catch {
+      return { ok: true, message: `已恢复到 ${originalPath}（备份标记改名失败，列表里可能仍会显示这条）` }
+    }
+    // 注意：恢复的是磁盘上的文件，内存里/启动时读走的还是旧内容——要重启应用才会重新读取
+    return { ok: true, message: `已恢复到 ${originalPath}，重启应用后生效` }
   }
 
   // ---------- 配置（带版本迁移） ----------

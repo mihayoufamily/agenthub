@@ -7,7 +7,7 @@ import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
 import { configurePriceOverrides } from '../shared/overrides'
 import { navDecision } from '../shared/winnav'
-import { decideFallback, forcedCompatCrashEnabled, normalizePolicy, gpuStageAction, compatHintPending, SANDBOX_CRASH_THRESHOLD, FORCE_SANDBOX_CRASH_ENV, COMPAT_HINT_ENV, COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_GPU, COMPAT_FAIL_MESSAGE_SANDBOX } from '../shared/compat'
+import { decideFallback, forcedCompatCrashEnabled, normalizePolicy, gpuStageAction, compatHintPending, SANDBOX_CRASH_THRESHOLD, FORCE_SANDBOX_CRASH_ENV, COMPAT_HINT_ENV, COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_GPU, COMPAT_FAIL_MESSAGE_SANDBOX, VERIFY_SWITCH } from '../shared/compat'
 import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
 import * as ledger from './ledger'
 
@@ -17,6 +17,14 @@ interface WindowState { x?: number; y?: number; width: number; height: number; m
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
 let mainWindow: BrowserWindow | null = null
 let store: Store | null = null
+
+/**
+ * 验证态开关：argv 带 --ahub-verify（或 --shots 截图序列——它自己就是靠渲染层的 __ahub_debug
+ * 驱动的）时，把 ahub-verify=1 折进页面 URL，渲染层据此安装调试钩子（App.tsx 的 isVerifyRuntime）。
+ * 与 ipc.ts 里 config:importJson 的注册闸门同一个先例：不用 app.isPackaged 当闸门——被测的
+ * 部署构建本来就是 packaged，isPackaged 区分不了"发布版"和"验证跑"。
+ */
+const isVerifyLaunch = process.argv.includes(VERIFY_SWITCH) || process.argv.some((a) => a.startsWith('--shots='))
 
 // 降级事实记录：徽章按"实际关了什么"显示，不按"配置里写了什么"——
 // 用户要能分辨"我这台机器现在正跑在兼容模式"和"配置允许它降级"
@@ -507,10 +515,13 @@ function createWindow() {
   // 加载失败的可重试错误页已并入上面那一个 did-fail-load 监听器（原来这里是第二个，重复且只改得到一半）
 
   if (devServerUrl) {
-    win.loadURL(devServerUrl)
+    // 验证态在 URL 上追加查询串（渲染层据此安装 __ahub_debug，见 App.tsx 的 isVerifyRuntime）
+    win.loadURL(devServerUrl + (devServerUrl.includes('?') ? '&ahub-verify=1' : '?ahub-verify=1'))
   } else {
     // out/main/index.js -> ../../dist/renderer/index.html（与上面的 navOwnRendererRoot 同一个量推出来，避免漂移）
-    win.loadFile(join(navOwnRendererRoot, 'index.html'))
+    // 验证态用 loadFile 的 options.search 追加查询串：electron.d.ts 的 LoadFileOptions.search 会被
+    // url.format() 原样拼在 pathname 后（前导 ? 要自己带，实测 file:///…index.html?ahub-verify=1）。
+    win.loadFile(join(navOwnRendererRoot, 'index.html'), isVerifyLaunch ? { search: '?ahub-verify=1' } : undefined)
   }
   return win
 }

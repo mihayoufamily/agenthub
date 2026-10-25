@@ -61,18 +61,17 @@ function isOwnPage(
     return false
   }
   const target = toSegments(decoded)
-  // ownRootPath 传了就以它为准，且**只**以它为准：折不出根段（空串）、或根本不是字符串
-  // （脏调用方递进来一个数字/对象/数组）都一律不放行——fail-closed。非字符串这一路刻意**不抛异常**：
-  // 本函数是在 Electron 的 setWindowOpenHandler / will-navigate / will-redirect 回调里同步调用的，
+  // 锚点（ownRootPath）缺失就一律不放行——fail-closed。生产三个调用点（src/main/index.ts 的新窗口 /
+  // will-navigate / will-redirect）都带着由 __dirname 推出的真实 renderer 根（fixes-check 还有
+  // "每个调用点都传真锚"的源码不变量钉着），所以无锚只可能来自测试或异常路径。
+  // 原先那条"无锚退回 resources/app/dist/renderer marker 结尾匹配"的弱回退已删除：它是实测漏点——
+  // `file:////evil.example\share\resources\app\dist\renderer\…` 这类远程共享串的 marker 就摆在
+  // pathname 里，marker 认不出来照样放行。与其无锚时猜，不如全拦：宁可错拦一个测试，不放行一个远端。
+  // 非字符串/空串同样走这里收口，且这一路刻意**不抛异常**：本函数是在 Electron 的
+  // setWindowOpenHandler / will-navigate / will-redirect 回调里同步调用的，
   // 抛出会从导航回调里逸出（与"崩了也要把人救活"的取向相反），而放行是更坏的那一头，所以返回 block。
-  // 两种情况都不悄悄退回下面那条宽松的 marker 回退。
-  if (ownRootPath !== undefined && ownRootPath !== null) {
-    if (typeof ownRootPath !== 'string') return false
-    return isInside(target, toSegments(ownRootPath))
-  }
-  // 弱回退（ownRootPath 缺失：单元测试、老调用点）：退回 marker 结尾匹配。
-  // 已知弱点：<任意根>/resources/app/dist/renderer/ 下的文件会被放行——生产调用点必须传真实根。
-  return /(^|\/)resources\/app\/dist\/renderer\/[^/]/i.test('/' + target.join('/'))
+  if (typeof ownRootPath !== 'string' || ownRootPath === '') return false
+  return isInside(target, toSegments(ownRootPath))
 }
 
 export function navDecision(

@@ -108,8 +108,9 @@ function htmlToText(html: string): string {
     .trim()
 }
 
-/** 判定主机是否非公网（环回/内网/链路本地/组播/保留）——SSRF 拦截 */
-function isNonPublicHost(hostname: string): boolean {
+/** 判定主机是否非公网（环回/内网/链路本地/组播/保留）——SSRF 拦截。
+ *  导出仅为验证面：fixes-check 在逻辑层逐条断言这组判定（不经真联网），运行时无别的消费者。 */
+export function isNonPublicHost(hostname: string): boolean {
   const h = hostname.replace(/^\[|\]$/g, '').toLowerCase()
   if (!h) return true
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true
@@ -127,8 +128,14 @@ function isNonPublicHost(hostname: string): boolean {
 
 /**
  * 校验外链 URL：仅 http/https，且主机不得指向本机/内网（SSRF）。
- * 域名会做一次 DNS 解析复核，拦掉 localtest.me 这类"公网名字指向 127.0.0.1"的把戏。
- * 残留限制（如实记录）：解析与真实请求之间存在重新解析窗口，DNS rebinding 无法在本层彻底消除。
+ * 域名会做一次 DNS 解析复核（all: true 拿到**全部**地址），拦掉 localtest.me 这类
+ * "公网名字指向 127.0.0.1"的把戏；任一地址命中内网即拒——解析结果里混一条内网地址、
+ * 或解析在多条地址间轮询的 rebinding 都进不了请求侧。
+ * 残留窗口（如实记录，不是"已修复"）：请求本体走 electron net（Chromium 网络栈，取不到
+ * node https.Agent 那样的自定义 lookup/agent，"把校验过的 IP 钉进连接层"在现机制上落不了地），
+ * 所以校验通过之后、Chromium 连接层自己再解析一次之前，仍存在一次重新解析的机会——
+ * 一个解析期间只在**第二跳**给出内网地址的恶意权威 DNS 仍可能把连接带进内网。本层能做的
+ * （全地址校验 + 跳转后按最终地址复核 + 响应体不外传）都已就位，窗口只剩这一条窄缝。
  */
 async function safeWebUrl(raw: unknown): Promise<string | null> {
   if (typeof raw !== 'string' || !raw.trim()) return null
@@ -372,8 +379,10 @@ export function toolDefs(allowCommands: boolean, allowWeb: boolean, planMode?: b
 }
 
 /** 沙箱校验：路径规范化后必须仍在沙箱根内（防 ../ 逃逸与绝对路径注入）；返回原始大小写路径。
- *  access='full'（完全访问）时跳过目录限制：路径仍规范化（防相对歧义），但允许全盘。 */
-function sandboxPath(grant: ToolGrant, rel: unknown): string | null {
+ *  access='full'（完全访问）时跳过目录限制：路径仍规范化（防相对歧义），但允许全盘。
+ *  导出给 ipc.ts 的 fs:listDir / fs:readTextFile 复用（@文件引用的只读通道与工具层同一套
+ *  词法前缀 + 最近存在祖先 realpath 闸门，不复制第二份实现）。 */
+export function sandboxPath(grant: ToolGrant, rel: unknown): string | null {
   if (typeof rel !== 'string' || rel.length === 0) return null
   const abs = resolvePath(grant.dir || '.', rel)
   if (grant.access === 'full') return abs

@@ -16,18 +16,40 @@ function isWellFormed(s: unknown): s is McpServer {
 }
 
 /**
+ * http(s) 绝对地址判定：用 URL 解析验证（相对串、缺协议、拼错的 host 都会在这里被拒）。
+ * 闸门与使用点（mcp.ts 的 HttpMcpClient）各调一次：mcp:probe 与对话路径传来的对象
+ * 不过 sanitize 闸门，使用点必须自己兜底——判定只有这一份，别处不许再抄。
+ */
+export function validHttpUrl(u: unknown): u is string {
+  if (typeof u !== 'string' || !u.trim()) return false
+  try {
+    const parsed = new URL(u.trim())
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/**
  * 与加载期迁移（migrateV1toV2）同一口径的现场判定 + 渲染层安全补形：
- * ① launch 只要存在就必须是"能用"的形状——args 缺失/不是数组规范成 []，launch 本体是脏值
+ * ① http 记录只看 url：缺失/非法标 httpInvalid 并停用（与旧单命令的 legacyInvalid 同一处理风格——
+ *   标失效、绝不删除），launch/command 字段对 http 记录不参与判定（本来就不被使用）。
+ * ② launch 只要存在就必须是"能用"的形状——args 缺失/不是数组规范成 []，launch 本体是脏值
  *   （手改出来的字符串/数组）按缺失处理。渲染层直接解引用 `s.launch.args.join(' ')`
  *   （SettingsPage 列表行），bin 填了而 args 没了的记录原样放行会在设置页当场炸 TypeError；
  *   主进程对同一个输入在使用点各自兜了底（mcp.ts planSpawn、ipc.ts 信任弹窗标签），
  *   本模块自称渲染层唯一闸门，补形就得在这里做，组件里才真的"不再各自挡"。
- * ② 只有 command、launch.bin 为空的记录标失效并停用（与加载期迁移同一口径）；
+ * ③ 只有 command、launch.bin 为空的 stdio 记录标失效并停用（与加载期迁移同一口径）；
  *   迁移链只在 schemaVersion<2 时跑一遍，之后经 mcp:set 或手改进配置的旧格式记录要靠这里
  *   补同一面横幅；main 侧 planSpawn 本来就拒收，不靠这个标记把关。
  * 幂等：补形/打标跑两遍与一遍逐字节相同（不重排键，界面"配置已还原"的 JSON 对比才稳）。
  */
 export function stampMcpLegacy(s: McpServer): McpServer {
+  if (s.transport === 'http') {
+    if (validHttpUrl(s.url)) return s.httpInvalid ? { ...s, httpInvalid: false } : s
+    if (s.httpInvalid === true && s.enabled === false) return s
+    return { ...s, httpInvalid: true, enabled: false }
+  }
   const bin = typeof s.launch?.bin === 'string' ? s.launch?.bin.trim() : ''
   let out = s
   const l = out.launch as unknown
@@ -55,20 +77,31 @@ export function sanitizeMcpList(list: unknown): McpServer[] {
 export const MCP_SERVERS_MAX = 20
 
 /**
- * 形状不合格（名称为空，且 command 与 launch.bin 都为空）时的拒收原因。
+ * 形状不合格（名称为空，或该传输方式下没有任何"能启动的凭据"）时的拒收原因。
  * 与设置页「添加并探测」按钮上既有的那句是**同一份**（SettingsPage 直接引这个常量），
  * 免得"表单里说 A、保存时说 B"。
  */
 export const MCP_SHAPE_REJECT_MESSAGE = '名称与启动命令都要填'
 
-/** 形状合格 = 有名称，且 command 与 launch.bin 至少填了一个（与旧 handler 的 filter 同一口径） */
-function isShapedEntry(raw: unknown): raw is McpServer {
-  if (!raw || typeof raw !== 'object') return false
+/**
+ * http 记录的拒收原因：名称有了但 url 缺失/非法。与 MCP_SHAPE_REJECT_MESSAGE 同一份骨架——
+ * 设置页的 http 预检也引这条，两边说同一句话。
+ */
+export const MCP_HTTP_URL_REJECT_MESSAGE = 'HTTP 方式的 server 要填合法的 http(s) 地址（以 http:// 或 https:// 开头的完整 URL）'
+
+/**
+ * 形状合格 = 有名称，且按传输方式各有一个"能启动的凭据"：
+ * http 记录取决于合法 url（launch/command 忽略），stdio（或缺省）取决于 command 与 launch.bin 至少一个。
+ * 返回 null = 合格；否则返回拒收原因（比旧版布尔多带一句话，rejected 里才能点名）。
+ */
+function shapeRejectReason(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object') return MCP_SHAPE_REJECT_MESSAGE
   const s = raw as Partial<McpServer>
-  if (typeof s.name !== 'string' || !s.name.trim()) return false
+  if (typeof s.name !== 'string' || !s.name.trim()) return MCP_SHAPE_REJECT_MESSAGE
+  if (s.transport === 'http') return validHttpUrl(s.url) ? null : MCP_HTTP_URL_REJECT_MESSAGE
   const hasCommand = typeof s.command === 'string' && !!s.command.trim()
   const hasBin = typeof s.launch?.bin === 'string' && !!s.launch.bin.trim()
-  return hasCommand || hasBin
+  return hasCommand || hasBin ? null : MCP_SHAPE_REJECT_MESSAGE
 }
 
 /**
@@ -83,7 +116,8 @@ function isShapedEntry(raw: unknown): raw is McpServer {
  * 形状不合格的记录本来就不会回到渲染层，把它们留在配置里只会造成"存了但界面看不见、
  * 下一次整表 save 又把它覆盖掉"，比明确拒收更坏；hooks:list 是原样返回整表的，
  * 所以那一侧保留被拒条目（不删用户数据，见 shared/hooks.partitionHookRules）。
- * 这里的形状不合格＝名称空且两个命令位都空，是"一行空表单"，不含用户数据。
+ * 这里的形状不合格＝名称空，或该传输方式下没有任何"能启动的凭据"
+ * （stdio：command 与 launch.bin 都空；http：url 缺失/非法），是"一行空表单"或填不出的记录。
  * 补形与旧格式打标沿用同一个 stampMcpLegacy，缺 id 的合法记录由这里补一个
  * （原来这半句写在 handler 的 .map 里，搬进闸门后不能丢）。
  */
@@ -94,11 +128,19 @@ export function partitionMcpServers(list: unknown): { kept: McpServer[]; rejecte
   for (let i = 0; i < incoming.length; i++) {
     const raw = incoming[i]
     const id = String((raw && typeof raw === 'object' ? (raw as { id?: unknown }).id : undefined) ?? `#${i + 1}`)
-    if (!isShapedEntry(raw)) {
-      rejected.push({ id, message: MCP_SHAPE_REJECT_MESSAGE })
+    const reason = shapeRejectReason(raw)
+    if (reason) {
+      rejected.push({ id, message: reason })
       continue
     }
-    kept.push(stampMcpLegacy({ ...raw, id: raw.id || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` }))
+    // 走到这里 raw 已是形状合格的对象（shapeRejectReason 过滤掉了非对象、保证了 name 非空字符串），
+    // 补 id 的老规矩不变
+    kept.push(
+      stampMcpLegacy({
+        ...(raw as Partial<McpServer>),
+        id: String((raw as { id?: unknown }).id ?? '') || `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+      } as McpServer)
+    )
   }
   return { kept, rejected }
 }

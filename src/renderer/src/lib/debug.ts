@@ -9,6 +9,22 @@ import { useApprovals } from '../stores/approvals'
 import { bridge } from '../lib/ipc'
 import type { AgentConfig, McpServer } from '@shared/types'
 
+/**
+ * 渲染层验证态判定：主进程在 argv 带 --ahub-verify（与 ipc.ts 里 config:importJson 的注册闸门
+ * 同一个先例；--shots 截图序列也按验证态算）时，生产 loadFile 与开发 loadURL 两条加载路径都会
+ * 在页面 URL 上追加 ahub-verify=1，这里读的就是那个参数。为什么不用 app.isPackaged 当闸门：
+ * 被测的部署构建本来就是 packaged，isPackaged 分不出"发布版"和"验证跑"；渲染进程也拿不到主进程
+ * argv，URL 是唯一顺手的通道。installDebugHooks 的安装点（App.tsx）靠它收口——
+ * 41 个钩子能直接驱动界面与 store，不该出现在发布版窗口里。
+ */
+export function isVerifyRuntime(): boolean {
+  try {
+    return new URLSearchParams(location.search).has('ahub-verify')
+  } catch {
+    return false
+  }
+}
+
 export function installDebugHooks() {
   const w = window as unknown as Record<string, unknown>
   /**

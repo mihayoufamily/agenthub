@@ -8,6 +8,19 @@ import type {
   RejectedEntry
 } from '../shared/types'
 
+/** 更新下载事件（main -> renderer，update:event 通道）：进度 / 完成 / 失败 */
+export type UpdateDownloadEvent =
+  | { type: 'progress'; got: number; total: number; pct: number }
+  | { type: 'done'; path: string; sha256: string; verified: boolean; hashNote?: string }
+  | { type: 'error'; message: string }
+
+/** 损坏备份条目（store.listCorruptBackups 的返回形状） */
+export interface CorruptBackupItem {
+  corruptPath: string
+  originalPath: string
+  ts: number
+}
+
 /**
  * 渲染进程唯一桥。所有通道在 main/ipc.ts 中以 allowlist 方式注册。
  * API Key 一经保存即进入系统凭据存储，渲染进程不再回读明文。
@@ -32,13 +45,31 @@ const api = {
     /** 兼容模式事实（只读）：实际关掉了沙箱还是硬件加速 + 当前生效的降级策略。
      *  主进程报的是"这台机器现在跑成什么样"，不是配置里写了什么 */
     compat: () => ipcRenderer.invoke('app:compat') as Promise<CompatState>,
-    relaunch: () => ipcRenderer.invoke('app:relaunch')
+    relaunch: () => ipcRenderer.invoke('app:relaunch'),
+    /** Agent 工作目录只读列举（@文件引用用）：CLI/演示/未配置目录的 Agent 以 ok=false + message 拒绝 */
+    listDir: (agentId: string, rel: string) =>
+      ipcRenderer.invoke('fs:listDir', agentId, rel) as Promise<{
+        ok: boolean; entries?: { name: string; isDir: boolean; size: number }[]; message?: string
+      }>,
+    /** Agent 工作目录只读读文本（@文件引用用）：超 64KB 拒收并提示改用附件按钮 */
+    readTextFile: (agentId: string, rel: string) =>
+      ipcRenderer.invoke('fs:readTextFile', agentId, rel) as Promise<{ ok: boolean; content?: string; message?: string }>
   },
   update: {
-    /** 版本检查（manual=true 不受 3 天节流，用于设置页按钮） */
+    /** 版本检查（manual=true 不受 3 天节流，用于设置页按钮）；asset 为便携包资产信息（确认弹窗显示大小用） */
     check: (manual: boolean) => ipcRenderer.invoke('update:check', manual) as Promise<{
-      current: string; hasUpdate: boolean; latest?: string; releaseUrl?: string; error?: string
-    }>
+      current: string; hasUpdate: boolean; latest?: string; releaseUrl?: string; asset?: { name: string; size: number }; error?: string
+    }>,
+    /** 下载便携更新包（只下载与校验哈希，绝不执行/安装）：立即返回，进度与结果经 onUpdateEvent 推送 */
+    download: () => ipcRenderer.invoke('update:download') as Promise<{ ok: boolean; message?: string }>,
+    /** 打开下载目录（<userData>/updates） */
+    openDownloadDir: () => ipcRenderer.invoke('update:openDownloadDir') as Promise<{ ok: boolean; message?: string }>,
+    /** 订阅更新下载事件（progress / done / error）；返回退订函数 */
+    onUpdateEvent: (cb: (ev: UpdateDownloadEvent) => void) => {
+      const handler = (_e: unknown, data: UpdateDownloadEvent) => cb(data)
+      ipcRenderer.on('update:event', handler)
+      return () => { ipcRenderer.removeListener('update:event', handler) }
+    }
   },
   autostart: {
     get: () => ipcRenderer.invoke('autostart:get') as Promise<boolean>,
@@ -76,6 +107,12 @@ const api = {
     save: (r: WorkflowRun) => ipcRenderer.invoke('run:save', r),
     list: () => ipcRenderer.invoke('run:list') as Promise<WorkflowRun[]>,
     remove: (id: string) => ipcRenderer.invoke('run:remove', id)
+  },
+  /** 损坏备份（*.corrupt-<ts>）的发现与恢复；恢复会覆盖现有原文件，恢复后需重启应用 */
+  data: {
+    corruptList: () => ipcRenderer.invoke('data:corruptList') as Promise<CorruptBackupItem[]>,
+    corruptRestore: (corruptPath: string) =>
+      ipcRenderer.invoke('data:corruptRestore', corruptPath) as Promise<{ ok: boolean; message: string }>
   },
   memory: {
     get: () => ipcRenderer.invoke('memory:get') as Promise<MemoryEntry[]>,
@@ -191,7 +228,9 @@ const api = {
         summary: { total: number; created: number; modified: number; deleted: number; moved: number; unbacked: string[] }
         delta: CheckpointDelta | null
       }>,
-    rollback: (id: string) => ipcRenderer.invoke('checkpoint:rollback', id) as Promise<RollbackResult>,
+    /** mode：'tool'（缺省，工具层备份回滚）| 'git'（另一批次扩展的 git 回滚），主进程原样透传 */
+    rollback: (id: string, mode?: 'tool' | 'git') =>
+      ipcRenderer.invoke('checkpoint:rollback', id, mode) as Promise<RollbackResult>,
     prune: (id: string) => ipcRenderer.invoke('checkpoint:prune', id) as Promise<{ ok: boolean }>
   },
   /** 项目约定自动读取（AGENTS.md / CLAUDE.md 原文，主进程只读不写） */

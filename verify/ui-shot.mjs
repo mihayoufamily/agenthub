@@ -215,7 +215,7 @@ const main = async () => {
       if (swept) console.log(`  清理  起跑前扫掉上一轮遗留的套件任务记录 ${swept} 个`)
     }
 
-    proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
+    proc = spawn(EXE, [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
     const page = await waitHttp(PORT, 30000)
     cdp = new CdpClient(page.webSocketDebuggerUrl)
     await cdp.connect()

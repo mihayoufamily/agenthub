@@ -1,0 +1,54 @@
+# GUI 真机层回归（ui + approval 两套，Windows runner 上真起应用跑 CDP 断言）。
+#
+# 为什么单独一条工作流、且只手动触发：
+# - ci.yml 只跑逻辑层（GUI 层要 Electron 二进制与真窗口，逻辑层那些断言拦不住真机路径的回归——
+#   2026-10-25 引擎并发那批问题就全在真机层才能暴露的位置）；
+# - 真机套件对环境敏感（GPU/沙箱/单实例锁），首次上 runner 让它先以"手动触发 + 可看产物"的
+#   形态积累可信度，跑稳了再考虑挂进 PR 门禁；CLI 层（烧真实额度）继续留在发版前人工跑。
+# - run-all.mjs 不透传 --exe，所以这里直接逐套件调用（与 run-all 的判红规则同源：脚本自己的
+#   退出码 + 「结果：N PASS / M FAIL」计数行）。
+name: gui-verify
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gui:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (typecheck + main + renderer)
+        run: npm run build
+
+      - name: Pack portable
+        run: npm run pack:portable
+
+      - name: UI suite（真机 133+ 断言）
+        run: node verify/ui-shot.mjs --exe=${{ github.workspace }}/release/AgentHub-win-x64/AgentHub.exe --port=9231
+
+      - name: Approval suite（命令审批真机 94+ 断言）
+        run: node verify/approval-shot.mjs --exe=${{ github.workspace }}/release/AgentHub-win-x64/AgentHub.exe --port=9236
+
+      # 注：runner 上若出现渲染进程 0xC0000005（GPU/沙箱被环境拦），给下面两个 run 临时加
+      # env: AGENTHUB_NO_SANDBOX: '1' 再看——那是 runner 环境边界，不是产品回归；本机验证时
+      # 不要设它，兼容徽章的几何断言依赖"没降级"这个前提。
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-verify-logs
+          path: |
+            verify-logs/
+            verify/shots/
+          if-no-files-found: ignore
+          retention-days: 14

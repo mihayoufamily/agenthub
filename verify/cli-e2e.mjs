@@ -132,7 +132,7 @@ async function waitJs(cdp, expr, timeoutMs = 20000) {
 
 const main = async () => {
   if (!existsSync(EXE)) { console.error('未找到便携版：' + EXE); process.exit(2) }
-  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
+  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
   let cdp
   try {
     const page = await waitHttp(PORT, 25000)

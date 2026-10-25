@@ -25,6 +25,12 @@ import { redactCommandForDisplay } from '@shared/approvals'
 /** 稳定空数组：避免 selector 每次返回新引用导致多余渲染 */
 const EMPTY_MSGS: ChatMessage[] = []
 
+/** 长会话渐进披露窗口：默认只挂载最后 150 条消息。
+ *  这是渐进披露、不是虚拟滚动——不引第三方虚拟滚动库（本仓渲染层零依赖）：
+ *  超长会话往上点"显示更早"仍会挂载更多节点，但默认路径（贴底看最新）恒定 150 条，
+ *  流式 delta 期间列表挂载成本不再随总条数线性涨；真虚拟滚动等真实需求出现再上。 */
+const RENDER_WINDOW = 150
+
 export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const agents = useAgents((s) => s.agents)
   const selectedId = useAgents((s) => s.selectedId)
@@ -58,6 +64,8 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [nearBottom, setNearBottom] = useState(true)
   const [newCount, setNewCount] = useState(0)
+  // 渐进披露：当前可见的消息条数（只增不减，累计到 messages.length 后按钮消失）
+  const [visibleCount, setVisibleCount] = useState(RENDER_WINDOW)
   const [mgmtOpen, setMgmtOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [dirOpen, setDirOpen] = useState(false)
@@ -93,6 +101,8 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
     scrollToBottom()
     setNearBottom(true)
     setNewCount(0)
+    // 渐进披露窗口跟着重置：切到新会话默认也只看最新 150 条，贴底语义不变
+    setVisibleCount(RENDER_WINDOW)
     // 整个消息列表被换掉，条数差不是"新增"，计数基线要跟着重置
     prevCount.current = messages.length
   }, [selectedId, activeSesId])
@@ -239,7 +249,20 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
       <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="chat-list">
           {messages.length === 0 && <WelcomePanel agent={agent} />}
-          {messages.map((m) => (
+          {/* 渐进披露：只挂载最后 visibleCount 条（消息列表 map 只作用于这个切片）。
+              切片取尾部保证贴底语义不变——新消息仍追加在视口内，滚动跟随逻辑照旧 */}
+          {messages.length > visibleCount && (
+            <button
+              className="jump-bottom"
+              style={{ position: 'static', transform: 'none', left: 'auto', bottom: 'auto', display: 'block', width: 'fit-content', margin: '0 auto 12px' }}
+              onClick={() => setVisibleCount((c) => Math.min(c + RENDER_WINDOW, messages.length))}
+              title="渐进披露：每次多挂载 150 条更早的消息（往上翻会挂载更多节点，非虚拟滚动）"
+            >
+              <Icon name="up" size={13} />
+              显示更早的 {Math.min(RENDER_WINDOW, messages.length - visibleCount)} 条（共 {messages.length} 条）
+            </button>
+          )}
+          {messages.slice(-visibleCount).map((m) => (
             <MessageRow key={m.id} msg={m} agentName={agent.name} agentColor={colorOf(agent.id)} />
           ))}
         </div>
@@ -276,6 +299,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           onSkillButtonRef={skillBtnRef}
           onOpenSkills={() => setSkillOpen((v) => !v)}
           onRemoveSkill={(id) => setPickedSkills((cur) => cur.filter((s) => s.id !== id))}
+          fileRefAgentId={agent.id}
         />
       </div>
     </div>

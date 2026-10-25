@@ -8,7 +8,7 @@ import { HOTKEY_DEFAULTS, type HotkeyAction } from '@shared/types'
 import { matchKeyBinding, validateKeyBinding } from './lib/utils'
 import { bridge } from './lib/ipc'
 import { configurePriceOverrides } from '@shared/overrides'
-import { installDebugHooks } from './lib/debug'
+import { installDebugHooks, isVerifyRuntime } from './lib/debug'
 import { Splash } from './features/Splash'
 import { BrandHome } from './features/BrandHome'
 import { Workbench } from './features/Workbench'
@@ -19,6 +19,7 @@ import { ModeSwitchWarning, requestModeSwitch } from './features/ModeSwitch'
 import { SettingsPage } from './features/SettingsPage'
 import { Toasts } from './components/Toasts'
 import { ApprovalModal } from './components/ApprovalModal'
+import { Modal } from './components/Modal'
 import { watchApprovals } from './stores/approvals'
 import { Button, Spinner } from './components/primitives'
 
@@ -41,15 +42,57 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err
   }
 }
 
-/** 新版本提示横幅（非模态：顶部居中，不阻塞任何操作，可忽略） */
-function UpdateBanner() {
+/** 便携包下载的进行中/完成状态（App 本地 state：只有横幅与确认弹窗消费，不进 ui store） */
+interface DlProgress {
+  got: number
+  total: number
+  pct: number
+}
+interface DlDone {
+  path: string
+  sha256: string
+  verified: boolean
+  hashNote?: string
+}
+
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '未知大小'
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** 新版本提示横幅（非模态：顶部居中，不阻塞任何操作，可忽略）。
+ *  下载状态由 App 订阅 update:event 维护，这里只按事实渲染三种形态：空闲 / 下载中 / 已完成 */
+function UpdateBanner({ dl, dlDone, onAskDownload, onDismiss }: { dl: DlProgress | null; dlDone: DlDone | null; onAskDownload: () => void; onDismiss: () => void }) {
   const b = useUi((s) => s.updateBanner)
   if (!b) return null
   return (
     <div className="update-banner">
-      <span className="ub-text">发现新版本 {b.version}</span>
-      <button className="ub-btn" onClick={() => void bridge.app.openExternal(b.url)}>前往下载</button>
-      <button className="ub-dismiss" aria-label="忽略更新提示" title="忽略" onClick={() => useUi.getState().setUpdateBanner(null)}>✕</button>
+      {dl ? (
+        <>
+          <span className="ub-text">
+            正在下载便携包 {fmtBytes(dl.got)} / {dl.total > 0 ? fmtBytes(dl.total) : '未知大小'}（只下载校验，不自动安装）
+          </span>
+          <div style={{ width: 120, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.25)', overflow: 'hidden' }}>
+            <div style={{ width: `${Math.max(2, dl.pct)}%`, height: '100%', background: '#7ad48a' }} />
+          </div>
+        </>
+      ) : dlDone ? (
+        <>
+          <span className="ub-text" title={dlDone.sha256}>
+            便携包已下载 · SHA-256 {dlDone.verified ? '与发布说明一致' : dlDone.hashNote ? '发布说明里没找到哈希，仅显示计算值' : '与发布说明不一致，请勿使用'}
+            {' '}（{dlDone.sha256.slice(0, 12)}…）
+          </span>
+          <button className="ub-btn" onClick={() => void bridge.update.openDownloadDir()}>打开所在文件夹</button>
+        </>
+      ) : (
+        <>
+          <span className="ub-text">发现新版本 {b.version}</span>
+          <button className="ub-btn" onClick={() => void bridge.app.openExternal(b.url)}>前往下载</button>
+          <button className="ub-btn" onClick={onAskDownload}>下载便携包</button>
+        </>
+      )}
+      <button className="ub-dismiss" aria-label="忽略更新提示" title="忽略" onClick={onDismiss}>✕</button>
     </div>
   )
 }
@@ -57,8 +100,54 @@ function UpdateBanner() {
 export function App() {
   const screen = useUi((s) => s.screen)
   const run = useWorkflow((s) => s.run)
+  const appInfo = useSettings((s) => s.appInfo)
   const [ready, setReady] = useState(false)
   const [fatal, setFatal] = useState<string | null>(null)
+  // 便携包下载：确认弹窗 / 进度 / 完成结果（横幅按这三种状态渲染，事件来自主进程 update:event）
+  const [askDl, setAskDl] = useState(false)
+  const [dlAsset, setDlAsset] = useState<{ name: string; size: number } | null>(null)
+  const [dl, setDl] = useState<DlProgress | null>(null)
+  const [dlDone, setDlDone] = useState<DlDone | null>(null)
+
+  // 更新下载事件订阅：挂载时订阅、卸载时清理（onUpdateEvent 返回退订函数）
+  useEffect(() => {
+    return bridge.update.onUpdateEvent((ev) => {
+      if (ev.type === 'progress') {
+        setDl({ got: ev.got, total: ev.total, pct: ev.pct })
+        return
+      }
+      if (ev.type === 'done') {
+        setDl(null)
+        setDlDone(ev)
+        return
+      }
+      setDl(null)
+      useUi.getState().toast(`更新包下载失败：${ev.message}`, 'error')
+    })
+  }, [])
+
+  const askDownload = () => {
+    // 确认弹窗要显示文件大小：先现取一次发布信息（大小可能随发布更新，不能信上次横幅里的旧值）；
+    // 取不到也照常弹，如实显示"未知大小"，真正下载时主进程还会再取一次
+    setDlAsset(null)
+    setAskDl(true)
+    bridge.update.check(true).then((r) => {
+      if (r.asset) setDlAsset(r.asset)
+    }).catch(() => { /* 弹窗已按未知大小显示，不为此打断用户 */ })
+  }
+
+  const startDownload = () => {
+    setAskDl(false)
+    setDlDone(null)
+    setDl({ got: 0, total: dlAsset?.size ?? 0, pct: 0 })
+    void bridge.update.download().then((r) => {
+      // 被拒（已有下载在跑等）：把乐观置上的进度态撤掉，如实提示
+      if (!r.ok) {
+        setDl(null)
+        useUi.getState().toast(r.message ?? '下载未能开始', 'error')
+      }
+    })
+  }
 
   // 全局快捷键（键位可在设置改）：切模式 / 开设置 / 停任务 / 新建工作流
   useEffect(() => {
@@ -113,7 +202,11 @@ export function App() {
   useEffect(() => watchApprovals(), [])
 
   useEffect(() => {
-    installDebugHooks()
+    // __ahub_debug（验证钩子）只在验证态安装：主进程把 --ahub-verify 折进页面 URL 的 ahub-verify=1
+    // （生产 loadFile 与开发 loadURL 两条路径一致，见 index.ts 的 isVerifyLaunch），渲染层读这个
+    // 参数而不是 app.isPackaged——被测的部署构建本来就是 packaged，isPackaged 区分不了发布版与
+    // 验证跑。发布版用户拿不到这组钩子：它们能直接驱动界面与 store，不该留在生产窗口里。
+    if (isVerifyRuntime()) installDebugHooks()
     void (async () => {
       try {
         await useSettings.getState().init()
@@ -173,8 +266,10 @@ export function App() {
           }
         }
         setReady(true)
-        // 更新检查：启动后静默检查（3 天节流，失败不打扰）；发现新版本显示顶部横幅
+        // 更新检查：启动后静默检查（3 天节流，失败不打扰）；发现新版本显示顶部横幅。
+        // 顺手记下便携包资产信息（确认弹窗的大小显示有初值，点击下载时还会再取一次）
         bridge.update.check(false).then((r) => {
+          if (r.asset) setDlAsset(r.asset)
           if (r.hasUpdate && r.latest && r.releaseUrl) {
             useUi.getState().setUpdateBanner({ version: r.latest, url: r.releaseUrl })
           }
@@ -216,7 +311,40 @@ export function App() {
       {screen === 'brand' && <BrandHome />}
       {screen === 'workbench' && <Workbench />}
       {screen === 'workflow' && <Shell>{run ? <TaskView /> : <WorkflowHome />}</Shell>}
-      <UpdateBanner />
+      <UpdateBanner
+        dl={dl}
+        dlDone={dlDone}
+        onAskDownload={askDownload}
+        onDismiss={() => {
+          // 关横幅时连同下载状态一起清：否则下次横幅再出现会闪回上一轮的"已下载"结论
+          useUi.getState().setUpdateBanner(null)
+          setDl(null)
+          setDlDone(null)
+        }}
+      />
+      <Modal
+        open={askDl}
+        onClose={() => setAskDl(false)}
+        title="下载便携更新包"
+        width={430}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setAskDl(false)}>取消</Button>
+            <Button variant="primary" onClick={startDownload}>开始下载</Button>
+          </>
+        }
+      >
+        <div style={{ fontSize: 12.5, lineHeight: 1.8, color: 'var(--text)' }}>
+          <div>文件：{dlAsset?.name ?? 'AgentHub 便携包（win-x64 .zip）'}</div>
+          <div>大小：{dlAsset ? fmtBytes(dlAsset.size) : '未知（未取到发布信息）'}</div>
+          <div className="word-break">
+            保存位置：{appInfo?.userDataPath ? `${appInfo.userDataPath}\\updates` : '应用数据目录下的 updates 文件夹'}
+          </div>
+          <div style={{ marginTop: 6, color: 'var(--text-2)' }}>
+            只下载到本地并校验 SHA-256，不会自动安装或替换程序——安装请自行解压替换。
+          </div>
+        </div>
+      </Modal>
       <SettingsPage />
       <ModeSwitchWarning />
       <ApprovalModal />

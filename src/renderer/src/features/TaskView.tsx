@@ -11,6 +11,7 @@ import { OutputDirChip } from '../components/OutputDir'
 import { CheckpointBar } from '../components/CheckpointBar'
 import { bridge } from '../lib/ipc'
 import { matchFileRef } from '@shared/acceptance'
+import { hasExitCard, planAuditOf, type PlanCliDelta } from '@shared/engine-transitions'
 import { pickUnregistered, unregisteredNote } from '@shared/delivery-dir'
 import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls, safeName } from '../lib/utils'
@@ -206,9 +207,11 @@ export function TaskView() {
         </div>
       </div>
 
-      {/* 终态（已停止/失败/返工上限/中断/超时/Token 上限/预算上限）不展示补充输入——补充要求只在执行中有效，
-          终态保留输入会让用户误以为还能推进任务；出口统一由上方各终态操作卡提供 */}
-      {!['cancelled', 'failed', 'rework_limit', 'interrupted', 'timeout', 'token_limit', 'budget_limit'].includes(run.status) && (
+      {/* 终态与中断不展示补充输入——补充要求只在执行中有效，终态保留输入会让用户误以为
+          还能推进任务；出口统一由上方各终态操作卡提供。
+          "哪些状态算有出口卡"的口径在 shared/engine-transitions（hasExitCard，七个终态），
+          与引擎的终态列表同源；interrupted 不是出口（它是"从中断处继续"的续跑态），单独排除 */}
+      {(hasExitCard(run.status) || run.status === 'interrupted') ? null : (
         <div className="wb-composer-wrap">
           <div style={{ width: 'min(860px, 100%)' }}>
             <TaskComposer />
@@ -456,6 +459,68 @@ function ReviewGateCard({ run }: { run: WorkflowRun }) {
  * CLI 执行、AgentHub 拦不到——所以这里绝不出现"一定没改文件"。
  * 正文可选中复制；点「存为产物」之前它不落盘（计划正文自己不该成为交付物）。
  */
+/**
+ * 计划态期间 CLI 角色写盘的路径差集（planCliDelta 由引擎在计划门挂出时算好存进 run）。
+ * 只显示、只复制，不做自动恢复——git 级/任务级回滚是另一批工作，这里绝不能有
+ * "一键收回"的按钮假装能收回 AgentHub 根本拦不住的改动。
+ */
+function PlanCliDeltaCard({ run }: { run: WorkflowRun }) {
+  const delta = planAuditOf(run).planCliDelta
+  const copy = async (d: PlanCliDelta) => {
+    const lines = [
+      `计划轮期间产物目录的路径变化（新增 ${d.added.length} 条 / 消失 ${d.removed.length} 条）`,
+      '',
+      '[新增]',
+      ...d.added.map((p) => `- ${p}`),
+      '',
+      '[消失]',
+      ...d.removed.map((p) => `- ${p}`),
+      ...(d.truncated ? ['', '（清单触到上限被截断，以上不是全部）'] : [])
+    ]
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'))
+      useUi.getState().toast('路径变化清单已复制到剪贴板', 'ok')
+    } catch (e) {
+      useUi.getState().toast(`复制失败：${e instanceof Error ? e.message : '剪贴板不可用'}`, 'warn')
+    }
+  }
+  if (!delta) return null
+  return (
+    <div className="gate-plan-note" data-plan-cli-delta="1" style={{ border: '1px solid rgba(128,128,128,.25)', borderRadius: 8, padding: '8px 10px', marginTop: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <b style={{ flex: 1, fontSize: 12.5 }}>
+          计划轮期间产物目录的路径变化（CLI 角色的写盘 AgentHub 拦不住，这里如实列出）
+        </b>
+        <button className="link-btn" data-plan-cli-delta-copy="1" onClick={() => void copy(delta)}>复制</button>
+      </div>
+      <div style={{ display: 'flex', gap: 16, marginTop: 6, fontSize: 12.5, lineHeight: 1.6 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: 'var(--ok)' }}>新增 {delta.added.length}{delta.truncated ? '（截断）' : ''}</div>
+          <div style={{ maxHeight: 160, overflowY: 'auto', wordBreak: 'break-all' }}>
+            {delta.added.map((p, i) => <div key={i} title={p}>{p}</div>)}
+            {delta.added.length === 0 && <div style={{ color: 'var(--text-3)' }}>（无）</div>}
+          </div>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: 'var(--warn)' }}>消失 {delta.removed.length}{delta.truncated ? '（截断）' : ''}</div>
+          <div style={{ maxHeight: 160, overflowY: 'auto', wordBreak: 'break-all' }}>
+            {delta.removed.map((p) => <div key={p} title={p}>{p}</div>)}
+            {delta.removed.length === 0 && <div style={{ color: 'var(--text-3)' }}>（无）</div>}
+          </div>
+        </div>
+      </div>
+      {delta.added.length === 0 && delta.removed.length === 0 && (
+        <div style={{ color: 'var(--text-3)', marginTop: 4, fontSize: 12 }}>
+          两条清单都是空的：这只说明产物目录里没看到路径变化，不等于 CLI 角色没改过任何文件（原地改内容这里看不出来）。
+        </div>
+      )}
+      <div style={{ color: 'var(--text-3)', marginTop: 6, fontSize: 12 }}>
+        需要收回这些改动请手动处理或使用任务级回滚；AgentHub 不在这里自动执行恢复。
+      </div>
+    </div>
+  )
+}
+
 function PlanGateCard({ run }: { run: WorkflowRun }) {
   const confirmGate = useWorkflow((s) => s.confirmGate)
   const [savedPath, setSavedPath] = useState<string | null>(null)
@@ -507,6 +572,9 @@ function PlanGateCard({ run }: { run: WorkflowRun }) {
           return `计划轮结束后，${where} 里的对照结果：${changes.slice(0, 8).join('；')}${changes.length > 8 ? `；另有 ${changes.length - 8} 条` : ''}。CLI 角色的写盘与命令由它自己的 CLI 执行，AgentHub 拦不到，只能事后列给你看。`
         })()}
       </div>
+      {/* 计划态期间的路径差集（新增/消失两列 + 复制）。计划批准后这个门卡整体不再渲染，
+          这块自然消失；老记录没有 planCliDelta 字段，也不渲染（不迁移、不猜） */}
+      <PlanCliDeltaCard run={run} />
       <div className="gate-feedback">
         <textarea
           value={feedback}

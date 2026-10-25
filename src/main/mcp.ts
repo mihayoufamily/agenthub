@@ -2,8 +2,9 @@
  * MCP 客户端（tools-only 子集）：把外部 MCP server 的工具并进 AgentHub 现有的工具循环。
  * 只接 tools——不接 prompts/resources，也不让 server 往上下文里塞系统提示。
  *
- * 传输只做 stdio：本机拉起一条命令，按换行分隔的 JSON-RPC 通信。
- * 远程 HTTP/SSE 这一版刻意不做——它要多一套鉴权与网络风险，等 stdio 这条路走顺了再说。
+ * 传输两种：stdio（本机拉起一条命令，按换行分隔的 JSON-RPC 通信）与 http（远程 Streamable HTTP
+ * 网关：每个请求一次 POST，响应可能是 JSON 或 SSE 流，按 Content-Type 分流）。
+ * http 不经 shell、不经 cmd——URL 直连；SSRF 面见 HttpMcpClient 的注释，不在这里假装已解决。
  *
  * 信任模型（用户 2026-10-23 拍定）：首次连接要确认，确认后这一组工具整组放行；
  * 信任标记存在主进程 approvals.json，渲染层改不动，免得配置通道变成"自我授权"。
@@ -11,10 +12,20 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { McpServer, McpProbe } from '../shared/types'
 import { cmdUnsafeReason, needsComspec } from '../shared/argv'
+import { validHttpUrl } from '../shared/mcp-list'
 
 const PROTOCOL_VERSION = '2024-11-05'
 const DEFAULT_TIMEOUT = 15_000
 const MAX_BODY = 512 * 1024
+
+/**
+ * http 路径的三段超时，各段定死（与 stdio 的 timeoutMs 配置不同口径：http 连接/列表/调用
+ * 各有明确上限，不读那条配置）。连接 15s、tools/list 30s；tools/call 是**空闲**超时——
+ * 工具可能跑很久，只罚"停发"，不设总上限（与模型侧空闲超时同口径）。
+ */
+const HTTP_CONNECT_TIMEOUT = 15_000
+const HTTP_LIST_TIMEOUT = 30_000
+const HTTP_CALL_IDLE_TIMEOUT = 120_000
 
 /** 单行缓冲上限（字符）：stdio 是换行分隔的 JSON-RPC，server 持续输出不含换行的数据会让行缓冲无界增长 */
 const MAX_LINE_BUFFER = 1 << 20
@@ -78,6 +89,11 @@ function comspecToken(tok: string): string {
  * ②是用户 2026-10-23 拍定的，③是 Windows 的现实。
  */
 export function planSpawn(server: McpServer): SpawnPlan {
+  // http 记录没有"本机命令行"这回事：调到这里说明调用方分流失效，如实抛错，
+  // 绝不硬编一个 spawn 计划出来（那等于把远程 server 当本机进程起）
+  if (server.transport === 'http') {
+    throw new Error('MCP server 是 HTTP 传输，不经本机进程启动（planSpawn 只负责 stdio）')
+  }
   const bin = (server.launch?.bin ?? '').trim()
   if (!bin) {
     // 没 launch 只有 command：旧格式。v0.4.0 明确不作废式兼容——不自动拆分
@@ -127,19 +143,24 @@ interface RpcMessage {
 /**
  * 一条 stdio 连接。调用方负责 close()；每次模型请求都新建、请求结束即关，
  * 不留跨请求的活进程——挂了更好恢复，也不会出现"上一个任务的 server 还在跑"的隐形状态。
+ * HttpMcpClient 以它为基类借用同一个接口形状（protected 的构造器/request/closed 供子类覆写），
+ * 调用方（ipc.ts / probeServer / mcpToolDefs）因此对两种传输零区别。
  */
 export class McpClient {
-  private seq = 1
+  /** 请求序号（JSON-RPC id）。protected：http 子类共用同一个计数器，避免同名私有字段让两类型不兼容 */
+  protected seq = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   private buf = ''
   /** 丢弃过超长未完结行：一条连接只报一次，避免 server 疯狂输出时刷屏 */
   private droppedLine = false
   private proc?: ChildProcess
-  private closed = false
+  protected closed = false
 
-  private constructor(readonly server: McpServer, private timeoutMs: number) {}
+  protected constructor(readonly server: McpServer, private timeoutMs: number) {}
 
   static async connect(server: McpServer): Promise<{ client: McpClient; info: { title?: string; version?: string } }> {
+    // 分流点：http 记录交给 HttpMcpClient（返回类型是 McpClient 的子类，调用方类型零改动）
+    if (server.transport === 'http') return HttpMcpClient.connect(server)
     const c = new McpClient(server, server.timeoutMs && server.timeoutMs > 0 ? server.timeoutMs : DEFAULT_TIMEOUT)
     c.start()
     const info = await c.initialize()
@@ -202,7 +223,8 @@ export class McpClient {
     else p.resolve(msg.result)
   }
 
-  private request(method: string, params?: unknown): Promise<unknown> {
+  /** stdio 是换行分隔的 JSON-RPC：一次 chunk 可能带多条，也可能切断一条。http 子类覆写为一次 POST */
+  protected request(method: string, params?: unknown): Promise<unknown> {
     const id = this.seq++
     const payload: RpcMessage = { jsonrpc: '2.0', id, method, ...(params !== undefined ? { params } : {}) }
     const stdin = this.proc?.stdin
@@ -241,14 +263,16 @@ export class McpClient {
     return Array.isArray(r?.tools) ? r.tools : []
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<{ ok: boolean; output: string }> {
+  /**
+   * signal 参数只为与 HttpMcpClient 的签名对齐（ipc.ts 的路由对两种传输调同一个形状）：
+   * stdio 的取消口径是整条连接 close()（ipc.ts 的 closeMcp 就这么做的），不做逐调用中止。
+   */
+  async callTool(name: string, args: Record<string, unknown>, _signal?: AbortSignal): Promise<{ ok: boolean; output: string }> {
     const r = (await this.request('tools/call', { name, arguments: args })) as {
       content?: { type?: string; text?: string }[]
       isError?: boolean
     }
-    const parts = (r?.content ?? []).map((c) => (c.type === 'text' ? (c.text ?? '') : `[${c.type ?? '内容'}]`)).filter(Boolean)
-    const output = parts.join('\n') || '（该工具没有返回文本内容）'
-    return { ok: !r?.isError, output: output.slice(0, MAX_BODY) }
+    return toolOutputFrom(r)
   }
 
   /** 子进程是否还在（close 之后应当变 false：验证不泄漏后台 server 进程） */
@@ -276,6 +300,248 @@ export class McpClient {
     }
   }
 }
+
+/** tools/call 的 result → 对外输出（stdio 与 http 两个路径共用同一份解析，别再各抄一份） */
+function toolOutputFrom(r: { content?: { type?: string; text?: string }[]; isError?: boolean }): { ok: boolean; output: string } {
+  const parts = (r?.content ?? []).map((c) => (c.type === 'text' ? (c.text ?? '') : `[${c.type ?? '内容'}]`)).filter(Boolean)
+  const output = parts.join('\n') || '（该工具没有返回文本内容）'
+  return { ok: !r?.isError, output: output.slice(0, MAX_BODY) }
+}
+
+/**
+ * HTTP 传输的 MCP 客户端（Streamable HTTP 风格）：每个带 id 的 JSON-RPC 请求一次 POST，
+ * 响应可能是 JSON 或 SSE 流（按 Content-Type 分流；SSE 按 data: 行解析，行缓冲上限 1MB，
+ * 与 openai.ts 既有做法同一口径）。server 在响应头给 `mcp-session-id` 就保存下来，
+ * 后续请求（含关闭时的 DELETE）都带上。与 McpClient 同一个接口形状，
+ * 调用方（ipc.ts / probeServer / mcpToolDefs）对两种传输零区别。
+ *
+ * SSRF 面（如实注释，不假装解决）：URL 由用户配置并经"首次连接信任确认"，但程序不限制
+ * 目标网段——配置指到内网地址照样会发，这和把命令配成访问内网的工具没有本质区别；
+ * DNS rebinding 的残留风险与 web 工具同口径，后续统一收口。
+ */
+export class HttpMcpClient extends McpClient {
+  private sessionId = ''
+  private controllers = new Set<AbortController>()
+
+  protected constructor(server: McpServer) {
+    // 第二个参数是 stdio 的默认超时，http 路径三段各有定死口径，用不上
+    super(server, 0)
+  }
+
+  static async connect(server: McpServer): Promise<{ client: HttpMcpClient; info: { title?: string; version?: string } }> {
+    // mcp:list/mcp:set 两条路有 shared/mcp-list 的闸门，但 mcp:probe 与对话路径传来的对象
+    // 不过闸门——使用点必须再验一次，判定函数是同一份（validHttpUrl）
+    if (!validHttpUrl(server.url)) {
+      throw new Error(`MCP HTTP server 的地址缺失或不是合法的 http(s) URL（收到：${String(server.url ?? '').slice(0, 120)}）`)
+    }
+    const c = new HttpMcpClient(server)
+    try {
+      const info = await c.initialize()
+      c.notifyInitialized()
+      return { client: c, info }
+    } catch (e) {
+      // 连不上就当场收掉（此时还没有 session，close 只会中止挂起请求，不会发 DELETE）
+      c.close()
+      throw e
+    }
+  }
+
+  /** 公共请求头；有会话就带上（MCP Streamable HTTP 的会话口径） */
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = {
+      'Content-Type': 'application/json',
+      // JSON 与 SSE 都声明接受：用哪种响应由 server 决定，客户端按 Content-Type 分流
+      Accept: 'application/json, text/event-stream'
+    }
+    if (this.sessionId) h['mcp-session-id'] = this.sessionId
+    return h
+  }
+
+  /**
+   * 发一个带 id 的 JSON-RPC 请求并等它的 result。响应 JSON 或 SSE 都收：
+   * SSE 按 data: 行找与本请求 id 匹配的那条最终消息，error/result 的处理与 stdio 同一口径。
+   * 错误如实透出：HTTP 状态 + 截断的响应体、超时/取消分开说清，包装是中文但保留原文。
+   */
+  private async postRpc(payload: RpcMessage, opts: { timeoutMs: number; idle?: boolean; signal?: AbortSignal }): Promise<unknown> {
+    const url = String(this.server.url ?? '').trim()
+    const ctrl = new AbortController()
+    this.controllers.add(ctrl)
+    const onOuterAbort = () => ctrl.abort()
+    if (opts.signal) {
+      if (opts.signal.aborted) onOuterAbort()
+      else opts.signal.addEventListener('abort', onOuterAbort, { once: true })
+    }
+    let timedOut = false
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    const arm = (ms: number) => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => { timedOut = true; ctrl.abort() }, ms)
+    }
+    // 非 idle：总超时，从头到尾就这一个计时器；idle：每收到一段数据就重置（只罚"停发"）
+    arm(opts.timeoutMs)
+    const timeoutText = () =>
+      `${opts.idle ? `工具调用 ${opts.timeoutMs / 1000}s 内没有任何数据到达` : `${payload.method ?? '请求'} 超时`}（${opts.timeoutMs / 1000}s）`
+    try {
+      let res: Response
+      try {
+        res = await fetch(url, { method: 'POST', headers: this.headers(), body: JSON.stringify(payload), signal: ctrl.signal })
+      } catch (e) {
+        if (opts.signal?.aborted) throw new Error('已取消：请求被用户停止')
+        if (timedOut) throw new Error(timeoutText())
+        if (this.closed) throw new Error('连接已关闭')
+        const err = e as Error & { cause?: Error }
+        throw new Error(`无法连接 MCP HTTP server：${err.message}${err.cause?.message ? `（${err.cause.message}）` : ''}`)
+      }
+      if (opts.idle) arm(opts.timeoutMs)
+      // 响应头带了会话就存下来，后续请求都带上
+      const sid = res.headers.get('mcp-session-id')
+      if (sid) this.sessionId = sid
+      try {
+        if (!res.ok || !res.body) {
+          const text = await res.text().catch(() => '')
+          throw new Error(`MCP HTTP ${res.status}：${text.slice(0, 300)}`)
+        }
+        const ct = (res.headers.get('content-type') ?? '').toLowerCase()
+        if (ct.includes('text/event-stream')) {
+          return await this.readSse(res, payload.id, opts.idle ? () => arm(opts.timeoutMs) : undefined)
+        }
+        const text = await res.text()
+        let json: RpcMessage
+        try {
+          json = JSON.parse(text) as RpcMessage
+        } catch {
+          throw new Error(`MCP HTTP 响应不是合法 JSON：${text.slice(0, 120)}`)
+        }
+        if (json.error) throw new Error(json.error.message ?? 'MCP 返回错误')
+        return json.result
+      } catch (e) {
+        if (opts.signal?.aborted) throw new Error('已取消：请求被用户停止')
+        if (timedOut) throw new Error(timeoutText())
+        // close() 也会 abort 内部控制器：没有外部 signal、也没超时，就按"连接已关"如实说（stdio failAll 同一句话）
+        if (this.closed) throw new Error('连接已关闭')
+        throw e
+      }
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer)
+      this.controllers.delete(ctrl)
+    }
+  }
+
+  /** SSE 响应：按 data: 行解析；行缓冲超 1MB 整行丢掉（与 openai.ts / stdio 同一口径），一条连接只报一次 */
+  private async readSse(res: Response, id: number | string | undefined, onData?: () => void): Promise<unknown> {
+    const body = res.body
+    if (!body) throw new Error('MCP HTTP 响应没有可读的正文') // 调用方已挡过一次，这里兜 TS 的 null 判断
+    const reader = body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let droppedLine = false
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      onData?.()
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      if (buffer.length > MAX_LINE_BUFFER) {
+        buffer = ''
+        if (!droppedLine) {
+          droppedLine = true
+          console.log(`[mcp] ${this.server.name} SSE 单行超过 1MB，已丢弃（协议违例或异常输出）`)
+        }
+      }
+      for (const raw of lines) {
+        const line = raw.trim()
+        if (!line.startsWith('data:')) continue
+        let msg: RpcMessage
+        try {
+          msg = JSON.parse(line.slice(5).trim()) as RpcMessage
+        } catch {
+          continue // 非协议行：丢掉，与 stdio 路径的容错一致
+        }
+        if (msg.id !== undefined && id !== undefined && msg.id !== id) continue // 别的请求的响应
+        if (msg.error) throw new Error(msg.error.message ?? 'MCP 返回错误')
+        if ('result' in msg) return msg.result
+      }
+    }
+    throw new Error('MCP SSE 流在返回结果之前就结束了')
+  }
+
+  /** 超时各段定死：initialize 15s、tools/list 30s（不读 stdio 那条 timeoutMs 配置） */
+  protected override request(method: string, params?: unknown): Promise<unknown> {
+    const id = this.seq++
+    const payload: RpcMessage = { jsonrpc: '2.0', id, method, ...(params !== undefined ? { params } : {}) }
+    return this.postRpc(payload, { timeoutMs: method === 'initialize' ? HTTP_CONNECT_TIMEOUT : HTTP_LIST_TIMEOUT })
+  }
+
+  /** 通知不等响应：POST 发出去就算数，失败只记日志，不阻断已拿到 initialize 结果的流程（stdio notify 同一口径） */
+  private notifyInitialized(): void {
+    const url = String(this.server.url ?? '').trim()
+    if (!url) return
+    fetch(url, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }),
+      signal: AbortSignal.timeout(5000)
+    }).catch((e) => console.log(`[mcp] ${this.server.name} notifications/initialized 发送失败（不等响应，不阻断）：${(e as Error).message}`))
+  }
+
+  /** tools/call：空闲超时 120s（工具可能跑很久，不设总上限），SSE 流式或 JSON 响应都收 */
+  override async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: boolean; output: string }> {
+    const id = this.seq++
+    const r = (await this.postRpc(
+      { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } },
+      { timeoutMs: HTTP_CALL_IDLE_TIMEOUT, idle: true, signal }
+    )) as { content?: { type?: string; text?: string }[]; isError?: boolean }
+    return toolOutputFrom(r)
+  }
+
+  /** close 之后为 false：http 没有子进程，"还活着"的口径就是没被 close（验证不泄漏后台资源的断言用） */
+  override get running() {
+    return !this.closed
+  }
+
+  override close() {
+    if (this.closed) return
+    this.closed = true
+    // 先中止一切挂起请求，再 best-effort 清会话
+    for (const c of this.controllers) {
+      try { c.abort() } catch { /* noop */ }
+    }
+    this.controllers.clear()
+    const url = String(this.server.url ?? '').trim()
+    const sid = this.sessionId
+    if (!sid || !url) return
+    // 有会话才 DELETE（协议的会话销毁口径）。失败只记日志：调用结果已经拿到，关闭失败不该把它变成错误
+    fetch(url, { method: 'DELETE', headers: this.headers(), signal: AbortSignal.timeout(5000) })
+      .then((res) => {
+        if (!res.ok) console.log(`[mcp] ${this.server.name} 关闭会话返回 HTTP ${res.status}（best-effort，忽略）`)
+      })
+      .catch((e) => console.log(`[mcp] ${this.server.name} 关闭会话失败（best-effort，忽略）：${(e as Error).message}`))
+  }
+}
+
+/**
+ * http server 的"实际连接对象"（等价于 stdio 的命令行）：显示 origin——数据与工具调用
+ * 真正要发往的地方。URL 非法就原样亮出来，让用户自己看见配置有多糟，不替他粉饰。
+ */
+function httpDisplay(s: McpServer): string {
+  const u = String(s.url ?? '').trim()
+  let origin = u || '（URL 未填）'
+  try { origin = new URL(u).origin } catch { /* 保底显示原文 */ }
+  return `远程 HTTP server：数据与工具调用将发往 ${origin}`
+}
+
+/**
+ * 信任弹窗要显示的"实际执行对象"。stdio 是实际执行的 argv（JSON 数组形态，与设置页
+ * 「实际执行」预览同口径）；http 没有命令行，等价物是目标地址（httpDisplay）。
+ */
+export function trustCommand(s: McpServer): string {
+  if (s.transport === 'http') return httpDisplay(s)
+  return s.launch?.bin
+    ? JSON.stringify([s.launch.bin, ...(Array.isArray(s.launch.args) ? s.launch.args : [])])
+    : `${(s.command ?? '').trim()}${s.legacyInvalid ? '（已停用，v0.4.0 不再用旧单命令启动）' : ''}`
+}
+
 
 /** 工具名进 OpenAI 函数表要符合 ^[a-zA-Z0-9_-]{1,64}，还要能反查回 server+工具；撞名就加序号而不是静默覆盖 */
 export function mcpToolName(serverId: string, tool: string, used: Set<string>): string {
@@ -326,6 +592,8 @@ export async function probeServer(server: McpServer): Promise<McpProbe> {
       ok: true,
       message: tools.length ? `拿到 ${tools.length} 个工具` : '连接成功，但这个 server 没有提供工具',
       tools: tools.map((t) => ({ name: t.name, ...(t.description ? { description: t.description.slice(0, 160) } : {}) })),
+      // http 没有命令行可展示，回执带上"实际连接对象"（origin），设置页按这个口径显示数据去向
+      ...(server.transport === 'http' ? { display: httpDisplay(server) } : {}),
       ...(r.info.title ? { serverTitle: r.info.title } : {}),
       ...(r.info.version ? { serverVersion: r.info.version } : {})
     }

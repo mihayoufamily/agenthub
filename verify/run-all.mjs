@@ -39,8 +39,14 @@ const SUITES = [
   // cmd 语义拆段（单 & / 换行 / 单引号不是引号 / ^ 转义）与 P0 攻击串端到端、危险形态变体 12 条与不误伤 2 条、
   // argv 换行拒收、负单价拒收、migrateV0toV1 从源码绊线升级行为断言 3 条、检查点一节按新语义重写
   // （任务前锚点文件 + move 覆盖备份回归子场景 cp-ow，K 节净增 13 条）。
-  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 602, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）' },
+  // fixes 625：2026-10-25 两轮实测（审查修复轮 602 + 功能波轮 625）。602→625 多的 23 条：
+  // winnav 无锚 fail-closed 反转与显式传根对照、__ahub_debug 验证态源码绊线 3 条、SSRF all:true 校验 3 条、
+  // 引擎纯函数接线 2 条、MCP trustCommand 分派 1 条、队列计划开关口径 1 条、git 回滚段 [K2] 13 条。
+  { name: 'fixes', tier: 'logic', script: 'fixes-check.mjs', min: 625, what: '安全与正确性修复（SSRF/ReDoS/费用/白名单/权限来源/编码）+ 批次 F 计划态闸门、MCP 与 Hook 的对照轮、目录对照、CLI 回报路径的盘符大小写、单执行循环占用位与计划轮上下文接线 + 2026-10-25 审查修复轮（cmd 语义拆段与危险形态变体、move 覆盖备份、检查点 backed 语义、argv 换行、负单价）+ 功能波轮（winnav fail-closed、debug 验证态、SSRF 校验、git 级回滚）' },
   { name: 'deliver', tier: 'logic', script: 'deliver-check.mjs', min: 59, what: '思考摘要分段 + 角色提示词装配（产物目录、能力形态、技能注入层序、上一任务上下文都真跑过）' },
+  // engine 28 / mcp-transport 31：2026-10-25 功能波轮实测（28 PASS / 31 PASS / 0 FAIL，各自独立脚本可单跑）。
+  { name: 'engine', tier: 'logic', script: 'engine-check.mjs', min: 28, what: '引擎纯函数快照：六个竞态序列（清门/快照还原/续跑推断/队列出入/终态口径）+ 计划审计常量' },
+  { name: 'mcp-transport', tier: 'logic', script: 'mcp-transport-check.mjs', min: 31, what: 'MCP HTTP 传输：JSON/SSE 两种响应形状、session 透传、close、超时、http 记录闸门与 trustCommand 分派' },
   // ui=83：2026-10-24 v0.5.0 Task 1 修复轮 1 实测（结果：83 PASS / 0 FAIL）。
   // 82 → 83 多的是"显式定视口 960×640 下介绍卡完整落在视口内"那一条（Ruling T1-e 的落点）；
   // 变异自证跑过：把 .mi-note 文案改回上一轮长版本 → 该条红（bottom=661 / vh=640，裁 21px）、82 PASS / 1 FAIL，

@@ -17,7 +17,7 @@ const OUT = resolve(dirname(fileURLToPath(import.meta.url)), 'shots-cli')
 const main = async () => {
   if (!existsSync(EXE)) { console.error('未找到便携版：' + EXE); process.exit(2) }
   mkdirSync(OUT, { recursive: true })
-  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`], { stdio: 'ignore', env: launchEnv() })
+  const proc = spawn(EXE, [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
   let cdp
   let homePrev = ''
   let failed = 0
