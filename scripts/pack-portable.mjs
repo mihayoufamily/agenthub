@@ -1,6 +1,6 @@
 // 便携目录打包（纯 JS，不依赖 electron-builder 的 Go 二进制）
 // 产出 release/AgentHub-win-x64/：直接运行 AgentHub.exe（即 electron.exe 改名）
-import { cpSync, rmSync, mkdirSync, renameSync, writeFileSync, existsSync } from 'node:fs'
+import { cpSync, rmSync, mkdirSync, renameSync, writeFileSync, existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const cwd = process.cwd()
@@ -50,6 +50,21 @@ if (existsSync(join(cwd, 'build', 'icon.ico'))) {
 // builtin-skills/：官方内置技能（技能中心按 app.getAppPath()/builtin-skills 扫描，与 build/ 同级）
 if (existsSync(join(cwd, 'builtin-skills'))) {
   cpSync(join(cwd, 'builtin-skills'), join(appDir, 'builtin-skills'), { recursive: true })
+}
+
+// 自校验：rmSync 的 force 会**静默吞掉**删不掉的文件（杀毒/索引器抓着刚写出的文件时真实发生，
+// 2026-10-25 连续两轮部署因此把陈旧 bundle 当新鲜包打了出去，用户实测"改动一个都没生效"）。
+// 复制完必须核对关键产物的字节数与仓库一致，不一致就大声失败——"done 了但包是旧的"比失败更糟。
+for (const rel of [['dist', 'renderer', 'bundle.js'], ['out', 'main', 'index.js']]) {
+  const src = join(cwd, ...rel)
+  const dst = join(appDir, ...rel)
+  if (!existsSync(src)) continue
+  const s = statSync(src).size
+  const d = existsSync(dst) ? statSync(dst).size : -1
+  if (s !== d) {
+    console.error(`[pack] 自校验失败：${rel} 仓库 ${s} 字节，包里 ${d} 字节——有文件没复制进去（多半被占用），包不可信`)
+    process.exit(1)
+  }
 }
 
 // 3) 兼容模式一键启动器（安全软件拦截沙箱导致双击无反应时使用）
