@@ -257,8 +257,8 @@
 .gate-card .gate-title { font-size: 14px; font-weight: 700; color: var(--warn); display: flex; align-items: center; gap: 8px; }
 .gate-card .gate-review { font-size: 13px; color: var(--text); line-height: 1.6; }
 .gate-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-/* ---- 开始任务那一行：单次"先出计划"开关 + 提示（按钮已移到下面独立的居中列） ---- */
-.wf-start-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+/* ---- 单次"先出计划"开关行：在开始按钮下方，与居中的按钮列同轴 ---- */
+.wf-start-row { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
 .wf-start-hint { font-size: 12px; color: var(--text-3); }
 /* 单次计划开关的"已上膛"态：换主行动色并加重，让"勾了但没动静"变得可见 */
 .wf-start-hint-on { color: var(--brand-yellow); font-weight: 600; }

@@ -183,22 +183,6 @@ export function WorkflowHome() {
           </button>
         </div>
 
-        <div className="wf-start-row">
-          <Switch
-            label="本任务先出计划"
-            on={planNextTask}
-            onChange={setPlanNextTask}
-          />
-          {/* 单次开关：勾一次即清。不动「工作流设置」里那个全局档——
-              "这一次先出计划"改的应该是这一次，不是以后每一次。
-              上膛状态必须可见（勾了却看不出任何变化，用户无法确认它会不会生效）：
-              开着时提示文字换成语义明确的"下一次开始会怎样"，并换强调色 */}
-          <span className={cls('wf-start-hint', planNextTask && 'wf-start-hint-on')}>
-            {planNextTask
-              ? '已开启：下一次「开始任务」会先出计划、停在批准门等你确认，才开始执行；开始后本开关自动关闭'
-              : '只影响这一次提交'}
-          </span>
-        </div>
         {/* 开始动作列：开始任务居中，排入队列在其正下方（忙时才出现）——
             原先三件挤同一行，排队按钮出现时会把"开始"挤偏，现在竖排互不影响 */}
         <div className="wf-start-actions">
@@ -216,6 +200,22 @@ export function WorkflowHome() {
               排入队列
             </button>
           )}
+        </div>
+        {/* 单次开关：勾一次即清，放在开始按钮下方（它是"开始"的修饰项，不该排在它前面）。
+            不动「工作流设置」里那个全局档——"这一次先出计划"改的应该是这一次，不是以后每一次。
+            上膛状态必须可见（勾了却看不出任何变化，用户无法确认它会不会生效）：
+            开着时提示文字换成语义明确的"下一次开始会怎样"，并换强调色 */}
+        <div className="wf-start-row">
+          <Switch
+            label="本任务先出计划"
+            on={planNextTask}
+            onChange={setPlanNextTask}
+          />
+          <span className={cls('wf-start-hint', planNextTask && 'wf-start-hint-on')}>
+            {planNextTask
+              ? '已开启：下一次「开始任务」会先出计划、停在批准门等你确认，才开始执行；开始后本开关自动关闭'
+              : '只影响这一次提交'}
+          </span>
         </div>
 
         {demo && (
