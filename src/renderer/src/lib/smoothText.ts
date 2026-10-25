@@ -20,8 +20,11 @@ export function useSmoothText(full: string, enabled: boolean): string {
   fullRef.current = full
 
   useEffect(() => {
-    if (!enabled) {
-      // 关闭（流结束/减少动态效果）：立即补满，绝不留半截
+    // 关闭（流结束/减少动态效果）且没有积压：立即补满。
+    // 有积压时**继续播完**——CLI 类 harness（如 CodeBuddy）的正文是结束前一整块到达的，
+    // 若只认 streaming 窗口，动画窗口和文本存在的时间窗完全不重叠，打字机永远瞬弹
+    // （2026-10-25 用户实测"几十个字还是一瞬间弹出来"的真实根因）。
+    if (!enabled && shownRef.current >= fullRef.current.length) {
       shownRef.current = fullRef.current.length
       setShown(fullRef.current)
       return
@@ -38,10 +41,13 @@ export function useSmoothText(full: string, enabled: boolean): string {
         shownRef.current = Math.min(target, shownRef.current + (speed * dt) / 1000)
         setShown(fullRef.current.slice(0, Math.floor(shownRef.current)))
       }
-      // 只要 enabled 就持续转：delta 到达只更新 fullRef，没有别的东西会重启这个循环——
-      // 若在这里"追平就停"，下一块 delta 到达时没人拉起循环，显示层会卡死在旧切片上
-      // （2026-10-25 真实事故：气泡全程转圈、结束瞬间全文蹦出，打字机一次都没跑过）
-      raf = requestAnimationFrame(tick)
+      // 只要 enabled 就持续转（delta 到达只更新 fullRef，没人会重启循环）；
+      // enabled 关掉后把积压播完再停——停的条件是"追平且已关闭"
+      if (behind > 0 || enabled) raf = requestAnimationFrame(tick)
+      else {
+        shownRef.current = target
+        setShown(fullRef.current)
+      }
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
