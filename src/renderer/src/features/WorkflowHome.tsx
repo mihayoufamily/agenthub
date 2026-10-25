@@ -192,13 +192,17 @@ export function WorkflowHome() {
           {/* 单次开关：勾一次即清。不动「工作流设置」里那个全局档——
               "这一次先出计划"改的应该是这一次，不是以后每一次 */}
           <span className="wf-start-hint">只影响这一次提交</span>
+        </div>
+        {/* 开始动作列：开始任务居中，排入队列在其正下方（忙时才出现）——
+            原先三件挤同一行，排队按钮出现时会把"开始"挤偏，现在竖排互不影响 */}
+        <div className="wf-start-actions">
           <button className="btn btn-primary wf-start" style={{ height: 40, minWidth: 120 }} onClick={onBegin}>
             开始任务
           </button>
           {/* 忙时"开始"会被单执行循环挡下，排队是唯一的提交通道；样式与相邻按钮一致 */}
           {busy && (
             <button
-              className="btn btn-secondary wf-start"
+              className="btn btn-secondary"
               style={{ height: 40, minWidth: 120 }}
               onClick={onQueue}
               title="当前任务正在执行；排入队列后它会在当前任务到达终态（完成/失败/停止等）后自动开始，将消耗一次真实调用"

@@ -257,9 +257,11 @@
 .gate-card .gate-title { font-size: 14px; font-weight: 700; color: var(--warn); display: flex; align-items: center; gap: 8px; }
 .gate-card .gate-review { font-size: 13px; color: var(--text); line-height: 1.6; }
 .gate-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-/* ---- 开始任务那一行：单次"先出计划"开关 + 提示 + 主按钮 ---- */
+/* ---- 开始任务那一行：单次"先出计划"开关 + 提示（按钮已移到下面独立的居中列） ---- */
 .wf-start-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
 .wf-start-hint { font-size: 12px; color: var(--text-3); }
+/* 开始动作列：「开始任务」居中，「排入队列」在其正下方（忙时才出现）——竖排两颗按钮互不挤占 */
+.wf-start-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 /* ---- 计划批准门（批次 F）：批准前不进执行与审核，正文可读、点存才落盘 ---- */.gate-plan-text {
   margin: 0;
   padding: 10px 12px;
