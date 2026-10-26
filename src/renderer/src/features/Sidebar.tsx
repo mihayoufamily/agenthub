@@ -10,11 +10,13 @@ import { Modal } from '../components/Modal'
 import { NotificationCenter } from '../components/NotificationCenter'
 import { LogoMark } from '../components/Logo'
 import { SkillCenter } from './SkillCenter'
+import { AgentEditModal } from './AgentEditModal'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
 import { cls, fmtTokens } from '../lib/utils'
 import { WfTaskList } from './WfChips'
 
-const MENU_W = 190
+// 卡片宽度：190 → 230（2026-10-25 用户要求稍宽——技能名 + 来源徽章 + 版本号一行放得更开）
+const MENU_W = 230
 // 卡片高度**不再是常量**：绑定的 Skill 数量、提示词长度、窗口宽度（换行）都会改它。
 // 原先写死一个估算值做上下翻转判定，估偏就会裁掉一截（计划缺口 #3 要求实测回填），
 // 现在改成打开后量真实高度来定位，内容变化时由 ResizeObserver 再校正。
@@ -52,6 +54,8 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
+  // 编辑配置弹窗的目标 Agent（仅自定义模型类会从管理卡片触发）
+  const [editTarget, setEditTarget] = useState<string | null>(null)
   const menuBtnRefs = useRef<Record<string, HTMLElement | null>>({})
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -226,6 +230,10 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
               setRemoveTarget(menuFor)
               setMenuFor(null)
             }}
+            onEdit={() => {
+              setEditTarget(menuFor)
+              setMenuFor(null)
+            }}
             // 卡内"打开技能中心"直接开本侧栏挂的弹层（Modal 已 portal，从哪触发都一样）
             onOpenSkillCenter={() => setSkillCenterOpen(true)}
           />
@@ -270,6 +278,14 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
           </div>
         </Modal>
       )}
+
+      {/* 编辑配置弹窗：Modal 自身 portal，挂哪都行；key=agentId 保证换目标时表单重置 */}
+      {editTarget && (() => {
+        const target = agents.find((a) => a.id === editTarget)
+        return target?.modelConfig ? (
+          <AgentEditModal key={target.id} agent={target} onClose={() => setEditTarget(null)} />
+        ) : null
+      })()}
 
       <WfTaskList collapsed={collapsed} />
 

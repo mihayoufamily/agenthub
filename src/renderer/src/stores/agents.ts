@@ -41,6 +41,10 @@ interface AgentsState {
   addCustomModelAgent: (cfg: Omit<CustomModelConfig, 'keyId' | 'hasKey'>, apiKey: string) => Promise<{ ok: boolean; agent?: AgentConfig; message: string }>
   addCliAgent: (cli: CliName, model?: string, workDir?: string) => Promise<{ ok: boolean; agent?: AgentConfig; message: string }>
   addDiscoveredAgent: (name: string, path: string) => AgentConfig
+  /** 编辑自定义模型 Agent：先测连接通过才写入（与添加同口径）；apiKey 留空 = 沿用已存 Key 测试 */
+  updateModelAgent: (id: string, patch: { name?: string; baseUrl?: string; modelId?: string }, apiKey?: string) => Promise<{ ok: boolean; message: string }>
+  /** 清除已存 API Key：凭据删除 + 状态断开（与设置页"删除 Key"同口径） */
+  clearModelKey: (id: string) => Promise<void>
   updateAgent: (id: string, patch: Partial<AgentConfig>) => void
   removeAgent: (id: string, opts: { deleteHistory: boolean }) => Promise<void>
   reorder: (newIds: string[]) => void
@@ -175,6 +179,49 @@ export const useAgents = create<AgentsState>()((set, get) => ({
     set((s) => ({ agents: [...s.agents, agent], colors: { ...s.colors, [agent.id]: '#64748b' } }))
     get().persist()
     return agent
+  },
+
+  updateModelAgent: async (id, patch, apiKey) => {
+    const agent = get().agents.find((a) => a.id === id)
+    // 只对自定义模型类生效：demo / CLI / 待连接占位没有可编辑的连接配置
+    if (!agent?.modelConfig) return { ok: false, message: '该 Agent 不是自定义模型类型，没有可编辑的连接配置' }
+    const cur = agent.modelConfig
+    const name = patch.name?.trim()
+    const baseUrl = (patch.baseUrl ?? cur.baseUrl).trim().replace(/\/+$/, '')
+    const modelId = (patch.modelId ?? cur.modelId).trim()
+    if (!baseUrl || !modelId) return { ok: false, message: 'Base URL 与模型 ID 不能为空' }
+    const nextCfg: CustomModelConfig = { ...cur, provider: name || cur.provider, baseUrl, modelId, hasKey: true }
+    // 名称只影响显示；动了连接三元组（baseUrl/modelId/key）之一就必须先真实测连接——不伪造可用状态
+    const connChanged = baseUrl !== cur.baseUrl || modelId !== cur.modelId || !!apiKey?.trim()
+    let message = '配置已保存'
+    if (connChanged) {
+      // Key 留空时主进程自动回退到已存凭据（渲染层读不到明文，见 preload credentials 只有 save/has/delete）
+      const result = await bridge.models.test(nextCfg, apiKey?.trim() ?? '')
+      if (!result.ok) return { ok: false, message: `连接测试失败：${result.message}` }
+      // 与 addCustomModelAgent 同口径：服务端返回了模型列表且不含所填 ID 时提前拦截
+      if (result.models && result.models.length > 0 && !result.models.some((m) => m.toLowerCase() === modelId.toLowerCase())) {
+        const shown = result.models.slice(0, 12).join('、')
+        return {
+          ok: false,
+          message: `连接成功，但模型 ID「${modelId}」不在该服务支持列表中（需与列表完全一致）。可用模型：${shown}${result.models.length > 12 ? ` 等 ${result.models.length} 个` : ''}`
+        }
+      }
+      if (apiKey?.trim()) await bridge.credentials.save(cur.keyId, apiKey.trim())
+      message = result.message || message
+    }
+    // desc 与 model 跟着连接配置走（添加时 desc=baseUrl、model=modelId，编辑后保持同一语义）
+    set((s) => ({
+      agents: s.agents.map((a) => (a.id === id ? { ...a, name: name || a.name, desc: baseUrl, model: modelId, modelConfig: nextCfg } : a))
+    }))
+    get().persist()
+    return { ok: true, message }
+  },
+
+  clearModelKey: async (id) => {
+    const agent = get().agents.find((a) => a.id === id)
+    if (!agent?.modelConfig) return
+    await bridge.credentials.delete(agent.modelConfig.keyId)
+    get().updateAgent(id, { status: 'disconnected', modelConfig: { ...agent.modelConfig, hasKey: false } })
   },
 
   updateAgent: (id, patch) => {

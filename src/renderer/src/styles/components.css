@@ -640,6 +640,11 @@
 .ac-sec-title { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-3); margin-bottom: 6px; }
 .ac-sec-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 .ac-sec-extra { display: flex; gap: 6px; align-items: center; }
+/* 可折叠分区标题（技能区）：整行可点，hover 给一点反馈表明它是个开关 */
+.ac-sec-toggle { cursor: pointer; user-select: none; border-radius: 4px; padding: 2px 4px; margin: -2px -4px 6px; }
+.ac-sec-toggle:hover { color: var(--text-2); }
+.ac-sec-toggle:hover::after { background: var(--border-strong); }
+.ac-sec-toggle:focus-visible { outline: 1px solid var(--border-strong); }
 .ac-badge { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); white-space: nowrap; }
 .ac-saved { color: var(--ok); background: var(--ok-bg); font-weight: 600; }
 /* 常驻提示词：textarea 可纵向拖高，字数/说明一行 */

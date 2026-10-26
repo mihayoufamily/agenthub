@@ -6,30 +6,40 @@ import { useUi } from '../stores/ui'
 // 契约符号：纯函数与文案常量统一在 shared（逻辑层有防漂移绊线，不许渲染层手抄）
 import { SKILL_MODE_HINTS, SKILL_TIMING_NOTE, SKILL_SOURCE_LABELS } from '@shared/skill-usages'
 import { StatusDot, statusText } from './primitives'
+import { Icon } from './Icons'
 import { cls } from '../lib/utils'
+import { useSettings } from '../stores/settings'
 
 /**
  * 侧栏 ⋯ 展开的 Agent 管理卡片：头部（身份）+ 常驻提示词 + 技能 + 操作，四段分区。
  *
  * 定为**唯一**编辑入口（spec 批次 D）——同一个字段两处可写必然漂移，所以模型管理弹窗那边
- * 已改成只读摘要 + 指回这里。Skill 注入方式只有 `auto`（每次调用注入正文）与
+ * 已改成只读摘要 + 指回这里。补充（2026-10-25）：自定义模型类的**连接配置**（名称/Base URL/
+ * 模型 ID/API Key）由「编辑配置…」弹窗（AgentEditModal）承担，与添加流程同口径（先测连接后保存）；
+ * 本卡继续独占常驻提示词与技能绑定，避免字段两处可写。Skill 注入方式只有 `auto`（每次调用注入正文）与
  * `reference`（只进可引用清单）两档；停用的 Skill 即使绑了也不注入（与 `skills-union` 同口径）。
  * 改造（2026-10-25）：之前四个异质元素平铺没有分区、保存不可见、技能项只有名字——
- * 分区 + 徽章 + 保存状态让每个元素自己会说话。
+ * 分区 + 徽章 + 保存状态让每个元素自己会说话。技能区标题可点折叠（进 prefs 持久化，
+ * 折叠态徽章仍显示"已绑 N + 注入方式"，收起来也知道当前档位）。
  */
 export function AgentManageCard({
   agentId,
   onRename,
   onRemove,
+  onEdit,
   onOpenSkillCenter
 }: {
   agentId: string
   onRename: () => void
   onRemove: () => void
+  onEdit: () => void
   onOpenSkillCenter: () => void
 }) {
   const agent = useAgents((s) => s.agents.find((a) => a.id === agentId))
   const updateAgent = useAgents((s) => s.updateAgent)
+  // 技能区折叠：进 prefs 持久化——卡片每次点开 ⋯ 都会重挂，局部状态会让"我折好了"下次又弹开
+  const skillsCollapsed = useSettings((s) => s.prefs?.agentCardSkillsCollapsed ?? false)
+  const patchPrefs = useSettings((s) => s.patchPrefs)
   const [skills, setSkills] = useState<Skill[]>([])
   // 保存可见化：blur 保存成功后"已保存 ✓"亮 2 秒；未保存改动期间标题旁亮"未保存"。
   // textarea 是 defaultValue 非受控（见 Sidebar 的 key 说明），字数与 dirty 用 onChange 同步。
@@ -113,68 +123,95 @@ export function AgentManageCard({
       </div>
 
       <div className="ac-sec" data-sec-skills>
-        <div className="ac-sec-title">
+        <div
+          className={cls('ac-sec-title', 'ac-sec-toggle')}
+          data-skills-toggle
+          role="button"
+          tabIndex={0}
+          aria-expanded={!skillsCollapsed}
+          title={skillsCollapsed ? '展开技能区' : '折叠技能区'}
+          onClick={() => patchPrefs({ agentCardSkillsCollapsed: !skillsCollapsed })}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              patchPrefs({ agentCardSkillsCollapsed: !skillsCollapsed })
+            }
+          }}
+        >
           技能
           <span className="ac-sec-extra">
             {boundCount > 0 && <span className="ac-badge">已绑 {boundCount}</span>}
+            {/* 折叠态下绑定数看不见明细，把注入方式也折进徽章，收起来也能知道当前档位 */}
+            {skillsCollapsed && <span className="ac-badge">{mode === 'auto' ? '自动注入' : '仅可引用'}</span>}
+            <Icon name={skillsCollapsed ? 'down' : 'up'} size={13} />
           </span>
         </div>
-        <label className="ac-label">注入方式</label>
-        <div data-skill-mode className="ac-seg">
-          {/* hover 提示按"点了会切到哪档"给：常驻的 ac-note 只描述当前档，两处口径同源于 SKILL_MODE_HINTS */}
-          <button
-            type="button"
-            className={mode === 'reference' ? 'on' : ''}
-            title={SKILL_MODE_HINTS.reference}
-            onClick={() => updateAgent(agent.id, { skillMode: 'reference' })}
-          >
-            仅可引用
-          </button>
-          <button
-            type="button"
-            className={mode === 'auto' ? 'on' : ''}
-            title={SKILL_MODE_HINTS.auto}
-            onClick={() => updateAgent(agent.id, { skillMode: 'auto' })}
-          >
-            自动注入
-          </button>
-        </div>
-        <div className="ac-note">
-          {mode === 'auto' ? '每次真实调用都注入这些 Skill 正文（工作站每轮、工作流每角色）。' : '只进可引用清单，不自动注入正文。'}
-          停用的 Skill 即使绑了也不注入。
-        </div>
-        <div data-skill-pick className="ac-skills">
-          {skills.length === 0 && (
-            <span className="ac-empty">本机还没有技能。</span>
-          )}
-          {skills.map((s) => {
-            const off = s.enabled === false
-            return (
-              <label key={s.id} className={cls('ac-skill-item', off && 'off')}>
-                <input
-                  type="checkbox"
-                  checked={picked.includes(s.id)}
-                  disabled={off}
-                  onChange={() => toggle(s.id)}
-                />
-                <span className="ac-skill-name">{s.name}</span>
-                {s.source && (
-                  <span className={cls('skill-src-badge', `src-${s.source}`)}>{SKILL_SOURCE_LABELS[s.source] ?? s.source}</span>
-                )}
-                {s.version && <span className="ac-skill-ver">v{s.version}</span>}
-                {off && <span className="ac-skill-off" title="技能已停用：去技能中心开启后才能绑定">⚠ 已停用</span>}
-              </label>
-            )
-          })}
-        </div>
-        {/* 绑定区收尾的"何时生效"：用户在这里勾完最想知道的就是"什么时候开始算数" */}
-        <div className="skill-usage-note">{SKILL_TIMING_NOTE}</div>
-        <button type="button" className="ac-open-skillcenter" onClick={onOpenSkillCenter}>
-          → 打开技能中心{skills.length === 0 ? '安装第一个技能' : '管理/安装更多'}
-        </button>
+        {!skillsCollapsed && (
+          <>
+            <label className="ac-label">注入方式</label>
+            <div data-skill-mode className="ac-seg">
+              {/* hover 提示按"点了会切到哪档"给：常驻的 ac-note 只描述当前档，两处口径同源于 SKILL_MODE_HINTS */}
+              <button
+                type="button"
+                className={mode === 'reference' ? 'on' : ''}
+                title={SKILL_MODE_HINTS.reference}
+                onClick={() => updateAgent(agent.id, { skillMode: 'reference' })}
+              >
+                仅可引用
+              </button>
+              <button
+                type="button"
+                className={mode === 'auto' ? 'on' : ''}
+                title={SKILL_MODE_HINTS.auto}
+                onClick={() => updateAgent(agent.id, { skillMode: 'auto' })}
+              >
+                自动注入
+              </button>
+            </div>
+            <div className="ac-note">
+              {mode === 'auto' ? '每次真实调用都注入这些 Skill 正文（工作站每轮、工作流每角色）。' : '只进可引用清单，不自动注入正文。'}
+              停用的 Skill 即使绑了也不注入。
+            </div>
+            <div data-skill-pick className="ac-skills">
+              {skills.length === 0 && (
+                <span className="ac-empty">本机还没有技能。</span>
+              )}
+              {skills.map((s) => {
+                const off = s.enabled === false
+                return (
+                  <label key={s.id} className={cls('ac-skill-item', off && 'off')}>
+                    <input
+                      type="checkbox"
+                      checked={picked.includes(s.id)}
+                      disabled={off}
+                      onChange={() => toggle(s.id)}
+                    />
+                    <span className="ac-skill-name">{s.name}</span>
+                    {s.source && (
+                      <span className={cls('skill-src-badge', `src-${s.source}`)}>{SKILL_SOURCE_LABELS[s.source] ?? s.source}</span>
+                    )}
+                    {s.version && <span className="ac-skill-ver">v{s.version}</span>}
+                    {off && <span className="ac-skill-off" title="技能已停用：去技能中心开启后才能绑定">⚠ 已停用</span>}
+                  </label>
+                )
+              })}
+            </div>
+            {/* 绑定区收尾的"何时生效"：用户在这里勾完最想知道的就是"什么时候开始算数" */}
+            <div className="skill-usage-note">{SKILL_TIMING_NOTE}</div>
+            <button type="button" className="ac-open-skillcenter" onClick={onOpenSkillCenter}>
+              → 打开技能中心{skills.length === 0 ? '安装第一个技能' : '管理/安装更多'}
+            </button>
+          </>
+        )}
       </div>
 
       <div className="ac-sec ac-actions" data-sec-actions>
+        {/* 编辑配置只对自定义模型类有意义：demo 无配置可改，CLI 的凭据/配置由接入方管理（README 口径） */}
+        {agent.kind === 'model' && agent.modelConfig && (
+          <button className="foot-btn" onClick={onEdit}>
+            编辑配置…
+          </button>
+        )}
         <button className="foot-btn" onClick={onRename}>
           重命名
         </button>

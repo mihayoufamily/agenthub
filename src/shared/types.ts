@@ -508,6 +508,8 @@ export interface Prefs {
   lastMode: WorkMode | null
   /** 自定义键位（只存被改过的项；缺省用 HOTKEY_DEFAULTS） */
   keybindings?: Partial<Record<HotkeyAction, string>>
+  /** Agent 管理卡片技能区折叠（可选：缺省展开；记住用户上次的展开/折叠选择） */
+  agentCardSkillsCollapsed?: boolean
 }
 
 /** 持久化配置（带版本号，支持迁移） */

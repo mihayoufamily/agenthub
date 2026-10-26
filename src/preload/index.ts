@@ -53,6 +53,8 @@ const api = {
     setBusy: (busy: boolean) => ipcRenderer.invoke('app:setBusy', busy) as Promise<{ ok: boolean }>,
     /** 当前应用菜单的加速键清单（验证用） */
     menuSummary: () => ipcRenderer.invoke('app:menuSummary') as Promise<{ accelerators: string[]; custom: boolean }>,
+    /** 验证专用：走主进程 requestClose() 的三态关闭裁决（通道只在 --ahub-verify 下注册，普通启动调用按"未注册"失败） */
+    requestClose: () => ipcRenderer.invoke('app:requestClose') as Promise<{ ok: boolean }>,
     /** 兼容模式事实（只读）：实际关掉了沙箱还是硬件加速 + 当前生效的降级策略。
      *  主进程报的是"这台机器现在跑成什么样"，不是配置里写了什么 */
     compat: () => ipcRenderer.invoke('app:compat') as Promise<CompatState>,

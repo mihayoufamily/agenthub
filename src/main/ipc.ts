@@ -386,8 +386,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // ---------- MCP server（tools-only，stdio） ----------
   // mcp:list 只放行形状正确的记录（sanitizeMcpList 可断言）：迁移层刻意把脏元素原样透传，
   // 手改 config.json 的 null 不该活到渲染层被解引用炸掉设置页/ChatView。
-  // 内置组由主进程合成在最前（只读；sanitize 会剥掉存储里任何伪造 builtin 字段的条目），
-  // 全局停用态（config.mcpBuiltinOff）在这里应用到合成条目上。
+  // 内置基础组由主进程合成在最前（只读；sanitize 会剥掉存储里任何伪造 builtin 字段的条目）。
+  // 内置组由主进程合成在最前，全局停用态（config.mcpBuiltinOff）在这里应用到合成条目上。
   ipcMain.handle('mcp:list', () => {
     const off = new Set(getStore().getConfig().mcpBuiltinOff ?? [])
     const builtins = mcp.BUILTIN_MCP_SERVERS.map((s) => (off.has(s.id) ? { ...s, enabled: false } : s))
@@ -610,8 +610,12 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   })
 
   // ---------- 自定义模型（真实 OpenAI 兼容接入） ----------
+  // apiKey 为空串 = 编辑场景沿用已存凭据测试（明文只在主进程，渲染层读不到，见 model:list 同口径）；
+  // hasKey 为假时没有可回退的凭据，如实报错而不是拿空 Key 打一次必失败的真实请求。
   ipcMain.handle('model:test', async (_e, cfg: CustomModelConfig, apiKey: string) => {
-    return openai.testConnection(cfg, apiKey)
+    const key = apiKey || (cfg.hasKey ? getStore().getCredential(cfg.keyId) ?? '' : '')
+    if (!key) return { ok: false, message: '未找到 API Key：请填写新 Key 后再测试' }
+    return openai.testConnection(cfg, key)
   })
 
   // 模型切换：列出接口真实可用的模型（需要已保存的凭据）

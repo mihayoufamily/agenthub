@@ -8,7 +8,7 @@ import * as checkpoints from './checkpoints'
 import { configurePriceOverrides } from '../shared/overrides'
 import { navDecision } from '../shared/winnav'
 import { decideFallback, forcedCompatCrashEnabled, normalizePolicy, gpuStageAction, compatHintPending, SANDBOX_CRASH_THRESHOLD, FORCE_SANDBOX_CRASH_ENV, COMPAT_HINT_ENV, COMPAT_FAIL_TITLE, COMPAT_FAIL_MESSAGE_GPU, COMPAT_FAIL_MESSAGE_SANDBOX, VERIFY_SWITCH } from '../shared/compat'
-import { decideCloseNow, isBusy, setQuitting } from './lifecycle'
+import { decideCloseNow, isBusy, isQuitting, onBusyChange, setQuitting } from './lifecycle'
 import * as ledger from './ledger'
 import { consumePendingUpdate } from './updater'
 
@@ -218,8 +218,9 @@ function buildAppMenu() {
     {
       label: '文件',
       submenu: [
-        { label: '关闭窗口', accelerator: 'CmdOrCtrl+W', click: () => requestClose() },
-        // 不给"退出"配加速键：Alt+F4 由系统处理（最终仍会走 win.on('close') 的同一套确认），
+        // 菜单文案如实标注行为：关窗=缩托盘，不写"退出"免得用户以为应用结束了
+        { label: '关闭窗口（缩到托盘）', accelerator: 'CmdOrCtrl+W', click: () => requestClose() },
+        // 不给"退出"配加速键：Alt+F4 由系统处理（最终仍会走 win.on('close') 的同一套裁决），
         // 而 Ctrl+Q 这类组合可能和用户自定义的快捷键撞车
         { label: '退出 AgentHub', click: () => { setQuitting(true); app.quit() } }
       ]
@@ -239,12 +240,21 @@ function buildAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
-/** 关闭请求：没在跑就直接退；正在跑弹确认（默认"后台继续运行"） */
+/**
+ * 关闭请求（Ctrl+W 与 win.on('close') 共用）：按 decideClose 三态分发——
+ * 空闲 → 隐藏窗口进托盘（应用常驻，退出只能走托盘/菜单栏"退出"）；
+ * 忙碌 → 三选一确认框（默认"后台继续运行"，保护正在跑的工作流）；
+ * 已确认退出（quitting）→ 真关，window-all-closed 接手退出。
+ */
 async function requestClose() {
   const win = mainWindow
   if (!win) return
-  if (decideCloseNow() !== 'ask') {
-    setQuitting(true)
+  const d = decideCloseNow()
+  if (d === 'hide') {
+    win.hide() // 托盘已随应用常驻，无需再 ensureTray
+    return
+  }
+  if (d === 'quit') {
     win.close()
     return
   }
@@ -259,7 +269,6 @@ async function requestClose() {
     detail: '进度按阶段边界保存，重启后只能标为"状态未知"手动继续，不会自动续跑。选择后台继续运行时会缩到系统托盘，跑完弹通知。'
   })
   if (r.response === 0) {
-    ensureTray()
     win.hide()
   } else if (r.response === 1) {
     setQuitting(true)
@@ -466,11 +475,16 @@ function createWindow() {
   })
   win.on('close', (e) => {
     saveWindowState(win)
-    // Alt+F4 / 任务栏关闭同样要过确认：正在跑的工作流不能被静默掐断
-    if (decideCloseNow() === 'ask') {
-      e.preventDefault()
+    // 三态裁决：quitting 放行；忙碌弹确认框；空闲缩托盘（关窗≠退出，2026-10-25 用户拍板）
+    const d = decideCloseNow()
+    console.log(`[main] close 裁决=${d} quitting=${isQuitting()} busy=${isBusy()}`)
+    if (d === 'quit') return
+    e.preventDefault()
+    if (d === 'ask') {
       void requestClose()
+      return
     }
+    win.hide()
   })
 
   // 诊断：渲染层 console 与加载状态转发到主进程 stdout
@@ -597,10 +611,22 @@ function startApp() {
       ...compatState,
       policy: normalizePolicy(store?.getConfig().sandboxFallback)
     }))
+    // 验证专用：CDP 驱动不了原生标题栏 X / Alt+F4（渲染层 window.close() 更是绕过 win.on('close')
+    // 直接销毁窗口——实测），托盘关闭链路用这个通道进 requestClose() 的同一套三态裁决。
+    // 闸门同 config:importJson 先例：只在 --ahub-verify 下注册，生产路径不可达。
+    if (isVerifyLaunch) {
+      ipcMain.handle('app:requestClose', () => { void requestClose(); return { ok: true } })
+    }
     buildAppMenu()
     // 跟随主题（渲染进程可通过 theme:set 覆盖 themeSource）
     nativeTheme.themeSource = 'system'
     mainWindow = createWindow()
+    // 托盘随应用常驻（2026-10-25 用户拍板：关窗=缩托盘，托盘是唯一常驻的退出入口）
+    ensureTray()
+    // 忙碌起止时刷新托盘 tooltip，别让"工作流正在执行"挂在早已结束的引擎上
+    onBusyChange((busy) => {
+      tray?.setToolTip(busy ? 'AgentHub · 工作流正在执行' : 'AgentHub')
+    })
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow()
