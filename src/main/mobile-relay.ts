@@ -59,8 +59,10 @@ class WsClient {
       ? tls.connect({ host: u.hostname, port, servername: u.hostname })
       : net.connect({ host: u.hostname, port })
     const key = crypto.randomBytes(16).toString('base64')
+    // query 必须带上（Worker 版靠 ?t=token 路由 DO；只发 pathname 会 401）
+    const reqPath = (u.pathname === '/' ? '/' : u.pathname) + u.search
     this.socket.write(
-      `GET ${u.pathname === '/' ? '/' : u.pathname} HTTP/1.1\r\n` +
+      `GET ${reqPath} HTTP/1.1\r\n` +
       `Host: ${u.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
       `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
     )
@@ -212,7 +214,8 @@ function connect() {
 
   let client: WsClient
   try {
-    client = new WsClient(p.relayUrl)
+    // URL 携带 token：Worker 版网关靠它路由 DO（Node 版在 hello 里兼容）
+    client = new WsClient(p.relayUrl + '/?t=' + p.token)
   } catch (e) {
     curError = `网关地址无效：${e instanceof Error ? e.message : String(e)}`
     scheduleReconnect()

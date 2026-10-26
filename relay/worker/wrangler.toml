@@ -1,0 +1,18 @@
+name = "agenthub-relay"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# 自定义域名（免备案、免费 HTTPS、国内可达性与 zdymodel 隧道一致）
+# 注意：TOML 顶层键必须放在任何 [[table]] 之前，否则会被吞进上一个表（实测踩坑）
+routes = [
+  { pattern = "relay.zdymodel.de5.net", custom_domain = true }
+]
+
+# Durable Object：按 token 一实例（idFromName），hibernatable WebSocket
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "RelayDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayDO"]

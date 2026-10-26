@@ -14,6 +14,8 @@ import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
 
 const PORT = 9253
 const GW_PORT = 18090
+/** RELAY_CHECK_GW_URL：外部网关模式（如 wrangler dev 的 ws://127.0.0.1:8787）——不 spawn 本地网关，跳过 online 计数断言 */
+const EXTERNAL_GW = process.env.RELAY_CHECK_GW_URL ?? null
 let failed = 0
 let passed = 0
 const check = (name, cond, detail) => {
@@ -35,15 +37,19 @@ const waitRelay = async (cdp, want, timeoutMs) => {
 
 // 本地网关（独立进程，测完杀掉）。用 PATH 里的 'node' 而非 process.execPath——
 // 宿主沙箱对 execPath 指向的 node 有执行限制（Permission denied），spawn error 必须监听
-const gw = spawn('node', ['D:/dsh/agenthub/relay/server.mjs', `--port=${GW_PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] })
-gw.stdout?.on('data', (d) => console.log('[gw-out]', d.toString().trim().slice(0, 200)))
-gw.stderr?.on('data', (d) => console.log('[gw-err]', d.toString().trim().slice(0, 300)))
-gw.on('error', (e) => console.log('[gw-spawn-error]', e.message))
-gw.on('exit', (code) => console.log(`[gw-exit] code=${code}`))
+// 外部网关模式（RELAY_CHECK_GW_URL）下不 spawn
+const gw = EXTERNAL_GW ? null : spawn('node', ['D:/dsh/agenthub/relay/server.mjs', `--port=${GW_PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] })
+if (gw) {
+  gw.stdout?.on('data', (d) => console.log('[gw-out]', d.toString().trim().slice(0, 200)))
+  gw.stderr?.on('data', (d) => console.log('[gw-err]', d.toString().trim().slice(0, 300)))
+  gw.on('error', (e) => console.log('[gw-spawn-error]', e.message))
+  gw.on('exit', (code) => console.log(`[gw-exit] code=${code}`))
+}
+const gwBase = (EXTERNAL_GW ?? `http://127.0.0.1:${GW_PORT}`).replace(/^ws/, 'http') // ws→http 供 fetch/relay-info 用
 
 const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], {
   stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...launchEnv(), AGENTHUB_RELAY_URL_OVERRIDE: `ws://127.0.0.1:${GW_PORT}` }
+  env: { ...launchEnv(), AGENTHUB_RELAY_URL_OVERRIDE: EXTERNAL_GW ?? `ws://127.0.0.1:${GW_PORT}` }
 })
 proc.stderr.on('data', (d) => console.log('[app-err]', d.toString().trim().slice(0, 300)))
 proc.on('exit', (code) => console.log(`[app-exit] code=${code}`))
@@ -52,12 +58,12 @@ try {
   // 网关就绪：/relay-info 重试（waitHttp 是 CDP 专用口径 /json/list，对网关永远 401 HTML 不适用）
   let gwInfo = null
   for (let i = 0; i < 20; i++) {
-    try { gwInfo = await (await fetch(`http://127.0.0.1:${GW_PORT}/relay-info`)).json(); if (gwInfo?.ok) break } catch { /* 重试 */ }
+    try { gwInfo = await (await fetch(`${gwBase}/relay-info`)).json(); if (gwInfo?.ok) break } catch { /* 重试 */ }
     await sleep(500)
   }
   console.log(`[t] 网关就绪 ${Date.now() - t0}ms`, JSON.stringify(gwInfo))
-  check('网关启动且 /relay-info 健康', gwInfo?.ok === true && Array.isArray(gwInfo.tokens), JSON.stringify(gwInfo))
-  const gwOnline0 = gwInfo.online
+  check('网关启动且 /relay-info 健康', gwInfo?.ok === true, JSON.stringify(gwInfo))
+  const gwOnline0 = gwInfo.online // external 模式（Worker）无 online 字段 → 相关断言跳过
 
   const page = await waitHttp(PORT, 25000)
   const cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -86,21 +92,23 @@ try {
   const r1 = await waitRelay(cdp, (s) => s.connected, 15000)
   check('中继已连接（出站 WS + hello-ok）', r1?.connected === true, JSON.stringify({ connected: r1?.connected, error: r1?.error }))
   check('固定公网入口已生成（publicUrl 带 token）', typeof r1?.publicUrl === 'string' && r1.publicUrl.includes('?t='), String(r1?.publicUrl)?.replace(/t=[0-9a-f]+/, 't=***'))
-  const gwOnline1 = (await (await fetch(`http://127.0.0.1:${GW_PORT}/relay-info`)).json()).online
-  check('网关在线实例数 +1（token 路由已注册）', gwOnline1 === gwOnline0 + 1, `${gwOnline0} → ${gwOnline1}`)
+  if (!EXTERNAL_GW) {
+    const gwOnline1 = (await (await fetch(`${gwBase}/relay-info`)).json()).online
+    check('网关在线实例数 +1（token 路由已注册）', gwOnline1 === gwOnline0 + 1, `${gwOnline0} → ${gwOnline1}`)
+  }
 
   /* ---- 3) 公网全链路：网关 → 实例 → 本地服务 → 回包 ---- */
   const token = r1?.publicUrl?.match(/t=([0-9a-f]+)/)?.[1]
-  const page1 = await fetch(`http://127.0.0.1:${GW_PORT}/?t=${token}`)
+  const page1 = await fetch(`${gwBase}/?t=${token}`)
   const html = await page1.text()
   check('经网关取手机页 → 200 且含 AgentHub 标记', page1.status === 200 && html.includes('AgentHub') && html.includes('data-tab="usage"'), String(page1.status))
-  const state = await (await fetch(`http://127.0.0.1:${GW_PORT}/api/state?t=${token}`)).json()
+  const state = await (await fetch(`${gwBase}/api/state?t=${token}`)).json()
   check('经网关取 /api/state → agents 数组（数据穿透成功）', Array.isArray(state?.agents) && state.agents.length > 0, JSON.stringify(state?.agents?.[0] ?? state)?.slice(0, 80))
-  const noTok = await fetch(`http://127.0.0.1:${GW_PORT}/`)
+  const noTok = await fetch(`${gwBase}/`)
   check('无 token → 网关 401 引导页（口径同 AgentHub）', noTok.status === 401 && (await noTok.text()).includes('配对'), String(noTok.status))
-  const badTok = await fetch(`http://127.0.0.1:${GW_PORT}/?t=${'0'.repeat(36)}`)
+  const badTok = await fetch(`${gwBase}/?t=${'0'.repeat(36)}`)
   check('token 无路由 → 502 桌面端不在线', badTok.status === 502, String(badTok.status))
-  const post = await fetch(`http://127.0.0.1:${GW_PORT}/api/send?t=${token}`, {
+  const post = await fetch(`${gwBase}/api/send?t=${token}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: 'no_such', text: 'hi' })
   })
   check('POST 经网关转发 → 业务校验生效（agentId 不存在 → 400）', post.status === 400, String(post.status))
@@ -109,8 +117,10 @@ try {
   await js(cdp, `window.agenthub.mobile.setEnabled(false)`)
   const r2 = await waitRelay(cdp, (s) => !s.connected, 8000)
   check('关闭服务 → 中继同步断开', r2?.connected === false, JSON.stringify(r2?.connected))
-  const gwOnline2 = (await (await fetch(`http://127.0.0.1:${GW_PORT}/relay-info`)).json()).online
-  check('网关路由已清空（在线数回落）', gwOnline2 === gwOnline0, `${gwOnline1} → ${gwOnline2}`)
+  if (!EXTERNAL_GW) {
+    const gwOnline2 = (await (await fetch(`${gwBase}/relay-info`)).json()).online
+    check('网关路由已清空（在线数回落）', gwOnline2 === gwOnline0, `${gwOnline0} → ${gwOnline2}`)
+  }
 
   /* ---- 5) 还原 ---- */
   const offRelay = await js(cdp, `window.agenthub.mobile.setRelayEnabled(${wasRelay})`)
