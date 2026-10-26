@@ -738,6 +738,10 @@
 .mob-qr-tabs { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
 .mob-qr-tabs button { border: 1px solid var(--border, rgba(255,255,255,.12)); background: transparent; color: var(--text-dim); padding: 6px 16px; font-size: 13px; border-radius: 999px; cursor: pointer; }
 .mob-qr-tabs button.active { background: var(--accent, #4c7dff); color: #fff; border-color: var(--accent, #4c7dff); }
+.mob-qr-tabs button.dim { opacity: .45; } /* 通道未就绪：可见但置灰（可点入看引导） */
+/* 通道未就绪的引导区（替代二维码位置） */
+.mob-domain-guide { display: grid; place-items: center; padding: 26px 12px; }
+.mob-domain-hint { color: var(--text-dim); font-size: 13px; line-height: 1.7; text-align: center; max-width: 320px; }
 .mob-url { display: flex; align-items: center; gap: 8px; justify-content: center; margin: 6px 0 10px; }
 .mob-url code { font-size: 12px; color: var(--text-dim); word-break: break-all; text-align: center; }
 .mob-notes { margin: 8px 0 0 16px; color: var(--text-dim); line-height: 1.7; }

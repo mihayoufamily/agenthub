@@ -35,7 +35,11 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
 
   useEffect(() => {
     if (!open) return
-    bridge.mobile.status().then(setSt).catch(() => setSt(null))
+    bridge.mobile.status().then((s) => {
+      setSt(s)
+      // 配置了自定义域名的话默认展示它（最常用的固定入口）
+      if (s?.customDomain) setQrMode('custom')
+    }).catch(() => setSt(null))
     bridge.mobile.tunnelStatus().then(setTun).catch(() => setTun(null))
     bridge.mobile.relayStatus().then(setRelay).catch(() => setRelay(null))
     const offT = bridge.mobile.onTunnelStatus(setTun)
@@ -99,16 +103,16 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
   const tunnelUrl = tun?.url ? `${tun.url}/?t=${token}` : ''
   /** 各通道当前可用的 URL（不可用为空串） */
   const modeUrl: Record<QrMode, string> = { lan: lanUrl, custom: customUrl, relay: relayUrl, tunnel: tunnelUrl }
-  // 选中通道不可用时回落到第一个可用的（避免出现空二维码）
-  const activeMode: QrMode = modeUrl[qrMode] ? qrMode : (customUrl ? 'custom' : relayUrl ? 'relay' : tunnelUrl ? 'tunnel' : 'lan')
+  // 选中通道恒定（不自动跳走）——不可用的通道进入后显示引导（怎么开启/为什么连不上），可发现性优先
+  const activeMode: QrMode = qrMode
   const url = modeUrl[activeMode]
 
-  /** 二维码区渲染所依赖的通道元数据（tabs / 卡片颜色 / 标签文案） */
-  const modes: { id: QrMode; label: string; show: boolean; cardCls: string; tag: string }[] = [
-    { id: 'lan', label: '📶 局域网', show: true, cardCls: 'lan', tag: '📶 局域网 · 手机连同一个 Wi-Fi' },
-    { id: 'custom', label: '🏠 我的域名', show: !!customDomain, cardCls: 'pub', tag: '🏠 我的固定域名 · 手机任意网络 · 经我自己的隧道' },
-    { id: 'relay', label: '🌐 中继', show: relayUrl !== '', cardCls: 'pub', tag: '🌐 官方中继 · 手机任意网络 · 地址固定' },
-    { id: 'tunnel', label: '⚡ 临时', show: tunnelUrl !== '', cardCls: 'tmp', tag: '⚡ 临时隧道 · 地址每次开启都变 · 国内常被污染' }
+  /** 二维码区渲染所依赖的通道元数据（tabs / 卡片颜色 / 标签文案；四通道恒显示，不可用置灰可点入引导） */
+  const modes: { id: QrMode; label: string; cardCls: string; tag: string; ready: boolean }[] = [
+    { id: 'lan', label: '📶 局域网', cardCls: 'lan', tag: '📶 局域网 · 手机连同一个 Wi-Fi', ready: lanUrl !== '' },
+    { id: 'custom', label: '🏠 我的域名', cardCls: 'pub', tag: '🏠 我的固定域名 · 手机任意网络 · 经我自己的隧道', ready: customUrl !== '' },
+    { id: 'relay', label: '🌐 中继', cardCls: 'pub', tag: '🌐 官方中继 · 手机任意网络 · 地址固定', ready: relayUrl !== '' },
+    { id: 'tunnel', label: '⚡ 临时', cardCls: 'tmp', tag: '⚡ 临时隧道 · 地址每次开启都变 · 国内常被污染', ready: tunnelUrl !== '' }
   ]
   const active = modes.find((m) => m.id === activeMode) ?? modes[0]
 
@@ -175,26 +179,61 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
           </div>
         )}
 
-        {on && running && url && (
+        {on && running && (
           <>
-            {/* 模式切换置顶：先选通道，再看对应的码（通道按可用性显示） */}
+            {/* 模式切换置顶：四通道恒显示（不可用置灰可点入，看到全部能力 + 引导） */}
             <div className="mob-qr-tabs">
-              {modes.filter((m) => m.show).map((m) => (
-                <button key={m.id} type="button" className={activeMode === m.id ? 'active' : ''} onClick={() => setQrMode(m.id)}>
+              {modes.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={activeMode === m.id ? 'active' : m.ready ? '' : 'dim'}
+                  onClick={() => setQrMode(m.id)}
+                >
                   {m.label}
                 </button>
               ))}
             </div>
-            {/* 二维码卡片：边框颜色区分通道，顶部标签条写明适用场景 */}
+            {/* 二维码卡片：边框颜色区分通道，顶部标签条写明适用场景；不可用通道显示引导 */}
             <div className={'mob-qr-card ' + active.cardCls}>
               <div className="mob-qr-tag">{active.tag}</div>
-              <div className="mob-qr" dangerouslySetInnerHTML={{ __html: qrSvg(url) }} />
-              <div className="mob-url">
-                <code>{url}</code>
-                <CopyButton getText={() => url} label="复制" />
-              </div>
-              {/* 我的域名：域名编辑（保存后二维码即时更新） */}
-              {activeMode === 'custom' && (
+              {url ? (
+                <>
+                  <div className="mob-qr" dangerouslySetInnerHTML={{ __html: qrSvg(url) }} />
+                  <div className="mob-url">
+                    <code>{url}</code>
+                    <CopyButton getText={() => url} label="复制" />
+                  </div>
+                </>
+              ) : activeMode === 'custom' ? (
+                /* 我的域名：未配置/未就绪 → 直接给输入框（引导即操作） */
+                <div className="mob-domain-guide">
+                  <div className="mob-domain-hint">填入你自己的隧道域名（如 mobile.example.com），保存后自动生成二维码</div>
+                  <div className="mob-domain-edit">
+                    <input
+                      value={domainDraft}
+                      onChange={(e) => setDomainDraft(e.target.value)}
+                      placeholder="mobile.example.com"
+                      onKeyDown={(e) => { if (e.key === 'Enter') void saveDomain() }}
+                    />
+                    <button type="button" className="primary" onClick={() => void saveDomain()}>保存</button>
+                  </div>
+                </div>
+              ) : activeMode === 'relay' ? (
+                <div className="mob-domain-guide">
+                  <div className="mob-domain-hint">
+                    {relay?.enabled
+                      ? '正在连接官方中继网关…（本机网络到 Cloudflare 受限时自动轮换重试；网络恢复后二维码自动出现）'
+                      : '打开上方「公网（官方中继）」开关即可生成二维码'}
+                  </div>
+                </div>
+              ) : (
+                <div className="mob-domain-guide">
+                  <div className="mob-domain-hint">打开上方「公网（临时隧道）」开关即可生成二维码（国内网络下大概率不可用，优先用「我的域名」或「中继」）</div>
+                </div>
+              )}
+              {/* 我的域名：已配置时提供域名编辑入口 */}
+              {activeMode === 'custom' && url && (
                 <div className="mob-domain-edit">
                   {domainEditing ? (
                     <>
