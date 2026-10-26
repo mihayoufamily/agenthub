@@ -531,6 +531,7 @@ export function chatStream(
           const done: ToolCall = {
             ...call,
             status: res.ok ? 'done' : 'error',
+            durMs: Date.now() - call.ts,
             result: res.output.length > 5000 ? res.output.slice(0, 5000) + '…（已截断）' : res.output,
             ...(res.change ? { change: res.change } : {}),
             ...(res.hooks?.length ? { hooks: res.hooks } : {})

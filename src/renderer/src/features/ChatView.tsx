@@ -1,6 +1,6 @@
 // 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型管理、用量显示
-import React, { useEffect, useRef, useState } from 'react'
-import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel, McpServer, LedgerUsageRow } from '@shared/types'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel, McpServer, LedgerUsageRow, FileChange } from '@shared/types'
 import { useSessions } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
@@ -17,6 +17,7 @@ import { UsagePanel, rollup } from '../components/UsagePanel'
 import { DonutRings } from '../components/DonutRings'
 import { CheckpointBar } from '../components/CheckpointBar'
 import { FilePreviewPanel } from '../components/FilePreviewPanel'
+import { aggregateSessionChanges } from '@shared/timeline'
 import { digestThinking } from '../lib/thinking'
 import { useSmoothText } from '../lib/smoothText'
 import { fmtTime, fmtSize, fmtTokens, cls } from '../lib/utils'
@@ -294,6 +295,10 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
         </button>
       )}
 
+      {/* 会话级改动聚合：把全会话各消息的检查点登记合并成一条（数据在各 msg.checkpoint 的 change 里，
+          这里只聚合渲染；CLI 改动由检查点的目录对照兜底，见 CheckpointBar 口径） */}
+      <SessionChangesBar messages={messages} />
+
       <div className="wb-composer-wrap">
         <ContextUsageBar
           agentId={agent.id}
@@ -326,6 +331,49 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
     </div>
   )
 }
+
+/** 会话级文件改动聚合条：合并当前会话所有消息的检查点登记，常驻可折叠（数据已齐，纯渲染层聚合） */
+function SessionChangesBar({ messages }: { messages: ChatMessage[] }) {
+  const [open, setOpen] = useState(false)
+  const changes = useMemo(() => {
+    const items: { rel: string; path: string; kind: FileChange['kind'] }[] = []
+    for (const m of messages) {
+      for (const tc of m.toolCalls ?? []) {
+        if (tc.change) items.push({ rel: tc.change.rel, path: tc.change.path, kind: tc.change.kind })
+      }
+    }
+    return items
+  }, [messages])
+  if (!changes.length) return null
+  const { counts, items } = aggregateSessionChanges(changes)
+  const total = changes.length
+  return (
+    <div
+      style={{ margin: '0 24px 8px', padding: '5px 10px', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', fontSize: 12, lineHeight: 1.5, background: 'var(--surface-2)' }}
+      data-testid="session-changes-bar"
+    >
+      <button onClick={() => setOpen((o) => !o)} style={{ all: 'unset', cursor: 'pointer', display: 'flex', gap: 6, alignItems: 'center', width: '100%' }}>
+        <Icon name="folder" size={12} />
+        <b>本会话共改动 {total} 次</b>
+        <span style={{ color: 'var(--text-3)', flex: 1 }}>
+          新建 {counts.created} · 修改 {counts.modified} · 删除 {counts.deleted} · 移动 {counts.moved}（逐条 diff 在各回复的改动条里）
+        </span>
+        <span style={{ color: 'var(--text-3)' }}>{open ? '收起 ▴' : '展开 ▾'}</span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 4, maxHeight: 180, overflow: 'auto' }} data-testid="session-changes-list">
+          {items.map((it, i) => (
+            <div key={`${it.kind}-${it.rel}-${i}`} style={{ display: 'flex', gap: 6, fontSize: 11.5, color: 'var(--text-2)', padding: '1px 0' }}>
+              <span style={{ color: it.kind === 'deleted' ? 'var(--danger)' : it.kind === 'created' ? 'var(--ok)' : 'var(--text-3)', minWidth: 34 }}>{TOOL_KIND_TEXT[it.kind] ?? it.kind}</span>
+              <span style={{ wordBreak: 'break-all' }}>{it.rel}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+const TOOL_KIND_TEXT: Record<string, string> = { created: '新建', modified: '修改', deleted: '删除', moved: '移动' }
 
 /** 对话栏底部条：模型选择 + 上下文用量 + 本会话消耗费用（用户要求这些信息离输入框最近） */
 /**
@@ -469,28 +517,65 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor, 
             交接自 {msg.handoff.fromAgentName} <Icon name="handoff" size={11} />
           </div>
         )}
-        {msg.toolCalls && msg.toolCalls.length > 0 && msg.toolCalls.map((tc) => (
-          <ToolCallCard key={tc.id} tc={tc} />
-        ))}
-        {msg.reasoning && msg.reasoning.trim() && <ReasoningBlock text={msg.reasoning} streaming={msg.streaming && !msg.text} />}
-        {(msg.text || !msg.toolCalls?.length) && (
-          <div className={cls('bubble word-break')}>
-            {/* 首字未到（思考/网络等待）时显示"思考中"转圈而不是空气泡；正文到达后走柔和逐字揭示 */}
-            {msg.streaming && !shownText ? (
-              <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
-            ) : (
-              <>
-                <MessageBody text={shownText} revealEdge={revealEdge} allowRemoteImages={allowRemoteImages} />
-                {msg.streaming && <span className="caret" />}
-              </>
-            )}
-            {msg.error && <div className="err">⚠ {msg.error}</div>}
-            {msg.demo && !msg.streaming && (
-              <div style={{ marginTop: 6 }}>
-                <span className="demo-badge">演示数据 · 非真实模型输出</span>
+        {msg.role === 'assistant' && msg.segments && msg.segments.length > 0 ? (
+          /* zcode 式时间线：思考/工具/正文按真实到达顺序穿插渲染 */
+          msg.segments.map((seg, si) => {
+            if (seg.kind === 'reasoning') {
+              return <ReasoningBlock key={`r${si}`} text={seg.text} streaming={msg.streaming && si === msg.segments!.length - 1} />
+            }
+            if (seg.kind === 'tool') {
+              const tc = msg.toolCalls?.find((c) => c.id === seg.tcId)
+              if (!tc) return null
+              return <ToolCallCard key={tc.id} tc={tc} />
+            }
+            const isLastText = !msg.segments!.slice(si + 1).some((s) => s.kind === 'text')
+            const segShown = isLastText ? shownText.slice(shownText.lastIndexOf(seg.text) >= 0 ? shownText.lastIndexOf(seg.text) : 0) : seg.text
+            return (
+              <div key={`t${si}`} className={cls('bubble word-break')}>
+                {msg.streaming && isLastText && !shownText ? (
+                  <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
+                ) : (
+                  <>
+                    <MessageBody text={isLastText ? segShown : seg.text} revealEdge={isLastText && revealEdge} allowRemoteImages={allowRemoteImages} />
+                    {msg.streaming && isLastText && <span className="caret" />}
+                  </>
+                )}
+                {msg.error && isLastText && <div className="err">⚠ {msg.error}</div>}
+                {msg.demo && !msg.streaming && isLastText && (
+                  <div style={{ marginTop: 6 }}>
+                    <span className="demo-badge">演示数据 · 非真实模型输出</span>
+                  </div>
+                )}
+              </div>
+            )
+          })
+        ) : (
+          /* 旧消息（无 segments）：回退三段式 */
+          <>
+            {msg.toolCalls && msg.toolCalls.length > 0 && msg.toolCalls.map((tc) => (
+              <ToolCallCard key={tc.id} tc={tc} />
+            ))}
+            {msg.reasoning && msg.reasoning.trim() && <ReasoningBlock text={msg.reasoning} streaming={msg.streaming && !msg.text} />}
+            {(msg.text || !msg.toolCalls?.length) && (
+              <div className={cls('bubble word-break')}>
+                {/* 首字未到（思考/网络等待）时显示"思考中"转圈而不是空气泡；正文到达后走柔和逐字揭示 */}
+                {msg.streaming && !shownText ? (
+                  <span className="thinking-wait"><span className="spin-dot" />思考中…</span>
+                ) : (
+                  <>
+                    <MessageBody text={shownText} revealEdge={revealEdge} allowRemoteImages={allowRemoteImages} />
+                    {msg.streaming && <span className="caret" />}
+                  </>
+                )}
+                {msg.error && <div className="err">⚠ {msg.error}</div>}
+                {msg.demo && !msg.streaming && (
+                  <div style={{ marginTop: 6 }}>
+                    <span className="demo-badge">演示数据 · 非真实模型输出</span>
+                  </div>
+                )}
               </div>
             )}
-          </div>
+          </>
         )}
         {msg.checkpoint && !msg.streaming && <CheckpointBar id={msg.checkpoint} title="这次回复改动的文件" />}
         <div className="msg-time">
@@ -498,6 +583,25 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor, 
           {msg.model && ` · ${msg.model}`}
           {msg.usage?.tokens ? ` · ${fmtTokens(msg.usage.tokens)} tk${msg.usage.prompt != null ? `（入 ${fmtTokens(msg.usage.prompt)}/出 ${fmtTokens(msg.usage.completion ?? 0)}）` : ''}${msg.cost != null ? ` · ${fmtCost(msg.cost)}` : ''}` : ''}
           {msg.attachments && msg.attachments.length > 0 && ` · 附件 ${msg.attachments.length} 个${msg.attachments[0].size ? `（${fmtSize(msg.attachments[0].size)}）` : ''}`}
+          {msg.role === 'assistant' && (msg.segments?.some((s) => s.kind === 'text') ? msg.text : (msg.text || msg.segments)) ? (
+            <CopyButton getText={() => {
+              const parts: string[] = []
+              if (msg.segments?.length) {
+                for (const seg of msg.segments) {
+                  if (seg.kind === 'reasoning') parts.push(`【思考】\n${seg.text}`)
+                  else if (seg.kind === 'tool') {
+                    const tc = msg.toolCalls?.find((c) => c.id === seg.tcId)
+                    if (tc) parts.push(`【工具 ${tc.tool}】${tc.status === 'error' ? '（失败）' : ''}\n${tc.result ?? ''}`)
+                  } else parts.push(seg.text)
+                }
+              } else {
+                if (msg.reasoning) parts.push(`【思考】\n${msg.reasoning}`)
+                for (const tc of msg.toolCalls ?? []) parts.push(`【工具 ${tc.tool}】${tc.status === 'error' ? '（失败）' : ''}\n${tc.result ?? ''}`)
+                parts.push(msg.text)
+              }
+              return parts.join('\n\n')
+            }} label="复制" />
+          ) : null}
         </div>
       </div>
     </div>
@@ -869,7 +973,7 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
           {argLine}
         </span>
         <span style={{ flexShrink: 0, color: tc.status === 'error' ? 'var(--danger)' : tc.status === 'running' ? 'var(--text-3)' : 'var(--ok)' }}>
-          {tc.status === 'running' ? '执行中…' : tc.status === 'error' ? '失败' : '完成'}
+          {tc.status === 'running' ? '执行中…' : tc.status === 'error' ? '失败' : '完成'}{tc.durMs != null ? ` · ${tc.durMs < 1000 ? `${tc.durMs}ms` : `${(tc.durMs / 1000).toFixed(1)}s`}` : ''}
         </span>
       </button>
       {open && tc.hooks?.length && (

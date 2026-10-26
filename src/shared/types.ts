@@ -186,6 +186,8 @@ export interface ToolCall {
   /** 执行结果文本（文件内容/命令输出/错误信息；超限截断） */
   result?: string
   ts: number
+  /** 耗时（毫秒，完成/失败时填）：时间线工具卡直接显示"1.2s" */
+  durMs?: number
   /** 本次改动登记（有检查点时）：界面显示行级 diff 与"能不能回滚" */
   change?: FileChange
   /** 这次工具调用跑过的 Hook（含被 pre 否决的情况） */
@@ -263,6 +265,12 @@ export interface ChatMessage {
   skills?: string[]
   /** 本次回复对应的改动检查点 id（工具层写过文件才有；回滚入口据此找清单） */
   checkpoint?: string
+  /**
+   * 时间线段（对标 zcode 式过程流）：按事件真实到达顺序穿插的思考/工具/正文段。
+   * 新消息由事件合并双写（text/reasoning/toolCalls 聚合字段照旧保留，历史消息与旧会话天然兼容）；
+   * 旧会话无此字段——渲染层回退三段式。tool 段只存 tcId 引用，实体在 toolCalls。
+   */
+  segments?: import('./timeline').MsgSegment[]
 }
 
 export interface AgentSession {

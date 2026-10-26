@@ -9,6 +9,7 @@ import { CONTEXT_BUDGET_RATIO, fitHistory, foldTranscript } from '@shared/contex
 import { renderConventionsBlock } from '@shared/conventions'
 import { memoryBlockFor } from '@shared/retrieval'
 import { unionSkillIds } from '@shared/skills-union'
+import { applyEventToSegments } from '@shared/timeline'
 import { useAgents } from './agents'
 import { useUi } from './ui'
 import { useSettings } from './settings'
@@ -325,7 +326,8 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       ]
 
       // 工具循环会产生多段思考：正文/工具事件之后再来的思考要另起一段，
-      // 否则上一轮的过场句会和这一轮的结论句粘连成一段，重点筛选形同不存在
+      // 否则上一轮的过场句会和这一轮的结论句粘连成一段，重点筛选形同不存在。
+      // segments（时间线）与 text/reasoning/toolCalls 聚合字段双写——后者是历史/导出/费用口径，前者是展示顺序
       let reasoningOpen = false
       let off = bridge.models.onEvent((ev) => {
         if (ev.reqId !== reqId) return
@@ -333,7 +335,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           reasoningOpen = false
           set((s) => withActive(s, agentId, (ses) => ({
             ...ses,
-            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + ev.text } : m))
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + ev.text, segments: applyEventToSegments(m.segments, { type: 'delta', text: ev.text }) } : m))
           })))
         } else if (ev.type === 'reasoning' && ev.text) {
           // 思考模型的思考过程：追加到消息 reasoning 字段（UI 折叠展示；多轮对话回传协议）
@@ -341,7 +343,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           reasoningOpen = true
           set((s) => withActive(s, agentId, (ses) => ({
             ...ses,
-            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, reasoning: (m.reasoning ?? '') + sep + ev.text } : m))
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, reasoning: (m.reasoning ?? '') + sep + ev.text, segments: applyEventToSegments(m.segments, { type: 'reasoning', text: sep + ev.text }) } : m))
           })))
         } else if (ev.type === 'notice' && ev.text) {
           // CLI 心跳提示（如 90 秒无输出可能卡在权限审批）：toast 一次，不打断消息
@@ -367,7 +369,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
               const i = calls.findIndex((c) => c.id === tc.id)
               if (i >= 0) calls[i] = tc
               else calls.push(tc)
-              return { ...m, toolCalls: calls }
+              return { ...m, toolCalls: calls, segments: applyEventToSegments(m.segments, { type: 'tool', toolCall: tc }) }
             })
           })))
         } else if (ev.type === 'error') {

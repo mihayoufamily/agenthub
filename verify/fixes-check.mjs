@@ -3862,5 +3862,81 @@ console.log('\n[DB] planDefaultToolsBackfill 与一键补默认值')
     spDB2.error ?? '设置页缺一键入口')
 }
 
+// ---------- [TL2] 时间线过程流（segments 合并/聚合/dsh 探测/durMs/复制） ----------
+console.log('\n[TL2] zcode 式时间线过程流')
+{
+  const tl = await import('../out/shared/timeline.js')
+  {
+    // segment 合并行为：事件序 → 时间线
+    let segs
+    segs = tl.applyEventToSegments(segs, { type: 'reasoning', text: '先想想' })
+    segs = tl.applyEventToSegments(segs, { type: 'delta', text: '我来看下' })
+    segs = tl.applyEventToSegments(segs, { type: 'tool', toolCall: { id: 't1', tool: 'glob_files', args: {}, status: 'running', ts: 1 } })
+    segs = tl.applyEventToSegments(segs, { type: 'tool', toolCall: { id: 't1', tool: 'glob_files', args: {}, status: 'done', ts: 2 } })
+    segs = tl.applyEventToSegments(segs, { type: 'reasoning', text: '再想想' })
+    segs = tl.applyEventToSegments(segs, { type: 'delta', text: '结论是' })
+    ok('时间线按真实顺序穿插（思→文→工→思→文），同 id 工具不重复占位',
+      JSON.stringify(segs.map((s) => s.kind)) === JSON.stringify(['reasoning', 'text', 'tool', 'reasoning', 'text']) &&
+        segs.filter((s) => s.kind === 'tool').length === 1,
+      JSON.stringify(segs))
+    ok('连续 delta 追加同一段、连续 reasoning 新段逻辑不粘连',
+      (() => {
+        let s = tl.applyEventToSegments(undefined, { type: 'delta', text: 'a' })
+        s = tl.applyEventToSegments(s, { type: 'delta', text: 'b' })
+        const okText = s.length === 1 && s[0].text === 'ab'
+        let r = tl.applyEventToSegments(undefined, { type: 'reasoning', text: 'x' })
+        r = tl.applyEventToSegments(r, { type: 'reasoning', text: '\n\ny' })
+        const okReason = r.length === 1 && r[0].text.includes('x') && r[0].text.includes('y')
+        return okText && okReason
+      })())
+  }
+  {
+    // 会话改动聚合
+    const agg = tl.aggregateSessionChanges([
+      { rel: 'a.md', path: 'X', kind: 'created' },
+      { rel: 'a.md', path: 'X', kind: 'modified' },
+      { rel: 'a.md', path: 'X', kind: 'modified' },
+      { rel: 'b.md', path: 'Y', kind: 'deleted' }
+    ])
+    ok('会话改动聚合：计数含重复（真实次数），清单按 path+kind 去重',
+      agg.counts.created === 1 && agg.counts.modified === 2 && agg.counts.deleted === 1 &&
+        agg.items.length === 3 && agg.items.some((i) => i.rel === 'a.md' && i.kind === 'modified'),
+      JSON.stringify(agg))
+  }
+  {
+    // dsh ndjson 探测：结构化行映射、非 JSON 行原样 null
+    const r1 = tl.parseDshStructuredLine('{"type":"thinking","text":"思考中"}')
+    const r2 = tl.parseDshStructuredLine('{"event":"tool","name":"read_file","args":{"path":"a.md"},"output":"内容"}')
+    const r3 = tl.parseDshStructuredLine('这是普通文本输出')
+    const r4 = tl.parseDshStructuredLine('{"foo": 1}')
+    ok('dsh 探测：thinking 行→reasoning；tool 行→done 工具（带结果）；普通文本/无关 JSON→null',
+      r1?.type === 'reasoning' && r1.text === '思考中' &&
+        r2?.type === 'tool' && r2.toolCall.tool === 'read_file' && r2.toolCall.status === 'done' &&
+        r3 === null && r4 === null,
+      JSON.stringify({ r1, r2, r3, r4 }))
+  }
+  const oaTL2 = readSrcSafe('src/main/adapters/openai.ts')
+  ok('绊线：模型通道工具 done 事件填 durMs（Date.now - call.ts）',
+    oaTL2.error === null && /durMs:\s*Date\.now\(\)\s*-\s*call\.ts/.test(oaTL2.text),
+    oaTL2.error ?? 'openai.ts 缺 durMs')
+  const cliTL2 = readSrcSafe('src/main/adapters/cli.ts')
+  ok('绊线：claude/codebuddy 解析器 tool_result 填 durMs（startedAt 差）+ dsh 文本通道接探测函数',
+    cliTL2.error === null && /durMs:\s*use\s*\?\s*Math\.max\(0,\s*Date\.now\(\)\s*-\s*use\.startedAt\)/.test(cliTL2.text) &&
+      cliTL2.text.includes('parseDshStructuredLine(line)'),
+    cliTL2.error ?? 'cli.ts 缺 durMs 或 dsh 探测')
+  const sesTL2 = readSrcSafe('src/renderer/src/stores/sessions.ts')
+  ok('绊线：store 事件合并双写 segments（delta/reasoning/tool 三处都走 applyEventToSegments）',
+    sesTL2.error === null && sesTL2.text.split('applyEventToSegments').length >= 4,
+    sesTL2.error ?? 'sessions.ts 缺 segments 双写')
+  const cvTL2 = readSrcSafe('src/renderer/src/features/ChatView.tsx')
+  ok('绊线：MessageRow 按 segments.map 渲染时间线且无 segments 回退三段式',
+    cvTL2.error === null && cvTL2.text.includes('msg.segments.map') && cvTL2.text.includes('回退三段式'),
+    cvTL2.error ?? 'MessageRow 缺时间线渲染')
+  ok('绊线：整条消息复制（CopyButton 拼思考/工具/正文）+ 会话改动聚合条 + 工具卡耗时显示',
+    cvTL2.error === null && cvTL2.text.includes('【思考】') && cvTL2.text.includes('data-testid="session-changes-bar"') &&
+      cvTL2.text.includes('aggregateSessionChanges') && /durMs != null/.test(cvTL2.text),
+    cvTL2.error ?? '缺复制/聚合条/耗时显示')
+}
+
 console.log(`\n结果：${pass} PASS / ${fail} FAIL`)
 process.exit(fail > 0 ? 1 : 0)

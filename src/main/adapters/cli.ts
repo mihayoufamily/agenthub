@@ -6,7 +6,8 @@ import { homedir } from 'node:os'
 import type { ChatChunkEvent } from './openai'
 import { humanizeError } from './openai'
 import { killTree } from '../shell'
-import type { ThinkingLevel } from '../../shared/types'
+import type { ThinkingLevel, ToolCall } from '../../shared/types'
+import { parseDshStructuredLine } from '../../shared/timeline'
 
 /**
  * 本机 Agent CLI 执行适配层（接入"现成 Agent"而非"模型 API"，规格 §10）。
@@ -227,7 +228,7 @@ const WRITE_TOOLS: Record<string, string> = {
  * - result → 用量 + done/error
  */
 function makeStreamJsonParser(cwd: string): (obj: Record<string, unknown>, emit: (e: Omit<ChatChunkEvent, 'reqId'>) => void) => void {
-  const toolUses = new Map<string, { tool: string; args: unknown }>()
+  const toolUses = new Map<string, { tool: string; args: unknown; startedAt: number }>()
   // 已上报过的思考块：stream-json 会在每个 assistant 快照里重复带完整 content，需去重避免刷屏
   const seenThinking = new Set<string>()
   // 思考块整块上报：多块之间补空行，否则在界面里黏成一段、"只显重点"的分段筛选失效
@@ -247,7 +248,7 @@ function makeStreamJsonParser(cwd: string): (obj: Record<string, unknown>, emit:
         }
         if (block?.type === 'tool_use' && block.id) {
           const tool = block.name ?? 'unknown'
-          toolUses.set(block.id, { tool, args: block.input })
+          toolUses.set(block.id, { tool, args: block.input, startedAt: Date.now() })
           emit({
             type: 'tool',
             toolCall: { id: block.id, tool, args: summarizeArgs(block.input), status: 'running', ts: Date.now() }
@@ -275,6 +276,7 @@ function makeStreamJsonParser(cwd: string): (obj: Record<string, unknown>, emit:
             tool: use?.tool ?? 'unknown',
             args: use ? summarizeArgs(use.args) : {},
             status: ok ? 'done' : 'error',
+            durMs: use ? Math.max(0, Date.now() - use.startedAt) : undefined,
             result: resultText.length > 5000 ? resultText.slice(0, 5000) + '…（已截断）' : resultText,
             ts: Date.now()
           },
@@ -1029,11 +1031,31 @@ export async function cliChatStream(
     const stdoutDecoder = new TextDecoder('utf-8')
     const stderrDecoder = new TextDecoder('utf-8')
     if (spec.format === 'text') {
-      // 纯文本 CLI：直接作为增量透出（如 dsh headless 的最终答案）
+      // 纯文本 CLI（如 dsh headless 的最终答案）直接作为增量透出；
+      // 但行若恰好是本仓事件语义的 ndjson（dsh 未来版本吐结构化流时），自动升级成
+      // reasoning/tool 事件——不猜协议：只认带可识别字段的 JSON 行，其余一律纯文本（探测函数纯可断言）
+      let dshLineBuf = ''
       proc.stdout?.on('data', (d) => {
         const text = stdoutDecoder.decode(d, { stream: true })
         stdoutBuf += text
-        if (text) emit({ type: 'delta', text })
+        dshLineBuf += text
+        const lines = dshLineBuf.split('\n')
+        dshLineBuf = lines.pop() ?? ''
+        for (const line of lines) {
+          const structured = parseDshStructuredLine(line)
+          if (structured?.type === 'reasoning' && structured.text) {
+            emit({ type: 'reasoning', text: structured.text })
+          } else if (structured?.type === 'tool' && structured.toolCall) {
+            emit({ type: 'tool', toolCall: structured.toolCall as ToolCall })
+          } else if (line.trim()) {
+            emit({ type: 'delta', text: line + '\n' })
+          }
+        }
+        if (dshLineBuf.length > MAX_LINE_BUFFER) {
+          emit({ type: 'delta', text: dshLineBuf })
+          dshLineBuf = ''
+          droppedLine = true
+        }
       })
     } else {
       proc.stdout?.on('data', (d) => {
