@@ -10,7 +10,7 @@
 import net from 'node:net'
 import tls from 'node:tls'
 import crypto from 'node:crypto'
-import { ipcMain } from 'electron'
+import { ipcMain, session } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { Store } from './store'
 
@@ -53,6 +53,28 @@ function proxyFromEnv(): ProxyConf | undefined {
     const u = new URL(raw)
     if ((u.protocol === 'http:' || u.protocol === 'https:') && u.hostname) return { host: u.hostname, port: Number(u.port) || 8080 }
   } catch { /* 格式不对当没有 */ }
+  return undefined
+}
+
+/**
+ * Windows 系统代理自动检测（Electron session.resolveProxy，与浏览器同源判定）：
+ * 用户开代理软件（SakuraCat/Clash 等会设系统代理）即自动检测到——
+ * 校园网对 CF 直连被阻断时，出站经代理绕行。env 代理优先（开发者显式指定 > 系统自动）。
+ * 仅支持 HTTP 代理（CONNECT）；SOCKS-only 代理跳过（Clash/SakuraCat 的混合端口都兼 HTTP）。
+ */
+async function detectProxy(): Promise<ProxyConf | undefined> {
+  const fromEnv = proxyFromEnv()
+  if (fromEnv) return fromEnv
+  try {
+    const info = await session.defaultSession.resolveProxy(DEFAULT_RELAY_URL)
+    for (const part of info.split(';')) {
+      const t = part.trim()
+      if (t.toUpperCase().startsWith('PROXY ')) {
+        const [host, port] = t.slice(6).trim().split(':')
+        if (host && port) return { host, port: Number(port) || 80 }
+      }
+    }
+  } catch { /* 无会话或失败当无代理 */ }
   return undefined
 }
 
@@ -247,7 +269,7 @@ async function handleReq(pack: { id: string; method?: string; path: string; quer
 
 // ---------- 连接生命周期 ----------
 
-function connect(attempt = 0) {
+async function connect(attempt = 0) {
   const p = readPref()
   if (!p.enabled || !p.relay || sock) return
   if (!p.token) { curError = '手机端服务尚未生成 token（先开关一次服务）'; push(); return }
@@ -256,9 +278,9 @@ function connect(attempt = 0) {
   push()
 
   // 三通道轮换（每次重连换一条，总有一条能活）：
-  //   代理-wss（env 代理存在时）→ 直连-wss:443 → 直连-ws:80
+  //   代理-wss（env/系统代理自动检测）→ 直连-wss:443 → 直连-ws:80
   // 校园网/公司网对 CF 直连被阻断时，代理通道兜底；无代理环境自动退化为双端口轮换
-  const proxy = proxyFromEnv()
+  const proxy = await detectProxy()
   const seq: { url: string; proxy?: ProxyConf }[] = []
   if (proxy) seq.push({ url: p.relayUrl, proxy })
   seq.push({ url: p.relayUrl })
@@ -330,7 +352,7 @@ function disconnect() {
  */
 export function syncRelayForService(serviceOn: boolean): void {
   if (!serviceOn) { disconnect(); return }
-  if (readPref().relay) connect()
+  if (readPref().relay) void connect()
 }
 
 export function initMobileRelay(opts: { getStore: () => Store; getWin: () => BrowserWindow | null }) {
@@ -345,10 +367,10 @@ export function initMobileRelay(opts: { getStore: () => Store; getWin: () => Bro
       // 服务本体没开：意图已记住，不连接（公网入口跟随服务）
       return { ok: true, ...status(), error: status().error ?? '请先开启手机端访问' }
     }
-    if (on) { reconnectAttempt = 0; connect() } else disconnect()
+    if (on) { reconnectAttempt = 0; void connect() } else disconnect()
     return { ok: true, ...status() }
   })
 
   // 随应用启动恢复：服务开 + relay 开 → 出站连接（延后 1.5s 避开启动高峰；网络慢时后台自动重连）
-  if (readPref().enabled && readPref().relay) setTimeout(connect, 1500)
+  if (readPref().enabled && readPref().relay) setTimeout(() => { void connect() }, 1500)
 }
