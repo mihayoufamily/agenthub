@@ -31,6 +31,11 @@ try {
 }
 cpSync(appSrc, appDst, { recursive: true })
 cpSync(join(srcDir, 'AgentHub.exe'), join(dstDir, 'AgentHub.exe'))
+// 公网接入捆绑：cloudflared.exe 在 resources/bin（= process.resourcesPath/bin），与 app 目录同级
+// ——漏了它 mobile-tunnel 找不到二进制，公网开关显示"未找到组件"且无法关闭（2026-10-26 实测踩坑）
+if (existsSync(join(srcDir, 'resources', 'bin'))) {
+  cpSync(join(srcDir, 'resources', 'bin'), join(dstDir, 'resources', 'bin'), { recursive: true })
+}
 
 // 2) 自校验：关键产物逐字节与 release 一致，不一致即失败退出
 const keyFiles = [

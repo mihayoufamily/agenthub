@@ -176,6 +176,8 @@ function lanUrls(port: number, token: string): string[] {
 function handle(req: http.IncomingMessage, res: http.ServerResponse) {
   void (async () => {
     const url = new URL(req.url ?? '/', 'http://local')
+    // 访问日志（不带 token 值，只记有无）：手机"一直加载"时用它判定请求到没到服务端
+    try { getStoreRef()?.log(`[mobile] ${req.socket.remoteAddress} ${req.method} ${url.pathname} t=${url.searchParams.get('t') ? 'yes' : 'no'}`) } catch { /* 日志失败不阻塞 */ }
     const t = url.searchParams.get('t') ?? undefined
     // 页面和 API 一视同仁：没带对 token 一律 401（页面给可读提示，不给任何数据）
     if (!tokenOk(t)) {

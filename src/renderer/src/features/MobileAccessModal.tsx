@@ -96,7 +96,7 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
               <Switch
                 on={tun.enabled}
                 onChange={(v) => void toggleTunnel(v)}
-                disabled={!tun.binaryFound}
+                disabled={!tun.binaryFound && !tun.enabled}
                 label="公网接入"
               />
             </div>
