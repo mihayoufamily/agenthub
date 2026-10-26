@@ -533,6 +533,11 @@ export interface Prefs {
     relay?: boolean
     /** 自架网关者的网关地址（wss://），缺省连官方网关 */
     relayUrl?: string
+    /**
+     * 自定义固定公网域名（2026-10-26）：用户自己的正式隧道入口（如 mobile.example.com），
+     * 独立于官方中继——只要隧道跑着就能用，填了就在弹窗出独立二维码。
+     */
+    customDomain?: string
   }
 }
 

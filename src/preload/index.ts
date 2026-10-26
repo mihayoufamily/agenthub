@@ -112,9 +112,12 @@ const api = {
   },
   /** 手机端查看服务（mobile.ts）：开关/状态查询 + 手机侧写操作的转发事件 */
   mobile: {
-    status: () => ipcRenderer.invoke('mobile:status') as Promise<{ enabled: boolean; running: boolean; port: number; hasToken: boolean; token?: string; urls: string[] }>,
+    status: () => ipcRenderer.invoke('mobile:status') as Promise<{ enabled: boolean; running: boolean; port: number; hasToken: boolean; token?: string; urls: string[]; customDomain?: string }>,
     setEnabled: (on: boolean) =>
       ipcRenderer.invoke('mobile:setEnabled', on) as Promise<{ ok: boolean } & { enabled: boolean; running: boolean; port: number; token?: string; urls: string[] }>,
+    /** 自定义固定公网域名（用户自己的隧道入口）：归一化后存 prefs，弹窗出独立二维码 */
+    setCustomDomain: (d: string) =>
+      ipcRenderer.invoke('mobile:setCustomDomain', d) as Promise<{ ok: boolean; customDomain?: string; message?: string }>,
     /** 手机侧发来消息（已过 token 与 agentId 校验）；返回退订函数 */
     onSendMessage: (cb: (m: { agentId: string; text: string }) => void) => {
       const handler = (_e: unknown, data: { agentId: string; text: string }) => cb(data)

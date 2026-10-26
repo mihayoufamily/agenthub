@@ -724,9 +724,16 @@
 .mob-qr-card { margin-top: 12px; padding: 10px 12px 12px; border: 1px solid var(--border, rgba(255,255,255,.12)); border-radius: 12px; }
 .mob-qr-card.lan { border-color: rgba(76,125,255,.45); }
 .mob-qr-card.pub { border-color: rgba(48,164,108,.55); }
+.mob-qr-card.tmp { border-color: rgba(230,153,48,.55); }
 .mob-qr-tag { display: flex; justify-content: center; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; margin: 0 auto 4px; width: fit-content; }
 .mob-qr-card.lan .mob-qr-tag { color: #7da2ff; background: rgba(76,125,255,.14); }
 .mob-qr-card.pub .mob-qr-tag { color: #5ecf95; background: rgba(48,164,108,.16); }
+.mob-qr-card.tmp .mob-qr-tag { color: #f0b357; background: rgba(230,153,48,.16); }
+/* 我的域名编辑行（固定域名 tab 内） */
+.mob-domain-edit { display: flex; justify-content: center; gap: 6px; margin-top: 4px; }
+.mob-domain-edit input { background: rgba(255,255,255,.06); border: 1px solid var(--border, rgba(255,255,255,.14)); border-radius: 6px; color: var(--text, inherit); padding: 4px 8px; font-size: 12px; width: 190px; }
+.mob-domain-edit button { border: 1px solid var(--border, rgba(255,255,255,.14)); background: transparent; color: var(--text-dim); padding: 4px 10px; font-size: 12px; border-radius: 6px; cursor: pointer; }
+.mob-domain-edit button.primary { background: var(--accent, #4c7dff); color: #fff; border-color: var(--accent, #4c7dff); }
 /* 通道切换 tabs（二维码上方） */
 .mob-qr-tabs { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
 .mob-qr-tabs button { border: 1px solid var(--border, rgba(255,255,255,.12)); background: transparent; color: var(--text-dim); padding: 6px 16px; font-size: 13px; border-radius: 999px; cursor: pointer; }

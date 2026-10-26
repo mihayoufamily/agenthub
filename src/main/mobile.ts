@@ -28,6 +28,8 @@ export interface MobileStatus {
   hasToken: boolean
   token?: string
   urls: string[]
+  /** 自定义固定公网域名（用户自己的隧道入口，弹窗出独立二维码） */
+  customDomain?: string
 }
 
 let server: http.Server | null = null
@@ -37,13 +39,13 @@ let getWinRef: () => BrowserWindow | null = () => null
 
 // ---------- 配置存取 ----------
 
-function readPref(): { enabled: boolean; port: number; token: string } {
+function readPref(): { enabled: boolean; port: number; token: string; customDomain?: string } {
   const st = getStoreRef()
   const p = st?.getConfig().prefs.mobileService
-  return { enabled: p?.enabled ?? false, port: p?.port ?? DEFAULT_PORT, token: p?.token ?? '' }
+  return { enabled: p?.enabled ?? false, port: p?.port ?? DEFAULT_PORT, token: p?.token ?? '', customDomain: p?.customDomain }
 }
 
-function writePref(patch: Partial<{ enabled: boolean; port: number; token: string }>) {
+function writePref(patch: Partial<{ enabled: boolean; port: number; token: string; customDomain: string }>) {
   const st = getStoreRef()
   if (!st) return
   const cfg = st.getConfig()
@@ -275,7 +277,8 @@ function status(): MobileStatus {
     hasToken: !!pref.token,
     // token 只在已启用时给（弹窗要拿它画二维码）；关闭状态不外借
     token: pref.enabled && pref.token ? pref.token : undefined,
-    urls: pref.enabled && running && pref.token ? lanUrls(currentPort, pref.token) : []
+    urls: pref.enabled && running && pref.token ? lanUrls(currentPort, pref.token) : [],
+    customDomain: pref.customDomain || undefined
   }
 }
 
@@ -297,6 +300,15 @@ export function initMobile(opts: { getStore: () => Store; getWin: () => BrowserW
 
   // 随应用启动恢复：上次开着就接着开（与托盘/定时任务同一"跟随配置"口径）
   if (readPref().enabled) startServer()
+  // 自定义固定公网域名（用户自己的隧道入口，弹窗独立二维码）
+  ipcMain.handle('mobile:setCustomDomain', (_e, d: unknown) => {
+    if (typeof d !== 'string') return { ok: false, message: '参数必须是字符串' }
+    // 归一化：剥协议/路径/末尾斜杠，只留 hostname（端口保留）
+    const clean = d.trim().replace(/^https?:\/\//i, '').replace(/\/+.*$/, '')
+    if (clean && !/^[a-z0-9.-]+(:\d+)?$/i.test(clean)) return { ok: false, message: '域名格式不对（示例：mobile.example.com）' }
+    writePref({ customDomain: clean })
+    return { ok: true, customDomain: clean || undefined }
+  })
   // 公网隧道的 IPC + 恢复（自己判断 enabled && tunnel，服务端口的 listen 异步落定前它已能连边缘）
   initMobileTunnel({ getStore: opts.getStore, getWin: opts.getWin })
   // 中继网关的 IPC + 恢复（自己判断 enabled && relay）
