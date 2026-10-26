@@ -10,7 +10,8 @@ import { spawn } from 'node:child_process'
 import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
 
 const PORT = 9251
-const HTTP_PORT = 8748
+/** 测试实例固定用 8749：隔离 profile 与用户实例并存时，8748 会被用户实例占用 */
+const HTTP_PORT = 8749
 let failed = 0
 let passed = 0
 const check = (name, cond, detail) => {
@@ -23,7 +24,7 @@ const fetchText = async (path, token) => {
   return r
 }
 
-const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env: launchEnv() })
+const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify', '--user-data-dir=D:/dsh/agenthub/.tmp/profile-mobile'], { stdio: 'ignore', env: launchEnv() })
 try {
   const page = await waitHttp(PORT, 25000)
   const cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -34,6 +35,9 @@ try {
   await js(cdp, 'window.__ahub_debug.workbench()')
   await waitJs(cdp, 'document.querySelectorAll(".agent-list .agent-item").length > 0', 25000)
   await sleep(600)
+
+  // 测试实例的本地服务端口改为 8749（与上方 HTTP_PORT 对应；8748 可能被用户实例占用）
+  await js(cdp, `window.agenthub.config.get().then((c) => window.agenthub.config.setPrefs({ ...c.prefs, mobileService: { ...c.prefs.mobileService, port: ${HTTP_PORT} } }))`)
 
   /* ---- 1) IPC：启用服务 ---- */
   const before = await js(cdp, `window.agenthub.mobile.status()`)
@@ -47,11 +51,14 @@ try {
   check('首次启用自动生成 token（48 位 hex 内）', typeof on?.token === 'string' && /^[0-9a-f]{16,64}$/.test(on.token), String(on?.token)?.slice(0, 8) + '…')
   check('urls 是带 token 的 http 地址（有局域网 IP 才非空；无则如实跳过）', on?.running === true && (on?.token != null), JSON.stringify(on?.urls?.length))
 
-  /* ---- 2) HTTP：鉴权 fail-closed ---- */
+  /* ---- 2) HTTP：鉴权 fail-closed（页面壳是静态零数据，始终可载入——登录视图由页面按 401 自切） ---- */
   const noTokPage = await fetchText('/')
-  check('无 token 访问页面 → 401', noTokPage.status === 401)
+  const noTokHtml = await noTokPage.text()
+  check('无 token 访问页面 → 200 登录壳（静态模板，登录视图由页面按 API 401 自切）',
+    noTokPage.status === 200 && noTokHtml.includes('登录 AgentHub') && noTokHtml.includes('data-tab="chat"'),
+    String(noTokPage.status))
   const noTokApi = await fetch(`http://127.0.0.1:${HTTP_PORT}/api/state`)
-  check('无 token 访问 API → 401 JSON', noTokApi.status === 401 && (await noTokApi.json()).ok === false)
+  check('无凭据访问 API → 401 JSON（可读引导）', noTokApi.status === 401 && (await noTokApi.json()).ok === false)
   const badTok = await fetch(`http://127.0.0.1:${HTTP_PORT}/api/state?t=${'0'.repeat(on.token.length)}`)
   check('错误 token（等长）→ 401', badTok.status === 401)
 
@@ -63,11 +70,11 @@ try {
   check('/api/state 形状：agents 数组且不含敏感字段',
     Array.isArray(state.agents) && state.agents.length > 0 && state.agents.every((a) => !('keyId' in a) && !('modelConfig' in a) && !('systemPrompt' in a)),
     JSON.stringify(state.agents?.[0]))
-  check('/api/state 形状：usage.today/total + runs 数组',
-    state.usage?.today?.calls != null && state.usage?.total?.tokens != null && Array.isArray(state.runs),
+  check('/api/state 形状：usage.today/total + runs 数组 + 会话列表',
+    state.usage?.today?.calls != null && state.usage?.total?.tokens != null && Array.isArray(state.runs) && Array.isArray(state.sessionList),
     JSON.stringify(state.usage))
-  check('/api/state 形状：session.messages 已裁剪（无 reasoning/segments 等原文字段）',
-    state.session === null || (state.session.messages[0] && !('reasoning' in state.session.messages[0]) && !('segments' in state.session.messages[0])),
+  check('/api/state 形状：消息含思考过程（reasoning 裁剪字段），segments 不外发',
+    state.session === null || (state.session.messages[0] && ('reasoning' in state.session.messages[0]) && !('segments' in state.session.messages[0])),
     JSON.stringify(state.session?.messages?.[0])?.slice(0, 80))
 
   /* ---- 3) 写操作：只测校验路径（不触发真实模型调用） ---- */
@@ -87,7 +94,9 @@ try {
   /* ---- 4) UI：弹窗 + 二维码 ---- */
   const ui = await js(cdp, `(async () => {
     const tick = (ms) => new Promise(r => setTimeout(r, ms))
-    document.querySelector('.foot-btn[title="手机查看"]').click()
+    const footBtn = document.querySelector('.foot-btn[title="手机查看"]')
+    if (!footBtn) return { opened: false, reason: 'foot-btn 手机查看 not found' }
+    footBtn.click()
     await tick(300)
     const modal = document.querySelector('.modal, [class*="modal"]')
     const opened = !!document.querySelector('.mob-wrap')

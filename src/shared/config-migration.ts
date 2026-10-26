@@ -2,7 +2,7 @@
 import type { McpServer, Prefs, AppConfig } from './types'
 
 /** 当前配置格式头版本：`store.ts` 的迁移链与 importConfig 都以此为准，不再各写各的数字 */
-export const SCHEMA_HEAD = 3
+export const SCHEMA_HEAD = 4
 
 /** v1 -> v2 只关心这三项；其余字段原样透传，不做全量 AppConfig 断言 */
 export interface McpConfigShape {
@@ -109,8 +109,35 @@ export function migrateV2toV3(cfg: Record<string, unknown>): Record<string, unkn
   }
 }
 
+/**
+ * v3 → v4：账号档案化。agents / workflowDefaults / presets 从顶层键收进
+ * `profiles.local`（机主遗留数据作用域）——账号创建后由主进程按需搬给主账号
+ * （auth.addAccount 的首个账号场景），其他账号一律空档案起步，绝不看到机主数据。
+ */
+export function migrateV3toV4(cfg: Record<string, unknown>): Record<string, unknown> {
+  const profiles = (cfg.profiles && typeof cfg.profiles === 'object' ? cfg.profiles : {}) as Record<string, unknown>
+  const local = (profiles.local && typeof profiles.local === 'object' ? profiles.local : {}) as Record<string, unknown>
+  const merged: Record<string, unknown> = {
+    ...cfg,
+    schemaVersion: 4,
+    profiles: {
+      ...profiles,
+      local: {
+        ...local,
+        agents: local.agents ?? (Array.isArray(cfg.agents) ? cfg.agents : []),
+        workflowDefaults: local.workflowDefaults ?? cfg.workflowDefaults,
+        presets: local.presets ?? cfg.presets
+      }
+    }
+  }
+  delete merged.agents
+  delete merged.workflowDefaults
+  delete merged.presets
+  return merged
+}
+
 export function normalizeImported<T extends Record<string, unknown>>(incoming: T): T {
   const merged: T = { ...incoming }
   const stepped = migrateV1toV2(merged as unknown as McpConfigShape)
-  return migrateV2toV3({ ...merged, ...stepped, schemaVersion: SCHEMA_HEAD }) as T
+  return migrateV3toV4(migrateV2toV3({ ...merged, ...stepped, schemaVersion: SCHEMA_HEAD })) as T
 }

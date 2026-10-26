@@ -108,7 +108,11 @@ export function BrandHome() {
       </div>
 
       {/* C1：模式选择在输入卡下方（原先钉在视口右上角，离"要做的决定"最远） */}
-      <div className="mode-pill-wrap">
+      <div
+        className="mode-pill-wrap"
+        // 悬浮简介跟随鼠标：移出 pill+说明卡整组即消失（移进说明卡内不消失，方便点卡上按钮）
+        onMouseLeave={() => setInfoKey(null)}
+      >
         {/* onBlur 是冒泡的 focusout：Tab 从 pill 移进说明卡按钮时焦点仍在本组内，
             不能关卡（否则卡先卸载、焦点落空）。只在新焦点真的离开 pill+卡整体时才收起 */}
         <div className="mode-pill" role="radiogroup" aria-label="工作模式选择" onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setInfoKey(null) }}>
@@ -120,19 +124,10 @@ export function BrandHome() {
               aria-checked={pendingMode === m}
               data-mode={m}
               className={pendingMode === m ? 'active' : ''}
-              // 悬浮或键盘聚焦都展开介绍：只做 hover 的话，触屏与键盘用户永远拿不到解释
+              // 悬浮或键盘聚焦展开介绍（2026-10-26 按用户拍板：悬浮看简介，点击直接进对应模式）
               onMouseEnter={() => setInfoKey(m)}
               onFocus={() => setInfoKey(m)}
-              onClick={() => {
-                if (pendingMode === m) {
-                  // 第二次点同一个已选中的入口 = 用户已经看过了，直接进
-                  setInfoKey(null)
-                  enterMode(m)
-                  return
-                }
-                setPendingMode(m)
-                setInfoKey(m)
-              }}
+              onClick={() => enterMode(m)}
             >
               {MODE_INFO[m].pill}
             </button>

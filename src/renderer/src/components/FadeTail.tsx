@@ -8,15 +8,21 @@ export function FadeTail({ text, enabled, tail = 14 }: { text: string; enabled?:
   const cut = Math.min(tail, arr.length)
   const head = arr.slice(0, arr.length - cut).join('')
   const chars = arr.slice(arr.length - cut)
-  // key 用绝对下标：追加式文本里同一个字符的 span 跨帧稳定存在，动画只在挂载那刻播一次
+  // key 用绝对下标：追加式文本里同一个字符的 span 跨帧稳定存在，动画只在挂载那刻播一次。
+  // 换行符不包 span：inline-block 内的 \n 会把盒子撑成两行高的空块（pre-wrap 下渲染为强制断行
+  // 的空行框），在思考流式边缘顶出一条条垂直空白（2026-10-26 用户实测"大面积空白"的次级来源）
   return (
     <>
       {head}
-      {chars.map((c, i) => (
-        <span key={arr.length - cut + i} className="ch-fade" data-ch={c}>
-          {c}
-        </span>
-      ))}
+      {chars.map((c, i) =>
+        c === '\n' ? (
+          c
+        ) : (
+          <span key={arr.length - cut + i} className="ch-fade" data-ch={c}>
+            {c}
+          </span>
+        )
+      )}
     </>
   )
 }

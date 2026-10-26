@@ -386,3 +386,8 @@
 
 .agent-card .ac-skills input { accent-color: var(--accent); }
 .ro-block { font-size: 12.5px; line-height: 1.6; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-md); color: var(--text-2); background: rgba(127,127,127,.05); }
+
+/* ---- 界面切换入场（模式切换/返回首页 remount 即播；尊重全局动效开关） ---- */
+@keyframes screen-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.screen { animation: screen-in 240ms var(--ease) both; }
+:root[data-anim='off'] .screen, :root[data-motion='reduced'] .screen { animation: none; }

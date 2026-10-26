@@ -533,6 +533,8 @@ export function chatStream(
             status: res.ok ? 'done' : 'error',
             durMs: Date.now() - call.ts,
             result: res.output.length > 5000 ? res.output.slice(0, 5000) + '…（已截断）' : res.output,
+            // 写盘类工具的产物路径落进 ToolCall：聊天里据此挂「预览」按钮（唤起右侧预览面板）
+            ...(res.writtenPath ? { writtenPath: res.writtenPath } : {}),
             ...(res.change ? { change: res.change } : {}),
             ...(res.hooks?.length ? { hooks: res.hooks } : {})
           }

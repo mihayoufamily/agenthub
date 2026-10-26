@@ -4,7 +4,7 @@ import { useUi } from './stores/ui'
 import { useSettings } from './stores/settings'
 import { useAgents } from './stores/agents'
 import { useWorkflow, runBusy } from './stores/workflow'
-import { useSessions } from './stores/sessions'
+import { useSessions, setSessionUser } from './stores/sessions'
 import { useNotifications } from './stores/notifications'
 import { HOTKEY_DEFAULTS, type HotkeyAction } from '@shared/types'
 import { matchKeyBinding, validateKeyBinding } from './lib/utils'
@@ -193,7 +193,7 @@ export function App() {
   // 发消息走 sessions 的既有发送路径（与桌面输入框同一条链，技能注入/演示隔离/错误处理全复用）；
   // 审批只认 runId 与当前运行一致的请求——手机上看到的是几秒前的快照，run 对不上就拒，绝不误批别的任务
   useEffect(() => {
-    const offSend = bridge.mobile.onSendMessage(({ agentId, text }) => {
+    const offSend = bridge.mobile.onSendMessage(({ agentId, text, uid }) => {
       const agent = useAgents.getState().agents.find((a) => a.id === agentId)
       useNotifications.getState().push({
         kind: 'task',
@@ -201,7 +201,8 @@ export function App() {
         body: text.slice(0, 50)
       })
       useUi.getState().toast(`手机侧消息已送入 ${agent?.name ?? 'Agent'}`)
-      void useSessions.getState().sendMessage(agentId, text, [], undefined)
+      // uid=发送者的会话作用域：消息与流式回包写进发送者自己的会话（多用户隔离）
+      void useSessions.getState().sendMessage(agentId, text, [], undefined, uid)
     })
     const offGate = bridge.mobile.onGateDecision(({ runId, action, feedback }) => {
       const cur = useWorkflow.getState().run
@@ -216,7 +217,40 @@ export function App() {
       })
       void useWorkflow.getState().confirmGate(action, feedback)
     })
-    return () => { offSend(); offGate() }
+    // 手机端会话操作（新建/切换/删除/重命名）：uid=操作者作用域，与桌面侧栏同一条 store 链
+    const offSess = bridge.mobile.onSessionOp(({ op, agentId, sessionId, title, uid }) => {
+      const s = useSessions.getState()
+      if (op === 'new') s.newSession(agentId, uid)
+      else if (op === 'switch' && sessionId) s.switchSession(agentId, sessionId, uid)
+      else if (op === 'delete' && sessionId) s.deleteSession(agentId, sessionId, uid)
+      else if (op === 'rename' && sessionId && title) s.renameSession(agentId, sessionId, title, uid)
+    })
+    // 手机端新建自定义模型 Agent：走 addCustomModelAgent（先真测连接再存凭据，与桌面同一校验）
+    const offAgent = bridge.mobile.onAgentCreate(async ({ name, provider, baseUrl, modelId, apiKey }) => {
+      const r = await useAgents.getState().addCustomModelAgent(
+        { ...(name ? { name } : {}), provider, baseUrl, modelId } as never,
+        apiKey
+      )
+      if (r.ok && r.agent) {
+        useAgents.getState().select(r.agent.id)
+        useUi.getState().toast(`手机侧已创建 Agent：${r.agent.name}`)
+      } else {
+        useUi.getState().toast(`手机侧创建 Agent 失败：${r.message}`, 'error')
+      }
+    })
+    // 手机端工作流操作：发起（setDraft+start，与桌面输入同链）/ 停止
+    const offRun = bridge.mobile.onRunOp(({ op, goal }) => {
+      const wf = useWorkflow.getState()
+      if (op === 'start' && goal) {
+        wf.setDraft(goal)
+        void wf.start()
+        useUi.getState().toast('手机侧已发起任务')
+      } else if (op === 'stop') {
+        wf.stop('user')
+        useUi.getState().toast('手机侧已请求停止任务')
+      }
+    })
+    return () => { offSend(); offGate(); offSess(); offAgent(); offRun() }
   }, [])
 
   const askDownload = () => {
@@ -316,6 +350,10 @@ export function App() {
     if (isVerifyRuntime()) installDebugHooks()
     void (async () => {
       try {
+        // 无锁屏（2026-10-26 二批）：账号=数据档案，启动直接进应用；
+        // 会话/Agent/工作流配置跟随当前档案（侧栏可无密码切换）
+        const authSt = await bridge.auth.state()
+        setSessionUser(authSt.active?.id ?? 'local')
         await useSettings.getState().init()
         const cfg = await bridge.config.get()
         // 单价口径要在任何金额计算之前就位（费用估算、用量表、预算闸共用同一份）

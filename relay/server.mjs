@@ -128,9 +128,11 @@ async function handlePhone(req, res, url) {
   const t = url.searchParams.get('t') ?? ''
   const conn = t && routes.get(t)
   if (!conn || !conn.ws.alive) {
-    // 没有可用实例：可读引导页（与 AgentHub 401 页同口径的提示语）
+    // 没有可用实例：可读引导页（与 AgentHub 401 页同口径的提示语）。
+    // 502 自动重试：桌面端心跳恢复后手机几秒内自动进入；上限 40 次（约 2 分钟）后停，防真离线时无限刷。
+    const retry = t ? '<script>try{var n=(+sessionStorage.ahR||0)+1;sessionStorage.ahR=n;if(n<40){setTimeout(function(){location.reload()},3000)}else{var h=document.querySelector(".hint");if(h)h.textContent="桌面端仍未上线：请到电脑端 AgentHub「手机查看」确认服务与中继开关都开着（或点「检测连通性」看原因）"}}catch(e){setTimeout(function(){location.reload()},3000)}</script>' : ''
     res.writeHead(t ? 502 : 401, { 'Content-Type': 'text/html; charset=utf-8' })
-    res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#17181c;color:#cfd3dc;font-family:system-ui;display:grid;place-items:center;height:100vh"><div style="text-align:center"><p>📡 ' + (t ? '桌面端不在线' : '缺少配对凭据') + '</p><p style="opacity:.6;font-size:14px">请打开电脑端 AgentHub「手机查看」，确认服务与中继已开启后重新扫码</p></div></body>')
+    res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#17181c;color:#cfd3dc;font-family:system-ui;display:grid;place-items:center;height:100vh"><div style="text-align:center"><p>📡 ' + (t ? '桌面端不在线' : '缺少配对凭据') + '</p><p class="hint" style="opacity:.6;font-size:14px">请打开电脑端 AgentHub「手机查看」，确认服务与中继已开启后重新扫码</p></div>' + retry + '</body>')
     return
   }
   const id = crypto.randomBytes(8).toString('hex')

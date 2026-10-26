@@ -28,3 +28,8 @@ AgentHub-v*-win-x64-portable.zip
 
 # cloudflared 捆绑二进制（15MB，不进 git；获取：https://github.com/cloudflare/cloudflared/releases 下载 cloudflared-windows-amd64.exe 改名放入 bin/）
 bin/
+
+sync-store/
+release2/
+.zcode/
+relay/worker/.wrangler/

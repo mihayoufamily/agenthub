@@ -15,6 +15,7 @@ import { MobileAccessModal } from './MobileAccessModal'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
 import { cls, fmtTokens } from '../lib/utils'
 import { WfTaskList } from './WfChips'
+import { AccountBadge } from './AccountBadge'
 
 // 卡片宽度：190 → 230（2026-10-25 用户要求稍宽——技能名 + 来源徽章 + 版本号一行放得更开）
 const MENU_W = 230
@@ -291,6 +292,9 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
       })()}
 
       <WfTaskList collapsed={collapsed} />
+
+      {/* 账号区：头像+档案名，点开切换/管理（2026-10-26 二批） */}
+      <AccountBadge collapsed={collapsed} />
 
       <div className="sidebar-foot">
         <button className="foot-btn" onClick={onAdd} title="添加 Agent">

@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerIpc } from './ipc'
 import { initMobile } from './mobile'
+import { initAuth, unlockForVerify } from './auth'
 import { Store } from './store'
 import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
@@ -597,12 +598,26 @@ function startApp() {
       tee('error')
     }
     // 主进程侧的单价口径要先就位，账本补算费用与预算闸才用得上你填的价
-    configurePriceOverrides(store.getConfig().priceOverrides ?? [])
+    // （注意顺序：getConfig 会触发 auth.activeUid → auth 必须先初始化，否则账号缓存被空表毒化）
     const ud = app.getPath('userData')
+    initAuth(ud)
+    configurePriceOverrides(store.getConfig().priceOverrides ?? [])
     // 命令审批的规则与历史落在 userData，位置在这里注入（纯规则层不碰磁盘）
     approvals.init(join(ud, 'approvals.json'))
     checkpoints.init(join(ud, 'checkpoints'))
     ledger.init(join(ud, 'ledger.jsonl'))
+    // 账号体系先于 IPC 注册就位：锁屏状态影响凭据/导出通道的闸
+    // v4 档案迁移的收养兜底：旧版本建的账号 + 新版本才迁移的旧数据 → 每次启动补收养
+    ;(store as Store).adoptLegacyProfileAtBoot()
+    // 孤儿档案收容：账号记录被旧 bug 覆盖、但档案数据还在 → 按原 id 补建账号找回
+    {
+      const recovered = (store as Store).recoverOrphanProfiles()
+      if (recovered.length) {
+        console.log(`[recover] 找回 ${recovered.length} 个丢失账号的档案：${recovered.join('、')}（初始密码 agenthub123，建议到设置→账号修改）`)
+      }
+    }
+    // 验证态自动解锁：自动化跑没有人工输密码环节（--ahub-verify 是本机测试闸门，生产不带）
+    if (process.argv.includes('--ahub-verify')) unlockForVerify()
     registerIpc(() => store as Store, () => mainWindow)
     // 手机端查看服务（mobile.ts 自注册 IPC；上次开着就随应用恢复——跟随配置口径）
     initMobile({ getStore: () => store as Store, getWin: () => mainWindow })

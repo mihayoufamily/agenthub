@@ -27,11 +27,19 @@ type FileRefMethods = {
 }
 
 /** @ 文件引用：rel 为相对该 Agent 文件目录（模型 Agent 沙箱目录 / CLI cwd）的 '/' 分层相对路径；
- *  目录越界、未配置目录、CLI Agent 等情况由主进程以 ok=false + message 如实拒绝 */
-export const fileRef: FileRefMethods = {
+ *  目录越界、未配置目录、CLI Agent 等情况由主进程以 ok=false + message 如实拒绝。
+ *  写/删/建三个通道（2026-10-26）：预览侧栏"实时改删文件"用，同一 guardRel 安全闸 */
+export const fileRef: FileRefMethods & {
+  writeTextFile: (agentId: string, rel: string, content: string) => Promise<{ ok: boolean; message?: string }>
+  deleteFile: (agentId: string, rel: string) => Promise<{ ok: boolean; message?: string }>
+  createFile: (agentId: string, rel: string) => Promise<{ ok: boolean; message?: string }>
+} = {
   listDir: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).listDir(agentId, rel),
   readTextFile: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).readTextFile(agentId, rel),
-  readDataUrl: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).readDataUrl(agentId, rel)
+  readDataUrl: (agentId, rel) => (bridge.app as typeof bridge.app & FileRefMethods).readDataUrl(agentId, rel),
+  writeTextFile: (agentId, rel, content) => bridge.app.writeTextFile(agentId, rel, content),
+  deleteFile: (agentId, rel) => bridge.app.deleteFile(agentId, rel),
+  createFile: (agentId, rel) => bridge.app.createFile(agentId, rel)
 }
 
 // ---------------------------------------------------------------------------

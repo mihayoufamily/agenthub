@@ -1,4 +1,4 @@
-// 设置页：十一分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 命令审批 / 工具 Hook / MCP / 快捷键 / 数据 / 关于）
+// 设置页：十二分区（外观 / Agent 与模型 / Skill / 工作流 / 用量统计 / 命令审批 / 工具 Hook / MCP / 快捷键 / 账号 / 数据 / 关于）
 import React, { useEffect, useState } from 'react'
 import { useSettings } from '../stores/settings'
 import { useAgents } from '../stores/agents'
@@ -21,7 +21,7 @@ import { UsagePanel } from '../components/UsagePanel'
 import { bridge } from '../lib/ipc'
 import { fmtTime, fmtTokens, uid, cls, formatKeyBinding, validateKeyBinding } from '../lib/utils'
 
-type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'approvals' | 'hooks' | 'mcp' | 'shortcuts' | 'data' | 'about'
+type Section = 'appearance' | 'agents' | 'skills' | 'workflow' | 'usage' | 'approvals' | 'hooks' | 'mcp' | 'shortcuts' | 'account' | 'data' | 'about'
 
 const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'appearance', label: '外观', icon: 'info' },
@@ -33,6 +33,7 @@ const NAV: { key: Section; label: string; icon: string }[] = [
   { key: 'hooks', label: '工具 Hook', icon: 'terminal' },
   { key: 'mcp', label: 'MCP', icon: 'swap' },
   { key: 'shortcuts', label: '快捷键', icon: 'send' },
+  { key: 'account', label: '账号与锁屏', icon: 'shield' },
   { key: 'data', label: '数据', icon: 'folder' },
   { key: 'about', label: '关于', icon: 'info' }
 ]
@@ -80,6 +81,7 @@ export function SettingsPage() {
             {section === 'hooks' && <HookSection />}
             {section === 'mcp' && <McpSection />}
             {section === 'shortcuts' && <ShortcutsSection />}
+            {section === 'account' && <AccountSection />}
             {section === 'data' && <DataSection />}
             {section === 'about' && <AboutSection />}
           </div>
@@ -428,6 +430,203 @@ function SkillsSection() {
 }
 
 /* ---- 用量统计（按 harness × 模型；数据源是调用账本） ---- */
+/** 账号（2026-10-26 二批）：数据档案身份，无锁屏。密码仅用于手机端登录；头像/切换在侧栏 */
+function AccountSection() {
+  const [st, setSt] = useState<{ hasAccounts: boolean; active: { id: string; name: string; avatar?: string } | null; cloud: { url: string } | null } | null>(null)
+  const [accounts, setAccounts] = useState<{ id: string; name: string; avatar?: string; lastLoginAt?: number }[]>([])
+  const [newName, setNewName] = useState('')
+  const [newPw, setNewPw] = useState('')
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+  // 内联编辑状态（Electron 无 window.prompt——prompt 在渲染层直接抛异常）
+  const [renameId, setRenameId] = useState<string | null>(null)
+  const [renameText, setRenameText] = useState('')
+  const [pwId, setPwId] = useState<string | null>(null)
+  const [pwOld, setPwOld] = useState('')
+  const [pwNew, setPwNew] = useState('')
+
+  const refresh = () => {
+    void bridge.auth.state().then(setSt).catch(() => setSt(null))
+    void bridge.auth.listAccounts().then(setAccounts).catch(() => setAccounts([]))
+  }
+  useEffect(refresh, [])
+
+  const run = async (fn: () => Promise<{ ok: boolean; message?: string }>) => {
+    setBusy(true)
+    setMsg('')
+    try {
+      const r = await fn()
+      setMsg(r.ok ? '已完成' : r.message ?? '操作失败')
+      if (r.ok) refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!st) return <div className="set-row"><Spinner /> <span>读取中…</span></div>
+  return (
+    <div>
+      <Row label="当前档案" desc={st.active ? `${st.active.name}（Agent、会话、工作流配置、任务、用量都跟随档案）` : '—'}>
+        <span style={{ fontSize: 12.5, opacity: 0.7 }}>切换与头像在左侧栏底部</span>
+      </Row>
+
+      {accounts.map((a) => (
+        <React.Fragment key={a.id}>
+        <div className="set-row" style={{ alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 13.5 }}>{a.name}{st.active?.id === a.id ? '（当前）' : ''}</div>
+            {a.lastLoginAt ? <div style={{ fontSize: 11.5, opacity: 0.6 }}>上次手机登录 {fmtTime(a.lastLoginAt)}</div> : null}
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {st.active?.id !== a.id && (
+              <button
+                className="icon-btn"
+                title="切换到此档案"
+                onClick={() => void run(() => bridge.auth.setActive(a.id)).then(() => window.location.reload())}
+              >
+                <Icon name="swap" size={13} />
+              </button>
+            )}
+            <button
+              className="icon-btn"
+              title="修改名字"
+              onClick={() => { setRenameId(renameId === a.id ? null : a.id); setRenameText(a.name) }}
+            >
+              <Icon name="file" size={13} />
+            </button>
+            <button
+              className="icon-btn"
+              title="修改密码"
+              onClick={() => { setPwId(pwId === a.id ? null : a.id); setPwOld(''); setPwNew('') }}
+            >
+              <Icon name="file" size={13} />
+            </button>
+            <button
+              className="icon-btn"
+              title="删除账号"
+              onClick={() => {
+                if (!window.confirm(`删除账号 ${a.name}？该账号的手机登录会同时失效`)) return
+                void run(() => bridge.auth.removeAccount(a.id)).then(() => window.location.reload())
+              }}
+            >
+              <Icon name="close" size={13} />
+            </button>
+          </div>
+        </div>
+        {renameId === a.id && (
+          <div className="set-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                autoFocus
+                value={renameText}
+                onChange={(e) => setRenameText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { void run(() => bridge.auth.renameAccount(a.id, renameText.trim())); setRenameId(null) } if (e.key === 'Escape') setRenameId(null) }}
+                placeholder="新名字（1-24 字）"
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <Button variant="primary" style={{ height: 28 }} disabled={!renameText.trim()} onClick={() => { void run(() => bridge.auth.renameAccount(a.id, renameText.trim())); setRenameId(null) }}>保存</Button>
+              <Button variant="ghost" style={{ height: 28 }} onClick={() => setRenameId(null)}>取消</Button>
+            </div>
+          </div>
+        )}
+        {pwId === a.id && (
+          <div className="set-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <input type="password" value={pwOld} onChange={(e) => setPwOld(e.target.value)} placeholder="原密码" style={{ flex: 1, minWidth: 120 }} />
+              <input type="password" value={pwNew} onChange={(e) => setPwNew(e.target.value)} placeholder="新密码（至少 4 位）" style={{ flex: 1, minWidth: 120 }} />
+              <Button variant="primary" style={{ height: 28 }} disabled={!pwOld || pwNew.length < 4} onClick={() => { void run(() => bridge.auth.changePassword(a.id, pwOld, pwNew)); setPwId(null) }}>保存</Button>
+              <Button variant="ghost" style={{ height: 28 }} onClick={() => setPwId(null)}>取消</Button>
+            </div>
+          </div>
+        )}
+        </React.Fragment>
+      ))}
+
+      <Row label="添加账号" desc="用户名 1-24 字；密码至少 4 位（本机 scrypt 加盐哈希存储，明文不落盘）">
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="用户名"
+            style={{ width: 120 }}
+          />
+          <input
+            type="password"
+            value={newPw}
+            onChange={(e) => setNewPw(e.target.value)}
+            placeholder="密码"
+            style={{ width: 120 }}
+          />
+          <Button
+            variant="primary"
+            disabled={busy || !newName.trim() || !newPw}
+            onClick={() => {
+              const n = newName.trim()
+              const p = newPw
+              void run(() => bridge.auth.addAccount(n, p)).then(() => { setNewName(''); setNewPw('') })
+            }}
+          >
+            添加
+          </Button>
+        </div>
+      </Row>
+      {msg && <div className="set-row" style={{ color: 'var(--text-2)', fontSize: 12.5 }}>{msg}</div>}
+      <CloudSyncCard onChanged={refresh} />
+      <Row label="手机端登录" desc="手机浏览器打开服务地址（不用带 token）→ 输入这里的账号密码登录；扫码配对通道不受影响，机主全权" />
+    </div>
+  )
+}
+
+/** 云端账号同步（自制服务）：整份账号档案 AES-GCM 加密托管；多设备同一口令拉取 */
+function CloudSyncCard({ onChanged }: { onChanged: () => void }) {
+  const [url, setUrl] = useState('')
+  const [pass, setPass] = useState('')
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState<'' | 'push' | 'pull'>('')
+
+  useEffect(() => {
+    void bridge.auth.state().then((s) => { if (s.cloud?.url) setUrl(s.cloud.url) }).catch(() => {})
+  }, [])
+
+  const go = async (dir: 'push' | 'pull') => {
+    if (!url.trim() || !pass) { setMsg('服务地址与同步口令都要填'); return }
+    setBusy(dir); setMsg('')
+    try {
+      const r = dir === 'push' ? await bridge.auth.cloudPush(url.trim(), pass) : await bridge.auth.cloudPull(url.trim(), pass)
+      setMsg(r.message ?? (r.ok ? '完成' : '失败'))
+      if (r.ok && dir === 'pull') {
+        onChanged()
+        // 档案被云端数据整体替换：重载让所有 store 重新按恢复后的账号初始化
+        setTimeout(() => window.location.reload(), 800)
+      }
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="set-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+      <div>
+        <div style={{ fontSize: 13.5, fontWeight: 600 }}>云端同步（自制服务）</div>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7, marginTop: 2 }}>
+          账号与档案数据加密后托管到你自己的服务器（零依赖：<code>relay/sync-server.mjs</code>，一条 node 命令），
+          多台设备填同一地址+口令即可共用这套账号。服务器只存密文，口令不落盘；
+          API Key 不在同步范围（换设备需重填）。
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://你的服务器:8765" style={{ flex: 2, minWidth: 180 }} />
+        <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="同步口令" style={{ flex: 1, minWidth: 120 }} />
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <Button disabled={busy !== ''} onClick={() => void go('push')}>{busy === 'push' ? '推送中…' : '推送到云端'}</Button>
+        <Button disabled={busy !== ''} onClick={() => void go('pull')}>{busy === 'pull' ? '拉取中…' : '从云端拉取'}</Button>
+      </div>
+      {msg && <div style={{ fontSize: 12.5, color: 'var(--text-2)' }}>{msg}</div>}
+    </div>
+  )
+}
+
 function UsageSection() {
   return (
     <div className="set-group">
@@ -1596,6 +1795,8 @@ function DataSection() {
 
       <div className="set-group">
         <div className="group-title">项目长期记忆（区别于单次任务记录；由 AgentHub 持久保存，可查看/修改/删除）</div>
+        <div className="set-row"><div><div style={{ fontSize: 13.5 }}>记忆自动沉淀</div><div style={{ fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.6 }}>对话完成后用当前模型后台提炼要点写入下方记忆（每 6 条消息触发一次，产生少量 token 消耗）</div></div><Switch on={settings.prefs?.memoryAuto ?? true} label="记忆自动沉淀" onChange={(v) => settings.patchPrefs({ ...settings.prefs, memoryAuto: v })} /></div>
+        <div className="set-row"><div><div style={{ fontSize: 13.5 }}>写盘自动 git 提交</div><div style={{ fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.6 }}>每轮对话结束时，若 Agent 工作目录是 git 仓库且有改动则自动 commit（非仓库自动跳过）</div></div><Switch on={settings.prefs?.gitAutoCommit ?? false} label="写盘自动 git 提交" onChange={(v) => settings.patchPrefs({ ...settings.prefs, gitAutoCommit: v })} /></div>
         {memory.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--text-3)', padding: '4px 0 10px' }}>暂无记忆条目。</div>}
         {memory.map((m) => (
           <div key={m.id} className="mem-row">

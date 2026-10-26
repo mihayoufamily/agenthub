@@ -42,6 +42,8 @@ export interface CliChatOptions {
   timeoutMs?: number
   /** 思考强度（仅对官方支持的 CLI 生效：codex=reasoning effort，claude=MAX_THINKING_TOKENS） */
   thinkingLevel?: ThinkingLevel
+  /** 用量归属的账号档案（手机侧转发带发送者 uid；不填=当前档案） */
+  uid?: string
 }
 
 /** Windows 命令行长度硬上限（UTF-16 code units）附近的安全值 */

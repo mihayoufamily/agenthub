@@ -14,16 +14,35 @@ export class RelayDO {
   constructor(state, env) {
     this.state = state
     this.env = env
-    /** 当前注册的 AgentHub 出站连接（同 token 后连踢前连） */
-    this.hub = null
     /** 请求 id → resolve（手机请求等待 AgentHub 回包） */
     this.pending = new Map()
   }
 
+  /**
+   * 当前在线的 AgentHub 出站连接。
+   * 不用内存字段存 hub：hibernatable WS 休眠唤醒后 constructor 重跑、内存清空，
+   * 而桌面端的 WS 还活着——内存指针一丢，手机请求就误报"桌面端不在线"（2026-10-26 实测踩坑）。
+   * state.getWebSockets(tag) 是唯一持久真相源：休眠前后都返回真实存活的连接。
+   */
+  get hub() {
+    const sockets = this.state.getWebSockets('hub')
+    return sockets.length ? sockets[sockets.length - 1] : null
+  }
+
   /** 手机页面/网关错误时的可读引导页（与 Node 版同口径） */
   guide(status, title) {
+    // 502（桌面端不在线）自动重试：桌面端心跳恢复后手机几秒内自动进入，不用手动刷新。
+    // 上限 40 次（约 2 分钟）后停止，显示终态引导——避免桌面端真关了时无限刷新耗电。
+    const retry =
+      status === 502
+        ? '<script>try{var n=(+sessionStorage.ahR||0)+1;sessionStorage.ahR=n;if(n<40){setTimeout(function(){location.reload()},3000)}else{var h=document.querySelector(".hint");if(h)h.textContent="桌面端仍未上线：请到电脑端 AgentHub「手机查看」确认服务与中继开关都开着（或点「检测连通性」看原因）"}}catch(e){setTimeout(function(){location.reload()},3000)}</script>'
+        : ''
     return new Response(
-      '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#17181c;color:#cfd3dc;font-family:system-ui;display:grid;place-items:center;height:100vh"><div style="text-align:center"><p>📡 ' + title + '</p><p style="opacity:.6;font-size:14px">请打开电脑端 AgentHub「手机查看」，确认服务与中继已开启后重新扫码</p></div></body>',
+      '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#17181c;color:#cfd3dc;font-family:system-ui;display:grid;place-items:center;height:100vh"><div style="text-align:center"><p>📡 ' +
+        title +
+        '</p><p class="hint" style="opacity:.6;font-size:14px">请打开电脑端 AgentHub「手机查看」，确认服务与中继已开启后重新扫码</p></div>' +
+        retry +
+        '</body>',
       { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } }
     )
   }
@@ -33,16 +52,27 @@ export class RelayDO {
 
     // ---- AgentHub 出站 WebSocket 注册 ----
     if (req.headers.get('Upgrade') === 'websocket') {
+      // 同 token 后连踢前连（重开应用/重连场景，最新连接为准）
+      for (const old of this.state.getWebSockets('hub')) {
+        try { old.close(1000, 'replaced') } catch { /* noop */ }
+      }
       const pair = new WebSocketPair()
-      this.state.acceptWebSocket(pair[1])
-      if (this.hub) { try { this.hub.close(1000, 'replaced') } catch { /* noop */ } }
-      this.hub = pair[1]
-      this.hub.send(JSON.stringify({ type: 'hello-ok' }))
+      this.state.acceptWebSocket(pair[1], ['hub'])
+      pair[1].send(JSON.stringify({ type: 'hello-ok' }))
       return new Response(null, { status: 101, webSocket: pair[0] })
     }
 
     // ---- 手机/页面请求 → 转发到本 DO 的实例 ----
-    if (!this.hub) return this.guide(502, '桌面端不在线')
+    const hub = this.hub
+    if (!hub) {
+      // 兜底自愈：网关升级部署后，旧代码注册的连接没带 'hub' tag，getWebSockets('hub') 永远查不到——
+      // 客户端那边还"假在线"（尤其旧版没有心跳）。主动掐掉孤儿连接，客户端自动重连并按新代码注册，
+      // 否则老客户端会一直卡在"已连接"假象里，手机端永远 502。
+      for (const orphan of this.state.getWebSockets()) {
+        try { orphan.close(4001, 're-register') } catch { /* noop */ }
+      }
+      return this.guide(502, '桌面端不在线')
+    }
 
     const id = crypto.randomUUID()
     let body = null
@@ -61,7 +91,7 @@ export class RelayDO {
     }
     const resp = await new Promise((resolve) => {
       this.pending.set(id, resolve)
-      try { this.hub.send(JSON.stringify(pack)) } catch { this.pending.delete(id); resolve({ status: 502, headers: {}, body: '{"ok":false,"message":"转发失败"}' }); return }
+      try { hub.send(JSON.stringify(pack)) } catch { this.pending.delete(id); resolve({ status: 502, headers: {}, body: '{"ok":false,"message":"转发失败"}' }); return }
       setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); resolve({ status: 504, headers: {}, body: '{"ok":false,"message":"桌面端响应超时"}' }) } }, 20000)
     })
     const headers = new Headers({ 'Content-Type': resp.headers?.['content-type'] ?? 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -70,6 +100,11 @@ export class RelayDO {
 
   /** AgentHub 回包（hibernatable 唤醒入口） */
   async webSocketMessage(ws, message) {
+    // hello 兼容（与 Node 版同协议）：桌面端重连重注册时回确认
+    if (typeof message === 'string' && message.includes('"type":"hello"')) {
+      try { ws.send(JSON.stringify({ type: 'hello-ok' })) } catch { /* noop */ }
+      return
+    }
     let msg
     try { msg = JSON.parse(message) } catch { return }
     if (msg.type === 'resp' && msg.id && this.pending.has(msg.id)) {
@@ -80,7 +115,11 @@ export class RelayDO {
   }
 
   async webSocketClose(ws) {
-    if (this.hub === ws) this.hub = null
+    // 连接真断了：挂起的手机请求立刻 502 收口，别让用户干等 20s 超时
+    for (const [id, resolve] of this.pending) {
+      this.pending.delete(id)
+      resolve({ status: 502, headers: {}, body: '{"ok":false,"message":"桌面端连接已断开"}' })
+    }
   }
 }
 
@@ -94,6 +133,23 @@ export default {
       return new Response(JSON.stringify({ ok: true, ts: Date.now(), note: 'agenthub relay (workers), per-token DO routing' }), {
         headers: { 'content-type': 'application/json; charset=utf-8' }
       })
+    }
+
+    // 隧道诊断：从 Cloudflare 内部探测隧道域名可达性（绕开访问侧网络变量，判定 1033 出在哪一层）
+    if (url.pathname === '/debug-tunnel') {
+      const target = url.searchParams.get('host') ?? 'mobile.zdymodel.de5.net'
+      if (!/^[a-z0-9.-]+$/i.test(target)) return new Response('bad host', { status: 400 })
+      const t0 = Date.now()
+      try {
+        const r = await fetch(`https://${target}/`, { signal: AbortSignal.timeout(12000), redirect: 'manual' })
+        return new Response(JSON.stringify({ ok: true, status: r.status, ms: Date.now() - t0, note: 'CF 内部可达隧道域名' }), {
+          headers: { 'content-type': 'application/json; charset=utf-8' }
+        })
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, ms: Date.now() - t0, error: String(e).slice(0, 200), note: 'CF 内部也不可达 → 隧道路由/边缘问题，与访问侧网络无关' }), {
+          status: 200, headers: { 'content-type': 'application/json; charset=utf-8' }
+        })
+      }
     }
 
     const t = url.searchParams.get('t') ?? ''

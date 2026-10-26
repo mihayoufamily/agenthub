@@ -13,13 +13,18 @@ import { ipcMain } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { Store } from './store'
 import * as ledger from './ledger'
+import * as openai from './adapters/openai'
 import { MOBILE_PAGE_HTML } from './mobile-page'
 import { initMobileTunnel, syncTunnelForService } from './mobile-tunnel'
 import { initMobileRelay, syncRelayForService } from './mobile-relay'
+import * as auth from './auth'
 import type { ChatMessage, WorkflowRun } from '../shared/types'
 
 const DEFAULT_PORT = 8748
 const MAX_TEXT = 8000
+/** 历史回看单次返回的消息上限（保护手机端渲染；超出部分截旧） */
+const MAX_HISTORY = 400
+const MAX_REASONING = 4000
 
 export interface MobileStatus {
   enabled: boolean
@@ -69,6 +74,7 @@ function tokenOk(t: string | undefined): boolean {
 
 function trimMessage(m: ChatMessage) {
   const text = (m.text ?? '').slice(0, 6000)
+  const reasoning = (m.reasoning ?? '').slice(0, MAX_REASONING)
   return {
     id: m.id,
     role: m.role,
@@ -80,6 +86,9 @@ function trimMessage(m: ChatMessage) {
     model: m.model,
     cost: m.cost,
     handoffFrom: m.handoff?.fromAgentName,
+    // 思考过程：手机端折叠展示（截断口径与正文一致，太久远的思考对回看没价值）
+    reasoning,
+    reasoningTruncated: (m.reasoning ?? '').length > MAX_REASONING,
     toolNames: (m.toolCalls ?? []).map((t) => (t as { name?: string }).name ?? '').filter(Boolean).slice(-8)
   }
 }
@@ -100,20 +109,24 @@ function runSummary(r: WorkflowRun) {
   }
 }
 
-function buildState(agentId: string | null) {
+function buildState(uid: string, agentId: string | null, sessionParam: string | null, user: string | null) {
   const st = getStoreRef()
   if (!st) return { error: 'store unavailable' }
-  const cfg = st.getConfig()
+  // 手机侧按请求者的档案读 Agent（多用户隔离：bob 看不到 alice 的模型）
+  const cfg = st.getConfigFor(uid)
   const agents = cfg.agents.map((a) => ({ id: a.id, name: a.name, kind: a.kind, model: a.model }))
   const active = agents.find((a) => a.id === agentId) ?? agents[0] ?? null
 
-  let session: { agentId: string; title: string; messages: unknown[] } | null = null
+  // 会话列表 + 指定会话的完整历史（回看）：按请求者的用户作用域读取（多用户隔离）
+  let sessionList: { id: string; title: string; updatedAt: number; count: number }[] = []
+  let session: { agentId: string; sessionId: string; title: string; messages: unknown[] } | null = null
   if (active) {
-    const loaded = st.loadSessions(active.id)
+    const loaded = st.loadSessions(uid, active.id)
     const list = loaded?.sessions ?? []
-    const cur = list.find((s) => s.id === loaded?.activeId) ?? list[list.length - 1] ?? null
+    sessionList = list.map((s) => ({ id: s.id, title: s.title, updatedAt: s.updatedAt ?? s.createdAt, count: s.messages.length }))
+    const cur = (sessionParam && list.find((s) => s.id === sessionParam)) || list.find((s) => s.id === loaded?.activeId) || list[list.length - 1] || null
     if (cur) {
-      session = { agentId: active.id, title: cur.title, messages: cur.messages.slice(-60).map(trimMessage) }
+      session = { agentId: active.id, sessionId: cur.id, title: cur.title, messages: cur.messages.slice(-MAX_HISTORY).map(trimMessage) }
     }
   }
 
@@ -132,7 +145,16 @@ function buildState(agentId: string | null) {
     total: sum(ledger.aggregate(entries))
   }
 
-  return { agents, activeAgentId: active?.id ?? null, session, runs, usage, serverTs: Date.now() }
+  return {
+    agents,
+    activeAgentId: active?.id ?? null,
+    sessionList,
+    session,
+    runs,
+    usage,
+    user,
+    serverTs: Date.now()
+  }
 }
 
 // ---------- HTTP 服务 ----------
@@ -179,29 +201,48 @@ function lanUrls(port: number, token: string): string[] {
 function handle(req: http.IncomingMessage, res: http.ServerResponse) {
   void (async () => {
     const url = new URL(req.url ?? '/', 'http://local')
-    // 访问日志（不带 token 值，只记有无）：手机"一直加载"时用它判定请求到没到服务端
-    try { getStoreRef()?.log(`[mobile] ${req.socket.remoteAddress} ${req.method} ${url.pathname} t=${url.searchParams.get('t') ? 'yes' : 'no'}`) } catch { /* 日志失败不阻塞 */ }
-    const t = url.searchParams.get('t') ?? undefined
-    // 页面和 API 一视同仁：没带对 token 一律 401（页面给可读提示，不给任何数据）
-    if (!tokenOk(t)) {
-      if (url.pathname === '/' || url.pathname === '/index.html') {
-        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'X-Content-Type-Options': 'nosniff' })
-        res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#17181c;color:#cfd3dc;font-family:system-ui;display:grid;place-items:center;height:100vh"><div style="text-align:center"><p>🔗 配对无效或已更换</p><p style="opacity:.6;font-size:14px">请回桌面端 AgentHub「手机查看」弹窗重新扫码</p></div></body>')
-        return
-      }
-      json(res, 401, { ok: false, message: '配对无效，请重新扫码' })
+    // 访问日志（不带凭据值，只记有无）：手机"一直加载"时用它判定请求到没到服务端
+    try { getStoreRef()?.log(`[mobile] ${req.socket.remoteAddress} ${req.method} ${url.pathname} t=${url.searchParams.get('t') ? 'yes' : 'no'} a=${url.searchParams.get('a') ? 'yes' : 'no'}`) } catch { /* 日志失败不阻塞 */ }
+
+    // 双凭据通道：配对 token（扫码，机主全权）或账号会话 token（用户名密码登录）。
+    // 页面本身是静态壳（零数据），始终可加载——登录视图/应用视图由页面 JS 按 /api/state 结果切换
+    const paired = tokenOk(url.searchParams.get('t') ?? undefined)
+    const acct = auth.mobileVerify(url.searchParams.get('a') ?? undefined)
+    const identity = paired ? { name: '机主' } : acct ? { name: acct.name } : null
+    // 会话作用域：配对=机主（主账号，无账号则 'local'）；账号登录=该账号自己的作用域
+    const uid = paired ? (auth.primaryAccountId() ?? 'local') : acct?.id ?? ''
+
+    if (req.method === 'POST' && url.pathname === '/api/login') {
+      // 免鉴权：登录本身。限流在 auth 层（同 IP 每分钟 5 次）
+      let body: { username?: string; password?: string }
+      try { body = JSON.parse(await readBody(req)) } catch { json(res, 400, { ok: false, message: '请求体不是合法 JSON' }); return }
+      if (typeof body.username !== 'string' || typeof body.password !== 'string') { json(res, 400, { ok: false, message: '需要 username 与 password' }); return }
+      const r = auth.mobileLogin(body.username, body.password, req.socket.remoteAddress ?? 'unknown')
+      json(res, r.ok ? 200 : 401, r)
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/logout') {
+      auth.mobileLogout(url.searchParams.get('a') ?? undefined)
+      json(res, 200, { ok: true })
       return
     }
 
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/login')) {
       const buf = Buffer.from(MOBILE_PAGE_HTML)
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': buf.length, 'X-Content-Type-Options': 'nosniff' })
+      // no-store：页面本身迭代很快，手机浏览器缓存旧版会让用户以为改版没生效
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': buf.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
       res.end(buf)
       return
     }
 
+    // API 一律要身份（配对或账号登录二选一）；没身份给可读 401
+    if (!identity) {
+      json(res, 401, { ok: false, message: '未登录：请用账号密码登录，或回桌面端扫码配对' })
+      return
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/state') {
-      json(res, 200, buildState(url.searchParams.get('agent')))
+      json(res, 200, buildState(uid, url.searchParams.get('agent'), url.searchParams.get('session'), identity.name))
       return
     }
 
@@ -216,7 +257,8 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse) {
         json(res, 400, { ok: false, message: 'agentId 不存在' }); return
       }
       if (!text || text.length > MAX_TEXT) { json(res, 400, { ok: false, message: `消息需为 1-${MAX_TEXT} 字` }); return }
-      win.webContents.send('mobile:send-message', { agentId: body.agentId, text })
+      // uid 跟随请求者：消息与流式回包都写进发送者自己的会话作用域（多用户隔离）
+      win.webContents.send('mobile:send-message', { agentId: body.agentId, text, user: identity.name, uid })
       json(res, 200, { ok: true, forwarded: true })
       return
     }
@@ -232,7 +274,78 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       }
       if (!body.runId || typeof body.runId !== 'string') { json(res, 400, { ok: false, message: '缺少 runId' }); return }
       const feedback = (body.feedback ?? '').slice(0, 2000)
-      win.webContents.send('mobile:gate-decision', { runId: body.runId, action, feedback })
+      win.webContents.send('mobile:gate-decision', { runId: body.runId, action, feedback, user: identity.name })
+      json(res, 200, { ok: true, forwarded: true })
+      return
+    }
+
+    // ---- 会话管理（新建/切换/删除/重命名）：转发给渲染层 sessions store 同一条链 ----
+    if (req.method === 'POST' && url.pathname === '/api/session') {
+      const win = getWinRef()
+      if (!win || win.isDestroyed()) { json(res, 503, { ok: false, message: '桌面端窗口不可用' }); return }
+      let body: { op?: string; agentId?: string; sessionId?: string; title?: string }
+      try { body = JSON.parse(await readBody(req)) } catch { json(res, 400, { ok: false, message: '请求体不是合法 JSON' }); return }
+      const op = body.op
+      if (op !== 'new' && op !== 'switch' && op !== 'delete' && op !== 'rename') { json(res, 400, { ok: false, message: 'op 只接受 new/switch/delete/rename' }); return }
+      const st = getStoreRef()
+      if (!st || !body.agentId || !st.getConfig().agents.some((a) => a.id === body.agentId)) { json(res, 400, { ok: false, message: 'agentId 不存在' }); return }
+      if ((op === 'switch' || op === 'delete' || op === 'rename') && (!body.sessionId || typeof body.sessionId !== 'string')) { json(res, 400, { ok: false, message: '该操作需要 sessionId' }); return }
+      if (op === 'rename' && (!body.title || typeof body.title !== 'string')) { json(res, 400, { ok: false, message: '重命名需要 title' }); return }
+      win.webContents.send('mobile:session-op', { op, agentId: body.agentId, sessionId: body.sessionId, title: (body.title ?? '').slice(0, 60), user: identity.name, uid })
+      json(res, 200, { ok: true, forwarded: true })
+      return
+    }
+
+    // ---- 新建自定义模型 Agent：主进程直建（真实测连接 → Key 入加密凭据 → 追加到请求者档案）。
+    // 不借道渲染层：渲染层的 Agent store 是「桌面当前档案」的，跨档案直建才能落进请求者自己的数据里
+    if (req.method === 'POST' && url.pathname === '/api/agent') {
+      const st = getStoreRef()
+      if (!st) { json(res, 503, { ok: false, message: '桌面端服务不可用' }); return }
+      let body: { name?: string; provider?: string; baseUrl?: string; modelId?: string; apiKey?: string }
+      try { body = JSON.parse(await readBody(req)) } catch { json(res, 400, { ok: false, message: '请求体不是合法 JSON' }); return }
+      const provider = (body.provider ?? '').trim().slice(0, 40)
+      const baseUrl = (body.baseUrl ?? '').trim()
+      const modelId = (body.modelId ?? '').trim().slice(0, 120)
+      const apiKey = (body.apiKey ?? '').trim()
+      if (!provider || !modelId || !apiKey) { json(res, 400, { ok: false, message: 'provider/modelId/apiKey 都必填' }); return }
+      if (!/^https?:\/\//i.test(baseUrl)) { json(res, 400, { ok: false, message: 'baseUrl 要以 http(s):// 开头' }); return }
+      // 明文 key 只在此处路过内存：测连通过立即进加密凭据存储，不落任何日志
+      const cfg = { provider, baseUrl, modelId, keyId: `key-${crypto.randomBytes(6).toString('hex')}`, hasKey: true }
+      const test = await openai.testConnection(cfg as never, apiKey)
+      if (!test.ok) { json(res, 400, { ok: false, message: test.message ?? '连接测试未通过，请检查地址/模型名/Key' }); return }
+      st.saveCredential(cfg.keyId, apiKey)
+      const agent = {
+        id: `ag-${crypto.randomBytes(5).toString('hex')}`,
+        name: (body.name ?? '').trim().slice(0, 40) || modelId,
+        kind: 'model' as const,
+        desc: '',
+        model: modelId,
+        modelConfig: { ...cfg, temperature: undefined, thinkingLevel: undefined, contextWindow: undefined } as never,
+        status: 'available' as const,
+        skillMode: 'reference' as const,
+        addedAt: Date.now(),
+        totalTokens: 0
+      }
+      st.appendAgentToProfile(uid, agent as never)
+      json(res, 200, { ok: true, agentId: agent.id, name: agent.name, message: '已创建到你的档案（连接已实测通过）' })
+      return
+    }
+
+    // ---- 工作流操作：发起 / 停止（与桌面输入框同一条链） ----
+    if (req.method === 'POST' && url.pathname === '/api/run') {
+      const win = getWinRef()
+      if (!win || win.isDestroyed()) { json(res, 503, { ok: false, message: '桌面端窗口不可用' }); return }
+      let body: { op?: string; goal?: string }
+      try { body = JSON.parse(await readBody(req)) } catch { json(res, 400, { ok: false, message: '请求体不是合法 JSON' }); return }
+      if (body.op === 'stop') {
+        win.webContents.send('mobile:run-op', { op: 'stop', user: identity.name })
+        json(res, 200, { ok: true, forwarded: true })
+        return
+      }
+      if (body.op !== 'start') { json(res, 400, { ok: false, message: 'op 只接受 start/stop' }); return }
+      const goal = (body.goal ?? '').trim()
+      if (!goal || goal.length > 2000) { json(res, 400, { ok: false, message: 'goal 需为 1-2000 字' }); return }
+      win.webContents.send('mobile:run-op', { op: 'start', goal, user: identity.name })
       json(res, 200, { ok: true, forwarded: true })
       return
     }

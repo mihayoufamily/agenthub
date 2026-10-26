@@ -47,7 +47,7 @@ if (gw) {
 }
 const gwBase = (EXTERNAL_GW ?? `http://127.0.0.1:${GW_PORT}`).replace(/^ws/, 'http') // ws→http 供 fetch/relay-info 用
 
-const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], {
+const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify', '--user-data-dir=D:/dsh/agenthub/.tmp/profile-relay'], {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...launchEnv(), AGENTHUB_RELAY_URL_OVERRIDE: EXTERNAL_GW ?? `ws://127.0.0.1:${GW_PORT}` }
 })
@@ -74,6 +74,10 @@ try {
   await js(cdp, 'window.__ahub_debug.workbench()')
   await waitJs(cdp, 'document.querySelectorAll(".agent-list .agent-item").length > 0', 25000)
   await sleep(600)
+
+  // 隔离 profile 与用户实例并存时，默认端口 8748 会被用户实例占着（网关转发会打到别人头上）——
+  // 测试实例固定用 8749，隔离彻底
+  await js(cdp, `window.agenthub.config.get().then((c) => window.agenthub.config.setPrefs({ ...c.prefs, mobileService: { ...c.prefs.mobileService, port: 8749 } }))`)
 
   /* ---- 1) IPC 形状 + 意图持久化 ---- */
   const r0 = await js(cdp, `window.agenthub.mobile.relayStatus()`)

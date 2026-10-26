@@ -1,6 +1,7 @@
 ﻿import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
-import { join, isAbsolute } from 'node:path'
-import { readFile, stat, readdir } from 'node:fs/promises'
+import { join, isAbsolute, relative } from 'node:path'
+import { readFile, stat, readdir, unlink, mkdir } from 'node:fs/promises'
+import { dirname as pdirname } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import type { Store } from './store'
 import { scanAgents, checkManualPath } from './discovery'
@@ -28,6 +29,10 @@ import type { LedgerEntry } from './ledger'
 import * as market from './market'
 // 官方模型服务注册表：内置"官方模型"入口的数据源（端点+清单来自注册表仓库，不写死在代码里）
 import * as officialModels from './official-models'
+// 本机账号体系：多用户数据档案 + 手机端登录的账号源（密码 scrypt 哈希，明文不落盘）
+import * as auth from './auth'
+// 云端账号同步客户端：整份档案加密托管到用户自己的同步服务
+import * as cloudSync from './cloud'
 
 /**
  * 工作流产物目录（主进程唯一口径）：用户在设置里选的目录；未选则默认文档目录下的 AgentHub-artifacts。
@@ -545,14 +550,77 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return { ok: true }
   })
 
+  // ---------- 账号（auth.ts）：数据档案身份，无锁屏；密码仅用于手机端登录 ----------
+  ipcMain.handle('auth:state', () => auth.authState())
+  ipcMain.handle('auth:listAccounts', () => auth.listAccounts())
+  ipcMain.handle('auth:addAccount', (_e, name: unknown, pw: unknown) => {
+    if (typeof name !== 'string' || typeof pw !== 'string') return { ok: false, message: '参数不对' }
+    const first = auth.listAccounts().length === 0
+    const r = auth.addAccount(name, pw)
+    // 首个账号=机主：遗留档案（profiles.local）跟人走
+    if (r.ok && first && r.id) getStore().adoptLegacyProfile(r.id)
+    return r
+  })
+  ipcMain.handle('auth:removeAccount', (_e, id: unknown) =>
+    typeof id === 'string' ? auth.removeAccount(id) : { ok: false, message: '参数不对' })
+  ipcMain.handle('auth:changePassword', (_e, id: unknown, oldPw: unknown, newPw: unknown) =>
+    typeof id === 'string' && typeof oldPw === 'string' && typeof newPw === 'string'
+      ? auth.changePassword(id, oldPw, newPw)
+      : { ok: false, message: '参数不对' })
+  /** 切换数据档案（无密码）：渲染层切完自行 reload 重载档案数据 */
+  ipcMain.handle('auth:setActive', (_e, id: unknown) =>
+    typeof id === 'string' ? auth.setActive(id) : { ok: false, message: '参数不对' })
+  ipcMain.handle('auth:setAvatar', (_e, id: unknown, dataUrl: unknown) =>
+    typeof id === 'string' && typeof dataUrl === 'string' ? auth.setAvatar(id, dataUrl) : { ok: false, message: '参数不对' })
+  ipcMain.handle('auth:renameAccount', (_e, id: unknown, newName: unknown) =>
+    typeof id === 'string' && typeof newName === 'string' ? auth.renameAccount(id, newName) : { ok: false, message: '参数不对' })
+
+  /** 指定档案的 Agent 配置（手机侧跨作用域对话用：渲染层 store 只有当前档案的） */
+  ipcMain.handle('agents:getForUid', (_e, uid: unknown) => {
+    if (typeof uid !== 'string' || !/^[0-9a-zA-Z-]{1,64}$/.test(uid)) return { agents: [] }
+    return { agents: getStore().getConfigFor(uid).agents }
+  })
+
+  /** 写盘自动 git 提交（gitAutoCommit 开时每轮对话结束调用）：dir 是 git 仓库且有改动才 commit */
+  ipcMain.handle('git:autoCommit', async (_e, dir: unknown) => {
+    if (typeof dir !== 'string' || !dir.trim()) return { ok: false, message: '目录为空' }
+    const { execFile } = await import('node:child_process')
+    const run = (cmd: string, args: string[]) => new Promise<{ ok: boolean; out: string }>((resolve) => {
+      execFile(cmd, args, { cwd: dir, timeout: 15000, windowsHide: true }, (err, stdout) => {
+        const extra = err && typeof (err as { message?: string }).message === 'string' ? String((err as { message?: string }).message) : ''
+        resolve({ ok: !err, out: `${stdout ?? ''}${extra}`.slice(0, 500) })
+      })
+    })
+    const root = await run('git', ['rev-parse', '--show-toplevel'])
+    if (!root.ok) return { ok: true, skipped: true, message: '非 git 仓库，跳过' }
+    await run('git', ['add', '-A'])
+    const commit = await run('git', ['commit', '-m', `AgentHub 自动提交 ${new Date().toLocaleString('zh-CN')}`])
+    const nothing = /nothing to commit|no changes added/i.test(commit.out)
+    return { ok: true, committed: commit.ok && !nothing, message: nothing ? '无改动' : commit.ok ? '已提交' : commit.out.slice(0, 200) }
+  })
+
+  // ---------- 云端账号同步（自制服务，relay/sync-server.mjs；密文托管） ----------
+  ipcMain.handle('auth:cloudPush', (_e, url: unknown, passphrase: unknown) => {
+    if (typeof url !== 'string' || typeof passphrase !== 'string' || !url.trim() || !passphrase) return { ok: false, message: '参数不对' }
+    return cloudSync.cloudPush(getStore(), url.trim(), passphrase)
+  })
+  ipcMain.handle('auth:cloudPull', (_e, url: unknown, passphrase: unknown) => {
+    if (typeof url !== 'string' || typeof passphrase !== 'string' || !url.trim() || !passphrase) return { ok: false, message: '参数不对' }
+    return cloudSync.cloudPull(getStore(), url.trim(), passphrase)
+  })
+
   // ---------- 会话 ----------
-  // sessions 形状闸门：非数组会在 store 侧被当对象落盘，加载路径又按数组解构——先挡在入口
-  ipcMain.handle('session:save', (_e, agentId: string, sessions: AgentSession[], activeId?: string) => {
+  // sessions 形状闸门：非数组会在 store 侧被当对象落盘，加载路径又按数组解构——先挡在入口。
+  // uid = 用户作用域（auth 账号 id 或 'local'）：会话按用户隔离，路径 sessions/<uid>/<agentId>.json
+  const UID_OK = /^[0-9a-zA-Z-]{1,64}$/
+  ipcMain.handle('session:save', (_e, uid: string, agentId: string, sessions: AgentSession[], activeId?: string) => {
+    if (typeof uid !== 'string' || !UID_OK.test(uid)) return { ok: false, message: 'session:save 的 uid 非法' }
     if (!Array.isArray(sessions)) return { ok: false, message: 'session:save 的 sessions 只接受数组' }
-    getStore().saveSessions(agentId, sessions, activeId)
+    getStore().saveSessions(uid, agentId, sessions, activeId)
     return { ok: true }
   })
-  ipcMain.handle('session:load', (_e, agentId: string) => getStore().loadSessions(agentId))
+  ipcMain.handle('session:load', (_e, uid: string, agentId: string) =>
+    typeof uid === 'string' && UID_OK.test(uid) ? getStore().loadSessions(uid, agentId) : null)
   ipcMain.handle('session:remove', (_e, agentId: string, deleteHistory: boolean) => {
     getStore().removeSession(agentId, deleteHistory)
     return { ok: true }
@@ -625,7 +693,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return openai.listModels(cfg, key)
   })
 
-  ipcMain.handle('model:chat', async (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string; planMode?: boolean }) => {
+  ipcMain.handle('model:chat', async (_e, cfg: CustomModelConfig, reqId: string, messages: openai.IncomingMsg[], opts?: { agentId?: string; workflow?: boolean; checkpointId?: string; runId?: string; planMode?: boolean; uid?: string }) => {
     const key = getStore().getCredential(cfg.keyId)
     if (!key) {
       const win = getWin()
@@ -657,6 +725,8 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
       model: cfg.modelId,
       ...(opts?.agentId ? { agentId: opts.agentId } : {}),
       ...(agentName ? { agentName } : {}),
+      // 用量按账号归属：手机侧转发带发送者 uid（chat opts.uid），桌面 = 当前档案
+      ...(opts?.uid ? { uid: opts.uid } : {}),
       workflow: !!opts?.workflow,
       ...(opts?.runId ? { runId: opts.runId } : {})
     })
@@ -1135,6 +1205,47 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     return dir
   })
 
+  /**
+   * AI 产物预览（按绝对路径读）：聊天工具卡 / 任务产物 chip 的「预览」按钮走这里——
+   * 不必让用户在文件树里自己找。范围硬闸：只允许 Agent 工作根或工作流产物目录内的文件。
+   */
+  ipcMain.handle('artifact:readPreview', async (_e, agentId: unknown, absPath: unknown) => {
+    if (typeof absPath !== 'string' || !absPath.trim()) return { ok: false, message: '路径为空' }
+    let abs = ''
+    let rootName = ''
+    if (typeof agentId === 'string') {
+      const root = resolveAgentRoot(agentId)
+      if (root.ok) {
+        const rel = relative(root.dir, absPath)
+        if (rel && !rel.startsWith('..') && !isAbsolute(rel)) { abs = join(root.dir, rel); rootName = '工作目录' }
+      }
+    }
+    if (!abs) {
+      const outDir = workflowOutDir(getStore)
+      if (outDir) {
+        const rel = relative(outDir, absPath)
+        if (rel && !rel.startsWith('..') && !isAbsolute(rel)) { abs = join(outDir, rel); rootName = '产物目录' }
+      }
+    }
+    if (!abs) return { ok: false, message: '该路径不在可预览范围内（Agent 工作目录或工作流产物目录）' }
+    try {
+      const st = await stat(abs)
+      if (st.isDirectory()) return { ok: false, message: '这是目录，请预览其中的文件' }
+      if (st.size > 5 * 1024 * 1024) return { ok: false, message: '文件超过 5MB 预览上限' }
+      const name = abs.replace(/\\/g, '/').split('/').pop() ?? ''
+      if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) {
+        const buf = await readFile(abs)
+        const ext = (name.split('.').pop() ?? 'png').toLowerCase().replace('jpg', 'jpeg')
+        return { ok: true, kind: 'image', name, abs, dataUrl: `data:image/${ext};base64,${buf.toString('base64')}` }
+      }
+      const buf = await readFile(abs, 'utf-8')
+      const truncated = buf.length > 64 * 1024
+      return { ok: true, kind: 'text', name, abs, content: buf.slice(0, 64 * 1024), truncated }
+    } catch (e) {
+      return { ok: false, message: `${rootName}内读取失败：${(e as Error).message}` }
+    }
+  })
+
   /** 读取某工作目录下的项目约定文件（AGENTS.md / CLAUDE.md）；目录为空或不存在返回空数组 */
   ipcMain.handle('conv:read', (_e, dir?: string) => readConventions(typeof dir === 'string' ? dir : undefined))
 
@@ -1172,6 +1283,57 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     if (!abs) return { ok: false, message: '路径越出该 Agent 的工作目录，已拒绝' }
     return { ok: true, abs }
   }
+
+  // ---------- 工作目录写通道（预览侧栏"实时改删文件"；用户本人操作，不走工具审批——
+  // 但同一条 guardRel 安全闸：相对路径、留在该 Agent 工作根内） ----------
+  const FS_WRITE_MAX = 512 * 1024
+
+  ipcMain.handle('fs:writeTextFile', async (_e, agentId: unknown, rel: unknown, content: unknown) => {
+    const g = guardRel(agentId, rel)
+    if (!g.ok) return g
+    if (typeof content !== 'string') return { ok: false, message: 'content 必须是字符串' }
+    if (content.length > FS_WRITE_MAX) return { ok: false, message: `超过 ${Math.round(FS_WRITE_MAX / 1024)}KB 写入上限` }
+    try {
+      const st = await stat(g.abs)
+      if (st.isDirectory()) return { ok: false, message: '该路径是目录，不能按文件写入' }
+    } catch { /* 不存在 → 新建（父目录一并建） */ }
+    try {
+      mkdirSync(pdirname(g.abs), { recursive: true })
+      writeFileSync(g.abs, content, 'utf-8')
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: `写入失败：${(e as Error).message}` }
+    }
+  })
+
+  ipcMain.handle('fs:deleteFile', async (_e, agentId: unknown, rel: unknown) => {
+    const g = guardRel(agentId, rel)
+    if (!g.ok) return g
+    try {
+      const st = await stat(g.abs)
+      if (st.isDirectory()) return { ok: false, message: '目录不支持在此删除（请用文件管理器，避免误删整个工作区）' }
+      await unlink(g.abs)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: `删除失败：${(e as Error).message}` }
+    }
+  })
+
+  ipcMain.handle('fs:createFile', async (_e, agentId: unknown, rel: unknown) => {
+    const g = guardRel(agentId, rel)
+    if (!g.ok) return g
+    try {
+      await stat(g.abs)
+      return { ok: false, message: '文件已存在' }
+    } catch { /* 不存在 → 可建 */ }
+    try {
+      mkdirSync(pdirname(g.abs), { recursive: true })
+      writeFileSync(g.abs, '', 'utf-8')
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: `创建失败：${(e as Error).message}` }
+    }
+  })
 
   ipcMain.handle('fs:listDir', async (_e, agentId: unknown, rel: unknown) => {
     const g = guardRel(agentId, rel)
@@ -1348,7 +1510,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
     }
     // 事件复用 model:event 通道（reqId 路由），渲染层无需区分来源
     // 账本按**实际生效**的模型归本：Agent 没填模型时不留空（留空那条既归不进任何模型、也算不了钱）
-    const tap = ledgerTap({ channel: 'cli', harness: name, model: cli.cliEffectiveModel(name, opts) })
+    const tap = ledgerTap({ channel: 'cli', harness: name, model: cli.cliEffectiveModel(name, opts), ...(opts?.uid ? { uid: opts.uid } : {}) })
     return cli.cliChatStream(name, opts ?? {}, reqId, messages, (ev) => {
       tap(ev)
       getWin()?.webContents.send('model:event', ev)

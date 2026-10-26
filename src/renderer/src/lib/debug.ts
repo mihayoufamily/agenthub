@@ -3,7 +3,7 @@
 import { useUi } from '../stores/ui'
 import { useWorkflow, runBusy } from '../stores/workflow'
 import { useAgents } from '../stores/agents'
-import { useSessions } from '../stores/sessions'
+import { useSessions, sessionsKeyOf } from '../stores/sessions'
 import { useSettings } from '../stores/settings'
 import { useApprovals } from '../stores/approvals'
 import { bridge } from '../lib/ipc'
@@ -325,7 +325,7 @@ export function installDebugHooks() {
           agentId,
           {
             count: list.length,
-            activeId: useSessions.getState().activeOf[agentId] ?? null,
+            activeId: useSessions.getState().activeOf[sessionsKeyOf(agentId)] ?? null,
             titles: list.map((s) => s.title),
             counts: list.map((s) => s.messages.length),
             drafts: list.map((s) => s.draft)

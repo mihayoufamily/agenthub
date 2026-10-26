@@ -1,7 +1,7 @@
 // 工作台聊天视图：消息流、跟随滚动、代码块复制、流式光标、交接入口、模型管理、用量显示
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChatMessage, AgentConfig, AgentSession, ToolCall, Attachment, Skill, ThinkingLevel, McpServer, LedgerUsageRow, FileChange } from '@shared/types'
-import { useSessions } from '../stores/sessions'
+import { useSessions, sessionsKeyOf } from '../stores/sessions'
 import { useAgents } from '../stores/agents'
 import { useUi } from '../stores/ui'
 import { useSettings } from '../stores/settings'
@@ -17,6 +17,7 @@ import { UsagePanel, rollup } from '../components/UsagePanel'
 import { DonutRings } from '../components/DonutRings'
 import { CheckpointBar } from '../components/CheckpointBar'
 import { FilePreviewPanel } from '../components/FilePreviewPanel'
+import { usePreview } from '../stores/preview'
 import { aggregateSessionChanges } from '@shared/timeline'
 import { digestThinking } from '../lib/thinking'
 import { useSmoothText } from '../lib/smoothText'
@@ -44,8 +45,8 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   // 直接订阅数据（而非 draftOf/messagesOf 函数引用）：否则 sessions 变化不触发重渲染，
   // 受控输入会被 React 重置回旧渲染值、发送按钮状态不更新（曾导致输入消失/演示 Agent 无输出）
   // 多会话：订阅会话数组与活跃 id，在组件内派生活跃会话（messages/draft 引用稳定）
-  const sessionList = useSessions((s) => (selectedId ? s.sessions[selectedId] : undefined))
-  const activeSesId = useSessions((s) => (selectedId ? s.activeOf[selectedId] : undefined))
+  const sessionList = useSessions((s) => (selectedId ? s.sessions[sessionsKeyOf(selectedId)] : undefined))
+  const activeSesId = useSessions((s) => (selectedId ? s.activeOf[sessionsKeyOf(selectedId)] : undefined))
   const setDraft = useSessions((s) => s.setDraft)
   const sendMessage = useSessions((s) => s.sendMessage)
   const newSession = useSessions((s) => s.newSession)
@@ -103,7 +104,24 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   }
 
   // 文件预览面板（右侧，随会话 UI 态；切 Agent 时面板自身重置内容）
-  const [previewOpen, setPreviewOpen] = useState(false)
+  // agent 可能未就绪（列表还没加载）：用 agent?.id 兜底，面板在 agent 确定后才渲染
+  const previewOpen = usePreview((st) => st.open && st.agentId === (agent?.id ?? null))
+  const togglePreview = () => {
+    const p = usePreview.getState()
+    if (!agent) return
+    if (p.open && p.agentId === agent.id) p.close()
+    else p.openPreview(agent.id)
+  }
+  // 终端视图数据：本会话的命令执行记录（随工具事件实时更新；面板里新→旧展示）
+  const cmdRuns = useMemo(() => messages
+    .flatMap((m) => (m.toolCalls ?? [])
+      .filter((tc) => tc.tool === 'run_command' && tc.status !== 'running')
+      .map((tc) => ({
+        cmd: String(tc.args.command ?? tc.args.cmd ?? Object.values(tc.args)[0] ?? ''),
+        out: tc.result ?? '',
+        err: tc.status === 'error'
+      })))
+    .slice(-50), [messages])
 
   // 切换 Agent 或会话时恢复到底部
   useEffect(() => {
@@ -162,8 +180,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   }
 
   return (
-    <div style={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}>
-    <div className="wb-main">
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, minWidth: 0 }}>
       <div className="wb-topbar">
         <Avatar name={agent.name} color={colorOf(agent.id)} size={26} />
         <div>
@@ -205,7 +222,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           {((agent.kind === 'model' && agent.tools) || agent.kind === 'cli') && (
             <button
               className={`model-chip ${previewOpen ? 'open' : ''}`}
-              onClick={() => setPreviewOpen((v) => !v)}
+              onClick={togglePreview}
               title="文件预览：工作区文件树 + 标签页，工具写盘自动刷新"
               data-testid="preview-toggle"
             >
@@ -223,6 +240,10 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
           <Icon name="handoff" size={14} /> 交给其他 Agent
         </Button>
       </div>
+
+      {/* 顶栏横跨全宽；聊天列与预览面板在同一行、同一顶边（对齐的根治） */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}>
+      <div className="wb-main">
 
       {mgmtOpen && <ModelManageModal agent={agent} onClose={() => setMgmtOpen(false)} />}
       {toolsOpen && <ToolsGrantModal agent={agent} onClose={() => setToolsOpen(false)} />}
@@ -283,7 +304,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
             </button>
           )}
           {messages.slice(-visibleCount).map((m) => (
-            <MessageRow key={m.id} msg={m} agentName={agent.name} agentColor={colorOf(agent.id)} allowRemoteImages={!!agent.tools?.allowWeb} />
+            <MessageRow key={m.id} msg={m} agentName={agent.name} agentColor={colorOf(agent.id)} allowRemoteImages={!!agent.tools?.allowWeb} agentId={agent.id} />
           ))}
         </div>
       </div>
@@ -300,6 +321,7 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
       <SessionChangesBar messages={messages} />
 
       <div className="wb-composer-wrap">
+        <DelegateBar agent={agent} />
         <ContextUsageBar
           agentId={agent.id}
           messages={messages}
@@ -327,7 +349,59 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
         />
       </div>
     </div>
-    {previewOpen && <FilePreviewPanel agent={agent} onClose={() => setPreviewOpen(false)} />}
+    {previewOpen && <FilePreviewPanel agent={agent} cmds={cmdRuns} onClose={() => usePreview.getState().close()} />}
+    </div>
+    </div>
+  )
+}
+
+/** 工作站子代理委派栏（仅工作站模式；工作流引擎不接入——用户拍板）：独立上下文执行，结果回注当前对话 */
+function DelegateBar({ agent }: { agent: AgentConfig }) {
+  const [open, setOpen] = useState(false)
+  const [target, setTarget] = useState('')
+  const [task, setTask] = useState('')
+  const [busy, setBusy] = useState(false)
+  // 注意：选择器必须返回稳定引用（zustand v5 返回新数组会无限重渲染），先选全量再 useMemo 过滤
+  const agents = useAgents((s) => s.agents)
+  const others = useMemo(() => agents.filter((a) => a.id !== agent.id && a.kind === 'model' && a.modelConfig), [agents, agent.id])
+  if (agent.isDemo) return null
+  const doDelegate = async () => {
+    if (!target || !task.trim()) return
+    setBusy(true)
+    try {
+      await useSessions.getState().delegate(agent.id, target, task)
+      setTask('')
+      setOpen(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <button className="model-chip" onClick={() => setOpen((v) => !v)} data-testid="delegate-toggle" style={{ height: 24, fontSize: 11.5 }}>
+        <Icon name="swap" size={11} /> 委派子代理
+      </button>
+      {open && (
+        <div className="delegate-pop" data-testid="delegate-pop">
+          <select value={target} onChange={(e) => setTarget(e.target.value)} data-testid="delegate-agent">
+            <option value="">选择子代理（其他已配置的模型 Agent）…</option>
+            {others.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+          <textarea
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            rows={3}
+            placeholder="子任务描述：在子代理的独立上下文里执行，完成后结果回注当前对话"
+            data-testid="delegate-task"
+          />
+          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+            <button className="fp-act" onClick={() => setOpen(false)}>取消</button>
+            <button className="fp-act primary" disabled={busy || !target || !task.trim()} onClick={() => void doDelegate()} data-testid="delegate-go">
+              {busy ? '子代理执行中…' : '委派'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -479,7 +553,7 @@ function ContextUsageBar({
 /** memo：流式期间 store 每个 delta 都会重渲染 ChatView，整张消息列表跟着重跑。
  *  props 全是稳定值（msg 引用 store 只在该条变化时替换，agentName/agentColor 是字符串，
  *  allowRemoteImages 是布尔，无内联回调），内容没变的行可整行跳过重绘。 */
-const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor, allowRemoteImages }: { msg: ChatMessage; agentName: string; agentColor: string; allowRemoteImages: boolean }) {
+const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor, allowRemoteImages, agentId }: { msg: ChatMessage; agentName: string; agentColor: string; allowRemoteImages: boolean; agentId: string }) {
   // 流式柔和输出：只对"正在流式的助手消息"开启打字机层（完整原文已在 store 里，这里只管显示节奏）；
   // "减少动态效果"用户直接看原文——动效偏好优先于手感。
   // revealEdge 在排空期（流已结束、积压还在播）也保持开启——CodeBuddy 一整块到达的场景，
@@ -526,7 +600,7 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor, 
             if (seg.kind === 'tool') {
               const tc = msg.toolCalls?.find((c) => c.id === seg.tcId)
               if (!tc) return null
-              return <ToolCallCard key={tc.id} tc={tc} />
+              return <ToolCallCard key={tc.id} tc={tc} agentId={agentId} />
             }
             const isLastText = !msg.segments!.slice(si + 1).some((s) => s.kind === 'text')
             const segShown = isLastText ? shownText.slice(shownText.lastIndexOf(seg.text) >= 0 ? shownText.lastIndexOf(seg.text) : 0) : seg.text
@@ -553,7 +627,7 @@ const MessageRow = React.memo(function MessageRow({ msg, agentName, agentColor, 
           /* 旧消息（无 segments）：回退三段式 */
           <>
             {msg.toolCalls && msg.toolCalls.length > 0 && msg.toolCalls.map((tc) => (
-              <ToolCallCard key={tc.id} tc={tc} />
+              <ToolCallCard key={tc.id} tc={tc} agentId={agentId} />
             ))}
             {msg.reasoning && msg.reasoning.trim() && <ReasoningBlock text={msg.reasoning} streaming={msg.streaming && !msg.text} />}
             {(msg.text || !msg.toolCalls?.length) && (
@@ -922,7 +996,7 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
 }
 
 /** 工具调用卡片：真实执行的文件读写/命令记录（状态、参数、结果可展开） */
-function ToolCallCard({ tc }: { tc: ToolCall }) {
+function ToolCallCard({ tc, agentId }: { tc: ToolCall; agentId: string }) {
   const [open, setOpen] = useState(false)
   const TOOL_TEXT: Record<string, string> = {
     // AgentHub 模型 Agent 沙箱工具
@@ -976,6 +1050,17 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
           {tc.status === 'running' ? '执行中…' : tc.status === 'error' ? '失败' : '完成'}{tc.durMs != null ? ` · ${tc.durMs < 1000 ? `${tc.durMs}ms` : `${(tc.durMs / 1000).toFixed(1)}s`}` : ''}
         </span>
       </button>
+      {/* AI 写盘产物：一键唤起右侧预览面板定位该文件（绝对路径走 artifact:readPreview 守卫通道） */}
+      {tc.writtenPath && tc.status === 'done' && (
+        <button
+          className="tool-preview-btn"
+          onClick={() => usePreview.getState().openPreview(agentId, { abs: tc.writtenPath })}
+          title="在右侧预览面板中打开该文件"
+          data-testid="tool-preview"
+        >
+          <Icon name="folder" size={11} /> 预览文件
+        </button>
+      )}
       {open && tc.hooks?.length && (
         <div className="tool-diff" data-tool-hooks>
           {tc.hooks.map((h, i) => (

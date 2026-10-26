@@ -12,6 +12,7 @@
 }
 
 .settings-win {
+  animation: modal-in var(--t-base) var(--ease) both;
   width: min(880px, 94vw);
   height: min(600px, 88vh);
   background: var(--surface);

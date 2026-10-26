@@ -190,6 +190,8 @@ export interface ToolCall {
   durMs?: number
   /** 本次改动登记（有检查点时）：界面显示行级 diff 与"能不能回滚" */
   change?: FileChange
+  /** 该工具调用写出的文件（write_file 等）：聊天里据此挂「预览」按钮唤起右侧预览面板 */
+  writtenPath?: string
   /** 这次工具调用跑过的 Hook（含被 pre 否决的情况） */
   hooks?: HookRun[]
 }
@@ -404,6 +406,8 @@ export interface WorkflowRun {
   reviewMode: ReviewMode
   startedAt: number
   endedAt?: number
+  /** 归属账号档案（无字段的旧记录归机主 'local'；listRuns 按当前档案过滤） */
+  uid?: string
   cards: RoleCard[]
   gate?: ReviewGate
   usage?: { tokens?: number }
@@ -508,6 +512,10 @@ export interface Prefs {
   lastMode: WorkMode | null
   /** 自定义键位（只存被改过的项；缺省用 HOTKEY_DEFAULTS） */
   keybindings?: Partial<Record<HotkeyAction, string>>
+  /** 记忆自动沉淀：对话完成后用当前模型后台提炼要点写入长期记忆（默认开） */
+  memoryAuto?: boolean
+  /** 写盘自动 git 提交：每轮对话结束时若工作目录是 git 仓库且有改动则自动 commit（默认关） */
+  gitAutoCommit?: boolean
   /** Agent 管理卡片技能区折叠（可选：缺省展开；记住用户上次的展开/折叠选择） */
   agentCardSkillsCollapsed?: boolean
   /**
@@ -538,6 +546,12 @@ export interface Prefs {
      * 独立于官方中继——只要隧道跑着就能用，填了就在弹窗出独立二维码。
      */
     customDomain?: string
+    /**
+     * 手动指定出站代理（2026-10-26）：http://127.0.0.1:7890 这类 HTTP CONNECT 代理。
+     * 系统代理自动检测不可靠时（代理软件没设系统代理、端口非默认、注册表残留死端口）用它兜底；
+     * 留空 = 自动检测（手动 > 环境变量 > 系统代理，且会先探活）。
+     */
+    proxyUrl?: string
   }
 }
 
@@ -669,6 +683,8 @@ export interface LedgerEntry {
   model?: string
   agentId?: string
   agentName?: string
+  /** 归属账号档案（无字段的旧条目归机主 'local'；list/stats 按当前档案过滤） */
+  uid?: string
   workflow?: boolean
   /** 属于哪次工作流任务：预算闸只算本次任务的调用，不把同时发生的工作站对话算进来 */
   runId?: string

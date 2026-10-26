@@ -11,7 +11,18 @@ import { bridge } from '../lib/ipc'
 
 type Status = { enabled: boolean; running: boolean; port: number; hasToken: boolean; token?: string; urls: string[]; customDomain?: string }
 type TunnelStatus = { enabled: boolean; running: boolean; connecting: boolean; url?: string; error?: string; binaryFound: boolean }
-type RelayStatus = { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }
+type RelayStatus = { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; channel?: string; proxyUrl?: string; error?: string }
+/** 中继连通性诊断结果（主进程实测：直连 TCP/TLS、代理存活、经代理到网关） */
+type RelayDiag = {
+  relayUrl: string
+  gatewayHost: string
+  connected: boolean
+  channel: string
+  error?: string
+  direct: { tcp: boolean; tls: string }
+  proxies: { addr: string; source: string; alive: boolean; via?: string }[]
+  hint: string
+}
 /** 四个二维码通道：局域网 / 固定域名（用户自己的隧道）/ 官方中继 / 临时隧道 */
 type QrMode = 'lan' | 'custom' | 'relay' | 'tunnel'
 
@@ -31,6 +42,12 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
   const [lanIdx, setLanIdx] = useState(0)
   const [domainDraft, setDomainDraft] = useState('')
   const [domainEditing, setDomainEditing] = useState(false)
+  const [diag, setDiag] = useState<RelayDiag | null>(null)
+  const [diagBusy, setDiagBusy] = useState(false)
+  const [proxyDraft, setProxyDraft] = useState('')
+  const [proxyEditing, setProxyEditing] = useState(false)
+  const [gwDraft, setGwDraft] = useState('')
+  const [gwEditing, setGwEditing] = useState(false)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -75,10 +92,35 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
   const toggleRelay = async (on: boolean) => {
     try {
       const r = await bridge.mobile.setRelayEnabled(on)
-      setRelay({ enabled: r.enabled, connected: r.connected, publicUrl: r.publicUrl, relayUrl: r.relayUrl, error: r.error })
+      setRelay({ enabled: r.enabled, connected: r.connected, publicUrl: r.publicUrl, relayUrl: r.relayUrl, channel: r.channel, proxyUrl: r.proxyUrl, error: r.error })
       if (on && r.publicUrl) setQrMode('relay')
     } catch {
       bridge.mobile.relayStatus().then(setRelay).catch(() => {})
+    }
+  }
+
+  /** 连通性诊断：主进程实测后给出人话结论（用户不用猜死在哪一步） */
+  const runDiag = async () => {
+    setDiagBusy(true)
+    try { setDiag(await bridge.mobile.relayDiag()) } catch { setDiag(null) } finally { setDiagBusy(false) }
+  }
+
+  const saveProxy = async () => {
+    const r = await bridge.mobile.setProxyUrl(proxyDraft.trim())
+    if (r.ok) {
+      setRelay((x) => (x ? { ...x, proxyUrl: r.proxyUrl || undefined } : x))
+      setProxyEditing(false)
+      void runDiag()
+    }
+  }
+
+  /** 自建网关地址（VPS 上跑 relay/server.mjs；校园网等对官方网关阻断时的兜底路） */
+  const saveGw = async () => {
+    const r = await bridge.mobile.setRelayUrl(gwDraft.trim())
+    if (r.ok) {
+      setRelay((x) => (x ? { ...x, relayUrl: r.relayUrl ?? x.relayUrl } : x))
+      setGwEditing(false)
+      void runDiag()
     }
   }
 
@@ -146,10 +188,71 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
               <Switch on={relay?.enabled === true} onChange={(v) => void toggleRelay(v)} label="公网中继" />
             </div>
             {relay?.enabled === true && relay.connected && relay.publicUrl && (
-              <div className="mob-status"><Badge tone="ok">已连接中继</Badge></div>
+              <div className="mob-status">
+                <Badge tone="ok">已连接中继</Badge>
+                {relay.channel ? <span className="mob-sub">出站：{relay.channel}</span> : null}
+              </div>
             )}
             {relay?.enabled === true && !relay.connected && (
-              <div className="mob-sub">正在连接中继网关…（断线会自动重连）{relay.error ? ` · ${relay.error}` : ''}</div>
+              <div className="mob-sub" style={{ color: 'var(--danger, #e5484d)' }}>
+                {relay.error ?? '正在连接中继网关…（断线会自动重连）'}
+              </div>
+            )}
+            {/* 出站通道自检：自动检测可能拿到死端口，这里能看到到底死在哪一步，也能手动指定代理 */}
+            {relay?.enabled === true && (
+              <div className="mob-domain-edit">
+                <button type="button" onClick={() => void runDiag()} disabled={diagBusy}>
+                  {diagBusy ? '检测中…' : '🔍 检测连通性'}
+                </button>
+                <button type="button" onClick={() => { setProxyDraft(relay?.proxyUrl ?? ''); setProxyEditing((v) => !v) }}>
+                  {relay?.proxyUrl ? `代理：${relay.proxyUrl.replace(/^https?:\/\//, '')}` : '出站代理：自动检测'}
+                </button>
+                <button type="button" onClick={() => { setGwDraft(relay?.relayUrl ?? ''); setGwEditing((v) => !v) }}>
+                  网关：{relay?.relayUrl && relay.relayUrl !== 'wss://relay.zdymodel.de5.net' ? relay.relayUrl.replace(/^wss?:\/\//, '') : '官方'}
+                </button>
+              </div>
+            )}
+            {gwEditing && relay?.enabled === true && (
+              <div className="mob-domain-edit">
+                <input
+                  value={gwDraft}
+                  onChange={(e) => setGwDraft(e.target.value)}
+                  placeholder="wss://你的网关 或 ws://1.2.3.4:8090（留空=官方）"
+                  autoFocus
+                  onKeyDown={(e) => { if (e.key === 'Enter') void saveGw() }}
+                />
+                <button type="button" className="primary" onClick={() => void saveGw()}>保存</button>
+                <button type="button" onClick={() => setGwEditing(false)}>取消</button>
+              </div>
+            )}
+            {proxyEditing && relay?.enabled === true && (
+              <div className="mob-domain-edit">
+                <input
+                  value={proxyDraft}
+                  onChange={(e) => setProxyDraft(e.target.value)}
+                  placeholder="http://127.0.0.1:7890（留空=自动检测）"
+                  autoFocus
+                  onKeyDown={(e) => { if (e.key === 'Enter') void saveProxy() }}
+                />
+                <button type="button" className="primary" onClick={() => void saveProxy()}>保存</button>
+                <button type="button" onClick={() => setProxyEditing(false)}>取消</button>
+              </div>
+            )}
+            {diag && relay?.enabled === true && (
+              <div className="mob-sub" style={{ lineHeight: 1.7 }}>
+                <div>直连网关：TCP {diag.direct.tcp ? '通' : '不通'} · TLS {diag.direct.tls}</div>
+                {diag.proxies.length === 0 ? (
+                  <div>代理：未检测到（系统代理/环境变量都没有配置）</div>
+                ) : (
+                  diag.proxies.map((x) => (
+                    <div key={x.addr}>
+                      代理 {x.addr}（{x.source}）：{x.alive ? '端口存活' : '端口没监听'}
+                      {x.via ? ` · 到网关 ${x.via}` : ''}
+                    </div>
+                  ))
+                )}
+                <div style={{ marginTop: 4, color: 'var(--fg, inherit)' }}>结论：{diag.hint}</div>
+              </div>
             )}
 
             <div className="mob-row" style={{ marginTop: 10 }}>
@@ -223,7 +326,7 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
                 <div className="mob-domain-guide">
                   <div className="mob-domain-hint">
                     {relay?.enabled
-                      ? '正在连接官方中继网关…（本机网络到 Cloudflare 受限时自动轮换重试；网络恢复后二维码自动出现）'
+                      ? '正在连接官方中继网关…（点上方「检测连通性」可看是直连被阻断还是代理没生效；网络恢复后二维码自动出现）'
                       : '打开上方「公网（官方中继）」开关即可生成二维码'}
                   </div>
                 </div>

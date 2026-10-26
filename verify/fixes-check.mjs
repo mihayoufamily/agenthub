@@ -1363,7 +1363,9 @@ console.log('\n[W2] importConfig 保字段')
   }
   const out = st.normalizeImported(incoming)
   ok('导入保留 mcpServers 并给它跑完迁移（旧记录标失效）', Array.isArray(out.mcpServers) && out.mcpServers[0].legacyInvalid === true, JSON.stringify(out.mcpServers))
-  ok('导入保留 presets / hooks / priceOverrides / skills', !!out.presets && !!out.hooks && !!out.priceOverrides && !!out.skills)
+  // v4 档案化：presets 收进 profiles.local；hooks/priceOverrides/skills 是全局键不动
+  ok('导入保留 presets（v4 收进 profiles.local）', !!out.profiles?.local?.presets, JSON.stringify(out.profiles?.local?.presets)?.slice(0, 60))
+  ok('导入保留 hooks / priceOverrides / skills（全局键不动）', !!out.hooks && !!out.priceOverrides && !!out.skills)
   ok('导入后的版本号等于 SCHEMA_HEAD', out.schemaVersion === st.SCHEMA_HEAD, String(out.schemaVersion))
   // 评审后补：接线本身也要有断言——Store 构造函数第一行就 app.getPath，脚本起不了实例，
   // 只能打在编译产物上：importConfig 真调了 normalizeImported，且停在 1 的 CURRENT_SCHEMA_VERSION 已删除。
@@ -2480,7 +2482,7 @@ console.log('\n[Skill] Agent 级绑定：三层并集去重与 auto/reference �
 console.log('\n[迁移] schemaVersion 3：Agent 级 Skill 字段补齐，且不销毁任何键')
 {
   const cm = await import('../out/shared/config-migration.js')
-  ok('SCHEMA_HEAD 抬到 3', cm.SCHEMA_HEAD === 3, `got=${cm.SCHEMA_HEAD}`)
+  ok('SCHEMA_HEAD 抬到 4（v4=账号档案化）', cm.SCHEMA_HEAD === 4, `got=${cm.SCHEMA_HEAD}`)
   const out = cm.migrateV2toV3({ schemaVersion: 2, agents: [{ id: 'x', name: 'X', kind: 'cli', desc: '', model: 'm', status: 'available', cliConfig: { cli: 'codex' } }] })
   ok('只补 skillMode 缺省值，不凭空造 skillIds（造出来等于替用户绑了东西）',
     out.agents[0].skillMode === 'reference' && out.agents[0].skillIds === undefined, JSON.stringify(out.agents[0]))
@@ -3887,7 +3889,12 @@ console.log('\n[TL2] zcode 式时间线过程流')
         let r = tl.applyEventToSegments(undefined, { type: 'reasoning', text: 'x' })
         r = tl.applyEventToSegments(r, { type: 'reasoning', text: '\n\ny' })
         const okReason = r.length === 1 && r[0].text.includes('x') && r[0].text.includes('y')
-        return okText && okReason
+        // 回归断言（2026-10-26 思考排版 bug）：调用方传原样增量时，时间线不得自作主张补 \n\n——
+        // 流式增量通常两三个字一条，双重分隔符会把思考拆成"每行两三字+段间空行"
+        let r2 = tl.applyEventToSegments(undefined, { type: 'reasoning', text: '第一句' })
+        r2 = tl.applyEventToSegments(r2, { type: 'reasoning', text: '第二句' })
+        const okRaw = r2.length === 1 && r2[0].text === '第一句第二句'
+        return okText && okReason && okRaw
       })())
   }
   {

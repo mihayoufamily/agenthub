@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process'
 import { CdpClient, sleep, launchEnv, waitHttp, js, waitJs } from './cdp.mjs'
 
 const PORT = 9252
-const HTTP_PORT = 8748
+const HTTP_PORT = 8749
 let failed = 0
 let passed = 0
 let skipped = 0
@@ -40,7 +40,7 @@ const pollTunnel = async (cdp, want, timeoutMs) => {
 const env = launchEnv()
 env.AGENTHUB_CLOUDFLARED_PATH = 'D:\\local-llm\\cloudflared.exe'
 
-const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify'], { stdio: 'ignore', env })
+const proc = spawn('D:/AgentHub/AgentHub.exe', [`--remote-debugging-port=${PORT}`, '--ahub-verify', '--user-data-dir=D:/dsh/agenthub/.tmp/profile-mobile-tunnel'], { stdio: 'ignore', env })
 try {
   const page = await waitHttp(PORT, 25000)
   const cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -51,6 +51,9 @@ try {
   await js(cdp, 'window.__ahub_debug.workbench()')
   await waitJs(cdp, 'document.querySelectorAll(".agent-list .agent-item").length > 0', 25000)
   await sleep(600)
+
+  // 隔离 profile 与用户实例并存：本地服务固定用 8749（8748 可能被用户实例占用）
+  await js(cdp, `window.agenthub.config.get().then((c) => window.agenthub.config.setPrefs({ ...c.prefs, mobileService: { ...c.prefs.mobileService, port: ${HTTP_PORT} } }))`)
 
   /* ---- 1) 状态与二进制定位 ---- */
   const t0 = await js(cdp, `window.agenthub.mobile.tunnelStatus()`)
@@ -99,7 +102,9 @@ try {
   /* ---- 6) UI：公网区块 + 切换按钮 ---- */
   const ui = await js(cdp, `(async () => {
     const tick = (ms) => new Promise(r => setTimeout(r, ms))
-    document.querySelector('.foot-btn[title="手机查看"]').click()
+    const footBtn = document.querySelector('.foot-btn[title="手机查看"]')
+    if (!footBtn) return { opened: false, reason: 'foot-btn 手机查看 not found' }
+    footBtn.click()
     await tick(400)
     if (!document.querySelector('.mob-wrap')) return { opened: false }
     const panel = document.querySelector('.mob-tunnel')

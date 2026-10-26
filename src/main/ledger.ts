@@ -11,6 +11,8 @@ import { app } from 'electron'
 import { join, dirname } from 'node:path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { estimateCost } from '../shared/pricing'
+import * as auth from './auth'
+import { primaryAccountId } from './auth'
 import type { LedgerEntry, LedgerUsageRow } from '../shared/types'
 
 export type { LedgerEntry, LedgerUsageRow }
@@ -58,7 +60,14 @@ function withCost(e: LedgerEntry): LedgerEntry {
   return cost == null ? e : { ...e, cost }
 }
 
-export function list(limit = 500): LedgerEntry[] {
+/** 按账号过滤（uid 缺省=当前档案；无 uid 的旧条目归 'local'，主账号可见） */
+function matchesUid(e: { uid?: string }, uid: string): boolean {
+  const eu = e.uid ?? 'local'
+  return eu === uid || (uid === primaryAccountId() && eu === 'local')
+}
+
+export function list(limit = 500, uid?: string): LedgerEntry[] {
+  const want = uid ?? auth.activeUid()
   try {
     return readLines()
       .map((l) => {
@@ -69,15 +78,21 @@ export function list(limit = 500): LedgerEntry[] {
         }
       })
       .filter((x): x is LedgerEntry => !!x)
+      .filter((x) => matchesUid(x, want))
       .slice(-limit)
   } catch {
     return []
   }
 }
 
-export function clear() {
+export function clear(uid?: string) {
   try {
-    writeFileSync(file(), '', 'utf-8')
+    const want = uid ?? auth.activeUid()
+    // 只清当前档案的条目：其他账号的用量不能被顺手抹掉
+    const keep = readLines().filter((l) => {
+      try { return !matchesUid(JSON.parse(l) as LedgerEntry, want) } catch { return true }
+    })
+    writeFileSync(file(), keep.join('\n') + (keep.length ? '\n' : ''), 'utf-8')
   } catch {
     // 忽略
   }
@@ -98,11 +113,14 @@ export function dump(): string {
  * 无公开单价的模型不折算——所以这个数是下界，界面必须这么说。
  */
 export function costSince(ts: number, runId?: string): number {
+  const want = auth.activeUid()
   let sum = 0
   for (const line of readLines()) {
     try {
       const e = withCost(JSON.parse(line) as LedgerEntry)
       if (e.ts < ts) continue
+      // 预算闸按当前档案算（其他账号的消耗不占本档案预算；机主遗留条目归主账号）
+      if (!matchesUid(e, want)) continue
       if (runId && e.runId !== runId) continue
       if (e.cost) sum += e.cost
     } catch { /* 坏行跳过 */ }

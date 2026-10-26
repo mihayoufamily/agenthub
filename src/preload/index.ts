@@ -69,7 +69,16 @@ const api = {
       ipcRenderer.invoke('fs:readTextFile', agentId, rel) as Promise<{ ok: boolean; content?: string; message?: string }>,
     /** Agent 工作目录只读图片预览（FilePreviewPanel 用）：仅图片扩展名、≤5MB，返回 data URL */
     readDataUrl: (agentId: string, rel: string) =>
-      ipcRenderer.invoke('fs:readDataUrl', agentId, rel) as Promise<{ ok: boolean; dataUrl?: string; mime?: string; bytes?: number; message?: string }>
+      ipcRenderer.invoke('fs:readDataUrl', agentId, rel) as Promise<{ ok: boolean; dataUrl?: string; mime?: string; bytes?: number; message?: string }>,
+    /** 工作目录文件写入（预览侧栏的编辑保存）：同 guardRel 安全闸，仅文本、≤512KB */
+    writeTextFile: (agentId: string, rel: string, content: string) =>
+      ipcRenderer.invoke('fs:writeTextFile', agentId, rel, content) as Promise<{ ok: boolean; message?: string }>,
+    /** 工作目录文件删除（预览侧栏）：仅文件，目录拒绝 */
+    deleteFile: (agentId: string, rel: string) =>
+      ipcRenderer.invoke('fs:deleteFile', agentId, rel) as Promise<{ ok: boolean; message?: string }>,
+    /** 工作目录新建空文件（预览侧栏）：已存在则拒绝 */
+    createFile: (agentId: string, rel: string) =>
+      ipcRenderer.invoke('fs:createFile', agentId, rel) as Promise<{ ok: boolean; message?: string }>
   },
   update: {
     /** 版本检查（manual=true 不受 3 天节流，用于设置页按钮）；asset 为便携包资产信息（确认弹窗显示大小用） */
@@ -118,9 +127,9 @@ const api = {
     /** 自定义固定公网域名（用户自己的隧道入口）：归一化后存 prefs，弹窗出独立二维码 */
     setCustomDomain: (d: string) =>
       ipcRenderer.invoke('mobile:setCustomDomain', d) as Promise<{ ok: boolean; customDomain?: string; message?: string }>,
-    /** 手机侧发来消息（已过 token 与 agentId 校验）；返回退订函数 */
-    onSendMessage: (cb: (m: { agentId: string; text: string }) => void) => {
-      const handler = (_e: unknown, data: { agentId: string; text: string }) => cb(data)
+    /** 手机侧发来消息（已过鉴权与 agentId 校验；uid=发送者会话作用域）；返回退订函数 */
+    onSendMessage: (cb: (m: { agentId: string; text: string; uid?: string }) => void) => {
+      const handler = (_e: unknown, data: { agentId: string; text: string; uid?: string }) => cb(data)
       ipcRenderer.on('mobile:send-message', handler)
       return () => { ipcRenderer.removeListener('mobile:send-message', handler) }
     },
@@ -129,6 +138,24 @@ const api = {
       const handler = (_e: unknown, data: { runId: string; action: 'deliver' | 'rework' | 'stop'; feedback?: string }) => cb(data)
       ipcRenderer.on('mobile:gate-decision', handler)
       return () => { ipcRenderer.removeListener('mobile:gate-decision', handler) }
+    },
+    /** 手机侧会话操作（main 已过鉴权与 agentId 校验；uid=操作者会话作用域）：new/switch/delete/rename */
+    onSessionOp: (cb: (d: { op: 'new' | 'switch' | 'delete' | 'rename'; agentId: string; sessionId?: string; title?: string; uid?: string }) => void) => {
+      const handler = (_e: unknown, data: { op: 'new' | 'switch' | 'delete' | 'rename'; agentId: string; sessionId?: string; title?: string; uid?: string }) => cb(data)
+      ipcRenderer.on('mobile:session-op', handler)
+      return () => { ipcRenderer.removeListener('mobile:session-op', handler) }
+    },
+    /** 手机侧新建自定义模型 Agent（main 已过鉴权；渲染层走 addCustomModelAgent 同一校验链） */
+    onAgentCreate: (cb: (d: { name?: string; provider: string; baseUrl: string; modelId: string; apiKey: string }) => void) => {
+      const handler = (_e: unknown, data: { name?: string; provider: string; baseUrl: string; modelId: string; apiKey: string }) => cb(data)
+      ipcRenderer.on('mobile:agent-create', handler)
+      return () => { ipcRenderer.removeListener('mobile:agent-create', handler) }
+    },
+    /** 手机侧工作流操作：start（带 goal）/ stop */
+    onRunOp: (cb: (d: { op: 'start' | 'stop'; goal?: string }) => void) => {
+      const handler = (_e: unknown, data: { op: 'start' | 'stop'; goal?: string }) => cb(data)
+      ipcRenderer.on('mobile:run-op', handler)
+      return () => { ipcRenderer.removeListener('mobile:run-op', handler) }
     },
     /** 公网接入（mobile-tunnel.ts）：quick tunnel 状态查询/开关 + 状态变化推送 */
     tunnelStatus: () =>
@@ -142,11 +169,29 @@ const api = {
     },
     /** 中继网关（mobile-relay.ts）：出站 WS 到中继，零配置固定公网入口 */
     relayStatus: () =>
-      ipcRenderer.invoke('mobile:relayStatus') as Promise<{ enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }>,
+      ipcRenderer.invoke('mobile:relayStatus') as Promise<{ enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; channel?: string; error?: string }>,
     setRelayEnabled: (on: boolean) =>
-      ipcRenderer.invoke('mobile:setRelayEnabled', on) as Promise<{ ok: boolean } & { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }>,
-    onRelayStatus: (cb: (s: { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }) => void) => {
-      const handler = (_e: unknown, data: { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }) => cb(data)
+      ipcRenderer.invoke('mobile:setRelayEnabled', on) as Promise<{ ok: boolean } & { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; channel?: string; proxyUrl?: string; error?: string }>,
+    /** 连通性诊断：直连 TCP/TLS、代理存活、经代理到网关实测，返回人话结论 */
+    relayDiag: () =>
+      ipcRenderer.invoke('mobile:relayDiag') as Promise<{
+        relayUrl: string
+        gatewayHost: string
+        connected: boolean
+        channel: string
+        error?: string
+        direct: { tcp: boolean; tls: string }
+        proxies: { addr: string; source: string; alive: boolean; via?: string }[]
+        hint: string
+      }>,
+    /** 自建网关地址（wss:// 或 ws://；空串=官方网关）。存了立即重连 */
+    setRelayUrl: (url: string) =>
+      ipcRenderer.invoke('mobile:setRelayUrl', url) as Promise<{ ok: boolean; relayUrl?: string; message?: string }>,
+    /** 手动指定出站代理（http://host:port）；空串=回自动检测。存了立即重连 */
+    setProxyUrl: (url: string) =>
+      ipcRenderer.invoke('mobile:setProxyUrl', url) as Promise<{ ok: boolean; proxyUrl?: string; message?: string }>,
+    onRelayStatus: (cb: (s: { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; channel?: string; error?: string }) => void) => {
+      const handler = (_e: unknown, data: { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; channel?: string; error?: string }) => cb(data)
       ipcRenderer.on('mobile:relay-status', handler)
       return () => { ipcRenderer.removeListener('mobile:relay-status', handler) }
     }
@@ -178,11 +223,11 @@ const api = {
     delete: (keyId: string) => ipcRenderer.invoke('credential:delete', keyId)
   },
   sessions: {
-    /** 保存该 Agent 的全部会话（v2 多会话；activeId 为当前活跃会话） */
-    save: (agentId: string, sessions: AgentSession[], activeId?: string) =>
-      ipcRenderer.invoke('session:save', agentId, sessions, activeId),
-    load: (agentId: string) =>
-      ipcRenderer.invoke('session:load', agentId) as Promise<{ sessions: AgentSession[]; activeId?: string } | null>,
+    /** 保存该用户作用域下某 Agent 的全部会话（v2 多会话；activeId 为当前活跃会话） */
+    save: (uid: string, agentId: string, sessions: AgentSession[], activeId?: string) =>
+      ipcRenderer.invoke('session:save', uid, agentId, sessions, activeId),
+    load: (uid: string, agentId: string) =>
+      ipcRenderer.invoke('session:load', uid, agentId) as Promise<{ sessions: AgentSession[]; activeId?: string } | null>,
     remove: (agentId: string, deleteHistory: boolean) => ipcRenderer.invoke('session:remove', agentId, deleteHistory)
   },
   runs: {
@@ -212,6 +257,10 @@ const api = {
   agents: {
     scan: () => ipcRenderer.invoke('agents:scan') as Promise<ScanResultItem[]>,
     checkPath: (p: string) => ipcRenderer.invoke('agents:checkPath', p) as Promise<boolean>,
+    /** 指定账号档案的 Agent 配置（手机侧跨作用域对话用） */
+    getForUid: (uid: string) => ipcRenderer.invoke('agents:getForUid', uid) as Promise<{ agents: AgentConfig[] }>,
+    /** 写盘自动 git 提交（gitAutoCommit 开时每轮结束调用；非仓库/无改动如实 skipped） */
+    gitAutoCommit: (dir: string) => ipcRenderer.invoke('git:autoCommit', dir) as Promise<{ ok: boolean; skipped?: boolean; committed?: boolean; message?: string }>,
     /** 所有老模型 Agent 一键补默认工具（无→全套默认；有→只补沙箱目录与联网，其余显式设置不动） */
     applyDefaults: () =>
       ipcRenderer.invoke('agents:defaults:apply') as Promise<{ ok: boolean; changed: { name: string; what: string }[]; message?: string }>
@@ -343,7 +392,19 @@ const api = {
       files: { rel: string; bytes: number }[]
       truncated?: boolean
       message?: string
-    }>
+    }>,
+    /** AI 产物预览（按绝对路径；范围硬闸=Agent 工作根或工作流产物目录） */
+    readPreview: (agentId: string | null, absPath: string) =>
+      ipcRenderer.invoke('artifact:readPreview', agentId, absPath) as Promise<{
+        ok: boolean
+        kind?: 'text' | 'image'
+        name?: string
+        abs?: string
+        content?: string
+        truncated?: boolean
+        dataUrl?: string
+        message?: string
+      }>
   },
   /** 改动检查点：工具层文件改动的备份清单与整体回滚（不覆盖 run_command 与 CLI 自己的写盘） */
   checkpoint: {
@@ -387,6 +448,22 @@ const api = {
   },
   theme: {
     set: (t: 'light' | 'dark' | 'system') => ipcRenderer.invoke('theme:set', t)
+  },
+  /** 账号（auth.ts）：数据档案身份（无锁屏）；密码仅用于手机端登录；头像/切换在这层 */
+  auth: {
+    state: () => ipcRenderer.invoke('auth:state') as Promise<{ hasAccounts: boolean; active: { id: string; name: string; avatar?: string } | null; cloud: { url: string } | null }>,
+    listAccounts: () => ipcRenderer.invoke('auth:listAccounts') as Promise<{ id: string; name: string; avatar?: string; lastLoginAt?: number }[]>,
+    addAccount: (name: string, password: string) => ipcRenderer.invoke('auth:addAccount', name, password) as Promise<{ ok: boolean; message?: string; id?: string }>,
+    removeAccount: (id: string) => ipcRenderer.invoke('auth:removeAccount', id) as Promise<{ ok: boolean; message?: string }>,
+    changePassword: (id: string, oldPw: string, newPw: string) => ipcRenderer.invoke('auth:changePassword', id, oldPw, newPw) as Promise<{ ok: boolean; message?: string }>,
+    /** 切换数据档案（无密码）：切完调用方自行 reload 重载档案数据 */
+    setActive: (id: string) => ipcRenderer.invoke('auth:setActive', id) as Promise<{ ok: boolean; message?: string }>,
+    setAvatar: (id: string, dataUrl: string) => ipcRenderer.invoke('auth:setAvatar', id, dataUrl) as Promise<{ ok: boolean; message?: string; avatar?: string }>,
+    /** 改账号名（找回账号的默认名由此改掉） */
+    renameAccount: (id: string, newName: string) => ipcRenderer.invoke('auth:renameAccount', id, newName) as Promise<{ ok: boolean; message?: string }>,
+    /** 云端同步（自制服务）：整份账号档案加密推送/拉取。API Key 不在同步范围 */
+    cloudPush: (url: string, passphrase: string) => ipcRenderer.invoke('auth:cloudPush', url, passphrase) as Promise<{ ok: boolean; message?: string }>,
+    cloudPull: (url: string, passphrase: string) => ipcRenderer.invoke('auth:cloudPull', url, passphrase) as Promise<{ ok: boolean; message?: string }>
   }
 }
 

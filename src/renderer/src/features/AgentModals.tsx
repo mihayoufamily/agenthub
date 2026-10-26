@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { ScanResultItem, CliName } from '@shared/types'
 import { useAgents, CLI_META } from '../stores/agents'
-import { useSessions } from '../stores/sessions'
+import { useSessions, sessionsKeyOf } from '../stores/sessions'
 import { useUi } from '../stores/ui'
 import { Modal } from '../components/Modal'
 import { Button, Avatar, Spinner } from '../components/primitives'
@@ -507,8 +507,8 @@ function HandoffModal({ onClose }: { onClose: () => void }) {
   // 直接订阅数据（函数引用订阅不会随 sessions 变化触发重渲染）；多会话取活跃会话消息
   const msgs = useSessions((s) => {
     if (!selectedId) return EMPTY_MSGS
-    const list = s.sessions[selectedId]
-    const act = list?.find((x) => x.id === s.activeOf[selectedId]) ?? list?.[list.length - 1]
+    const list = s.sessions[sessionsKeyOf(selectedId)]
+    const act = list?.find((x) => x.id === s.activeOf[sessionsKeyOf(selectedId)]) ?? list?.[list.length - 1]
     return act?.messages ?? EMPTY_MSGS
   })
   const others = agents.filter((a) => a.id !== selectedId)

@@ -19,6 +19,7 @@ import { useSmoothText } from '../lib/smoothText'
 // 模型在两种视图下给出的图/代码长一个样
 import { MessageBody } from './ChatView'
 import { useAgents } from '../stores/agents'
+import { usePreview } from '../stores/preview'
 import { useSettings } from '../stores/settings'
 import { STATUS_TEXT } from './WfChips'
 import { fmtElapsed, cls, safeName } from '../lib/utils'
@@ -490,6 +491,17 @@ function CardRenderer({ card, run, config }: { card: RoleCardType; run: Workflow
                 <Icon name="file" size={12} />
                 <span title={art.demo ? '演示产物（未写入磁盘）' : art.by === 'tool' ? '由执行 Agent 写盘' : '由 AgentHub 保存的文本成果'}>{art.name}</span>
                 {!art.demo && <span className="artifact-by">{art.by === 'tool' ? '执行方写盘' : 'AgentHub 保存'}</span>}
+                {!art.demo && art.path && (
+                  <button
+                    title="在右侧预览面板中查看"
+                    onClick={() => {
+                      const agId = useAgents.getState().selectedId
+                      if (agId) usePreview.getState().openPreview(agId, { abs: art.path! })
+                    }}
+                  >
+                    预览
+                  </button>
+                )}
                 <button
                   disabled={!!art.demo || !art.path}
                   title={art.demo ? '演示产物未写入磁盘，无法打开' : '打开产物'}

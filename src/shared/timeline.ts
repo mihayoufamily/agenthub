@@ -27,8 +27,9 @@ export function applyEventToSegments(
   }
   if (ev.type === 'reasoning' && ev.text) {
     const last = segs[segs.length - 1]
-    // 与旧 reasoningOpen 同语义：紧跟上一段思考的思考续写，否则新开一段
-    if (last && last.kind === 'reasoning') last.text += (last.text ? '\n\n' : '') + ev.text
+    // 连续增量原样拼接——分隔符语义归调用方（sessions.ts 的 sep 只进聚合字段）：
+    // 时间线若再补 \n\n，流式增量（通常两三个字一条）会被拆成"每行两三字+段间空行"（2026-10-26 用户实测）
+    if (last && last.kind === 'reasoning') last.text += ev.text
     else segs.push({ kind: 'reasoning', text: ev.text })
     return segs
   }

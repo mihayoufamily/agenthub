@@ -1,10 +1,14 @@
 // 会话状态：每个 Agent 独立的多会话（列表/切换/重命名/删除）+ 草稿随会话保留；
-// 演示回复引擎 + 真实模型流式接入；磁盘为 v2 多会话格式（旧单会话文件由主进程自动迁移）
+// 演示回复引擎 + 真实模型流式接入；磁盘为 v2 多会话格式（旧单会话文件由主进程自动迁移）。
+// 多用户隔离（2026-10-26）：内存与磁盘都按「用户作用域」分键（uid|agentId）——
+// 桌面锁屏解锁的是谁就加载谁的会话；手机侧消息带发送者的 uid，流式回包写回发送者自己的作用域
+// （引擎按 reqId 路由，天然支持多用户并发各自对话）。工作流任务与用量账本仍是机器级共享。
 import { create } from 'zustand'
 import type { AgentSession, ChatMessage, Attachment, Skill } from '@shared/types'
 import { bridge } from '../lib/ipc'
 import { uid, chunkText, sleep, safeName, fmtSize } from '../lib/utils'
 import { estimateCost, estimateTokens, contextWindowOf } from '@shared/pricing'
+import type { CustomModelConfig, AgentConfig } from '@shared/types'
 import { CONTEXT_BUDGET_RATIO, fitHistory, foldTranscript } from '@shared/context'
 import { renderConventionsBlock } from '@shared/conventions'
 import { memoryBlockFor } from '@shared/retrieval'
@@ -15,6 +19,30 @@ import { useUi } from './ui'
 import { useSettings } from './settings'
 import { demoChatReply, demoHandoffNote } from '../lib/demo'
 
+/** 当前用户作用域（auth 账号 id；无账号/机主遗留数据='local'）。由 App 启动编排经 setUser 设置 */
+let curUid = 'local'
+
+/** 切换用户作用域：清空内存（各作用域由 ensure 按需从磁盘懒加载）。同一 uid 重复调用是 no-op */
+export function setSessionUser(next: string) {
+  const u = next || 'local'
+  if (u === curUid) return
+  curUid = u
+  useSessions.setState({ sessions: {}, activeOf: {} })
+}
+
+/** 组件按当前用户作用域订阅原始会话键（ChatView 会话列表/草稿派生；AgentModals 删除联动） */
+export function sessionsKeyOf(agentId: string): string {
+  return curKey(agentId)
+}
+
+/** 作用域键：内存 state 以 `<uid>|<agentId>` 为键，读写永远成对 */
+function key(scope: string, agentId: string): string {
+  return scope + '|' + agentId
+}
+function curKey(agentId: string): string {
+  return key(curUid, agentId)
+}
+
 interface SessionsState {
   /** agentId -> 会话列表（新的在前） */
   sessions: Record<string, AgentSession[]>
@@ -23,22 +51,25 @@ interface SessionsState {
   /** 运行中的模型流 reqId -> agentId，避免重复提交 */
   activeStreams: Record<string, string>
 
-  ensure: (agentId: string) => Promise<void>
+  ensure: (agentId: string, scope?: string) => Promise<void>
   /** 某 Agent 的会话列表（面板展示用） */
-  listOf: (agentId: string) => AgentSession[]
+  listOf: (agentId: string, scope?: string) => AgentSession[]
   /** 活跃会话（无会话时返回 undefined，不隐式创建） */
   activeSessionOf: (agentId: string) => AgentSession | undefined
   messagesOf: (agentId: string) => ChatMessage[]
   draftOf: (agentId: string) => string
   setDraft: (agentId: string, text: string) => void
-  /** 发送消息；skills 为本次引用的 Skill 提示包（注入对话上下文，仅记录名称） */
-  sendMessage: (agentId: string, text: string, attachments: Attachment[], skills?: Skill[]) => Promise<void>
-  newSession: (agentId: string) => void
-  switchSession: (agentId: string, sessionId: string) => void
-  renameSession: (agentId: string, sessionId: string, title: string) => void
-  deleteSession: (agentId: string, sessionId: string) => void
+  /** 发送消息；skills 为本次引用的 Skill 提示包（注入对话上下文，仅记录名称）；
+   *  uid：消息归属的用户作用域（手机侧转发时带发送者 uid，缺省=桌面当前用户） */
+  sendMessage: (agentId: string, text: string, attachments: Attachment[], skills?: Skill[], uid?: string) => Promise<void>
+  newSession: (agentId: string, scope?: string) => void
+  switchSession: (agentId: string, sessionId: string, scope?: string) => void
+  renameSession: (agentId: string, sessionId: string, title: string, scope?: string) => void
+  deleteSession: (agentId: string, sessionId: string, scope?: string) => void
   /** 导出单个 Agent 当前活跃会话为 Markdown 文件 */
   exportSession: (agentId: string) => Promise<void>
+  /** 工作站子代理委派：把子任务交给另一个模型 Agent（独立上下文），结果回注当前对话（仅工作站用，工作流不接入） */
+  delegate: (fromAgentId: string, toAgentId: string, task: string) => Promise<void>
   handoff: (fromId: string, toId: string) => void
 }
 
@@ -49,24 +80,32 @@ function mkSession(agentId: string, title = '新会话'): AgentSession {
 
 type Core = Pick<SessionsState, 'sessions' | 'activeOf'>
 
-/** 取某 Agent 的活跃会话引用（容错：activeOf 失效时取最后一个；无会话返回 undefined） */
-function activeOf(state: Core, agentId: string): AgentSession | undefined {
-  const list = state.sessions[agentId]
+/** 取某作用域下某 Agent 的活跃会话引用（容错：activeOf 失效时取最后一个；无会话返回 undefined） */
+function activeIn(state: Core, scope: string, agentId: string): AgentSession | undefined {
+  const k = key(scope, agentId)
+  const list = state.sessions[k]
   if (!list || list.length === 0) return undefined
-  return list.find((x) => x.id === state.activeOf[agentId]) ?? list[list.length - 1]
+  return list.find((x) => x.id === state.activeOf[k]) ?? list[list.length - 1]
+}
+/** 当前用户的读取口径（UI 全部走这里） */
+function activeOf(state: Core, agentId: string): AgentSession | undefined {
+  return activeIn(state, curUid, agentId)
 }
 
 /**
- * 变更活跃会话（无会话时自动创建默认会话；activeOf 失效时自动纠正），返回 set 所需 partial。
+ * 变更指定作用域的活跃会话（无会话时自动创建默认会话；activeOf 失效时自动纠正），返回 set 所需 partial。
  * Agent 已被删除时返回空 partial：删除后才到的残留流式事件（delta/usage/done…）不允许为已删
  * id 自动重建会话并 persist 落盘——那会留下幽灵会话文件，模型的输出也继续白烧。
  * useAgents 是顶层 import 但只在运行时 getState() 取值：sessions↔agents 互相引用成环，
  * 两边都不在模块求值期碰对方，ESM/rollup 的活绑定下环安全。
  */
-function withActive(state: Core, agentId: string, fn: (ses: AgentSession) => AgentSession): Partial<Pick<SessionsState, 'sessions' | 'activeOf'>> {
-  if (!useAgents.getState().agents.some((a) => a.id === agentId)) return {}
-  let list = state.sessions[agentId]
-  let activeId = state.activeOf[agentId]
+function withActiveIn(state: Core, scope: string, agentId: string, fn: (ses: AgentSession) => AgentSession): Partial<Pick<SessionsState, 'sessions' | 'activeOf'>> {
+  // 本作用域挡"已删 Agent 的残留事件"（防幽灵会话）；跨作用域（手机其他用户）的 Agent
+  // 存在于各自档案、渲染层 store 看不到——sendMessage 已先从其档案取出 agent，这里放行
+  if (scope === curUid && !useAgents.getState().agents.some((a) => a.id === agentId)) return {}
+  const k = key(scope, agentId)
+  let list = state.sessions[k]
+  let activeId = state.activeOf[k]
   if (!list || list.length === 0) {
     const ns = mkSession(agentId)
     list = [ns]
@@ -75,15 +114,20 @@ function withActive(state: Core, agentId: string, fn: (ses: AgentSession) => Age
     activeId = list[list.length - 1].id
   }
   return {
-    sessions: { ...state.sessions, [agentId]: list.map((s) => (s.id === activeId ? fn(s) : s)) },
-    activeOf: { ...state.activeOf, [agentId]: activeId }
+    sessions: { ...state.sessions, [k]: list.map((s) => (s.id === activeId ? fn(s) : s)) },
+    activeOf: { ...state.activeOf, [k]: activeId }
   }
 }
+/** 当前用户作用域的变更口径 */
+function withActive(state: Core, agentId: string, fn: (ses: AgentSession) => AgentSession): Partial<Pick<SessionsState, 'sessions' | 'activeOf'>> {
+  return withActiveIn(state, curUid, agentId, fn)
+}
 
-/** 持久化某 Agent 的全部会话与活跃 id */
-function persistAgent(agentId: string) {
+/** 持久化某作用域下某 Agent 的全部会话与活跃 id */
+function persistAgent(agentId: string, scope = curUid) {
   const st = useSessions.getState()
-  void bridge.sessions.save(agentId, st.sessions[agentId] ?? [], st.activeOf[agentId])
+  const k = key(scope, agentId)
+  void bridge.sessions.save(scope, agentId, st.sessions[k] ?? [], st.activeOf[k])
 }
 
 /** 从用户消息提取会话默认标题（去换行、限长） */
@@ -92,32 +136,92 @@ function titleFrom(text: string): string {
   return t.length > 16 ? t.slice(0, 16) + '…' : t
 }
 
+/** 一次性调用（子代理/记忆提炼用）：收集增量直到 done/error，60s 兜底超时 */
+function oneShot(cfg: CustomModelConfig, messages: { role: string; content: string }[]): Promise<string> {
+  return new Promise((resolve) => {
+    const reqId = uid('os')
+    let buf = ''
+    let settled = false
+    const finish = () => { if (!settled) { settled = true; off(); resolve(buf) } }
+    const off = bridge.models.onEvent((ev) => {
+      if (ev.reqId !== reqId) return
+      if (ev.type === 'delta' && ev.text) buf += ev.text
+      else if (ev.type === 'done' || ev.type === 'error') finish()
+    })
+    void bridge.models.chat(cfg, reqId, messages as never, {}).catch(() => finish())
+    setTimeout(finish, 60000)
+  })
+}
+
+/** 记忆自动沉淀：提炼 0-3 条长期要点写入 memory store（每 6 条用户消息触发一次，失败静默） */
+async function distillMemory(agent: { modelConfig?: CustomModelConfig }, msgs: ChatMessage[]) {
+  try {
+    const history = msgs
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-8)
+      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.text.slice(0, 1500) }))
+    if (history.length < 2) return
+    const out = await oneShot(agent.modelConfig as CustomModelConfig, [
+      { role: 'system', content: '你是记忆提炼器。从对话提炼 0-3 条值得长期记住的用户事实/偏好/项目约束。只输出 JSON 字符串数组（如 ["偏好暗色主题"]）；没有值得记的输出 []。不要输出任何其他内容。' },
+      ...history
+    ])
+    const m = out.match(/\[[\s\S]*\]/)
+    if (!m) return
+    const arr = JSON.parse(m[0]) as unknown
+    if (!Array.isArray(arr)) return
+    const items = arr.filter((x): x is string => typeof x === 'string' && x.trim().length > 3 && x.length < 200).slice(0, 3)
+    if (!items.length) return
+    const cur = await bridge.memory.get()
+    const have = new Set(cur.map((e) => e.text))
+    const add = items.filter((t) => !have.has(t)).map((t) => ({ id: uid('mem'), kind: 'summary' as const, text: t, ts: Date.now(), editable: true }))
+    if (add.length) await bridge.memory.set([...cur, ...add].slice(-50))
+  } catch { /* 沉淀失败静默：不打扰对话 */ }
+}
+
+/** 每轮对话完成的后台收尾：记忆沉淀 + git 自动提交（都受设置开关控制，均不阻塞界面） */
+async function afterTurn(agent: AgentConfig, scope: string, agentId: string) {
+  try {
+    const prefs = useSettings.getState().prefs
+    const ses = activeIn(useSessions.getState(), scope, agentId)
+    if (!ses) return
+    if ((prefs?.memoryAuto ?? true) && agent.kind === 'model' && agent.modelConfig) {
+      const userCount = ses.messages.filter((m) => m.role === 'user').length
+      if (userCount >= 6 && userCount % 6 === 0) void distillMemory(agent, ses.messages.slice(-10))
+    }
+    if (prefs?.gitAutoCommit) {
+      const dir = agent.kind === 'cli' ? agent.cliConfig?.workDir : agent.tools?.dir
+      if (dir) await bridge.agents.gitAutoCommit(dir)
+    }
+  } catch { /* 收尾失败静默 */ }
+}
+
 export const useSessions = create<SessionsState>()((set, get) => ({
   sessions: {},
   activeOf: {},
   activeStreams: {},
 
-  ensure: async (agentId) => {
-    if (get().sessions[agentId]?.length) return
+  ensure: async (agentId, scope) => {
+    const k = key(scope ?? curUid, agentId)
+    if (get().sessions[k]?.length) return
     let loaded: { sessions: AgentSession[]; activeId?: string } | null = null
     try {
-      loaded = await bridge.sessions.load(agentId)
+      loaded = await bridge.sessions.load(scope ?? curUid, agentId)
     } catch { /* 首次无会话文件 */ }
     set((s) => {
-      const mem = s.sessions[agentId]
+      const mem = s.sessions[k]
       if (mem && mem.length > 0) {
         // 加载期间用户已输入/发送（冷启动时 IPC 可能延迟到达）：内存版本优先，仅补入磁盘上内存缺失的会话
         const memIds = new Set(mem.map((x) => x.id))
         const merged = [...(loaded?.sessions ?? []).filter((x) => !memIds.has(x.id)), ...mem]
-        return { sessions: { ...s.sessions, [agentId]: merged } }
+        return { sessions: { ...s.sessions, [k]: merged } }
       }
       const list = loaded && loaded.sessions.length > 0 ? loaded.sessions : [mkSession(agentId)]
       const act = loaded?.activeId && list.some((x) => x.id === loaded!.activeId) ? loaded.activeId : list[0].id
-      return { sessions: { ...s.sessions, [agentId]: list }, activeOf: { ...s.activeOf, [agentId]: act } }
+      return { sessions: { ...s.sessions, [k]: list }, activeOf: { ...s.activeOf, [k]: act } }
     })
   },
 
-  listOf: (agentId) => get().sessions[agentId] ?? [],
+  listOf: (agentId, scope) => get().sessions[key(scope ?? curUid, agentId)] ?? [],
 
   activeSessionOf: (agentId) => activeOf(get(), agentId),
 
@@ -130,12 +234,23 @@ export const useSessions = create<SessionsState>()((set, get) => ({
     persistAgent(agentId)
   },
 
-  sendMessage: async (agentId, text, attachments, skills) => {
+  sendMessage: async (agentId, text, attachments, skills, uidOverride) => {
     const agents = useAgents.getState()
-    const agent = agents.agents.find((a) => a.id === agentId)
+    // 消息归属的作用域：手机侧转发带发送者 uid；桌面输入 = 当前用户。
+    // 跨作用域（手机其他用户发消息）先确保该作用域已从磁盘载入，否则 withActive 会
+    // 在空内存上凭空建会话，把该用户的历史"顶掉"
+    const scope = uidOverride || curUid
+    if (scope !== curUid) await get().ensure(agentId, scope)
+
+    // Agent 配置：本作用域从 store 取；跨作用域从该用户的档案取（手机用户聊自己创建的模型）
+    let agent = agents.agents.find((a) => a.id === agentId)
+    if (!agent && scope !== curUid) {
+      const r = await bridge.agents.getForUid(scope).catch(() => null)
+      agent = (r?.agents ?? []).find((a) => a.id === agentId)
+    }
     if (!agent) return
 
-    const streamKey = `chat:${agentId}`
+    const streamKey = `chat:${key(scope, agentId)}`
     if (get().activeStreams[streamKey]) {
       useUi.getState().toast('该 Agent 正在回复中，请稍候', 'warn')
       return
@@ -150,7 +265,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       attachments: attachments.length ? attachments : undefined,
       skills: skills?.length ? skills.map((s) => s.name) : undefined
     }
-    set((s) => withActive(s, agentId, (ses) => ({
+    set((s) => withActiveIn(s, scope, agentId, (ses) => ({
       ...ses,
       // 首条消息后自动命名（用户手动改过标题则不再覆盖）
       title: ses.title === '新会话' && text.trim() ? titleFrom(text) : ses.title,
@@ -158,7 +273,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       draft: '',
       updatedAt: Date.now()
     })))
-    persistAgent(agentId)
+    persistAgent(agentId, scope)
     agents.setStatus(agentId, 'running')
 
     if (agent.kind === 'demo') {
@@ -169,11 +284,11 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         id: msgId, role: 'assistant', text: '', ts: Date.now(),
         demo: true, streaming: true, model: agent.model
       }
-      set((s) => withActive(s, agentId, (ses) => ({ ...ses, messages: [...ses.messages, demoMsg] })))
+      set((s) => withActiveIn(s, scope, agentId, (ses) => ({ ...ses, messages: [...ses.messages, demoMsg] })))
       set((s) => ({ activeStreams: { ...s.activeStreams, [streamKey]: agentId } }))
       for (const chunk of chunkText(reply, 4)) {
         await sleep(24)
-        set((s) => withActive(s, agentId, (ses) => ({
+        set((s) => withActiveIn(s, scope, agentId, (ses) => ({
           ...ses,
           messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + chunk } : m))
         })))
@@ -183,7 +298,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         delete activeStreams[streamKey]
         return {
           activeStreams,
-          ...withActive(s, agentId, (ses) => ({
+          ...withActiveIn(s, scope, agentId, (ses) => ({
             ...ses,
             messages: ses.messages.map((m) => (m.id === msgId ? { ...m, streaming: false } : m)),
             updatedAt: Date.now()
@@ -193,7 +308,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       // 后台完成提醒：不在当前页时计未读
       if (useAgents.getState().selectedId !== agentId) useAgents.getState().bumpUnread(agentId)
       useAgents.getState().setStatus(agentId, 'available')
-      persistAgent(agentId)
+      persistAgent(agentId, scope)
       return
     }
 
@@ -202,7 +317,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       const reqId = uid('req')
       const msgId = uid('msg')
       const replyMsg: ChatMessage = { id: msgId, role: 'assistant', text: '', ts: Date.now(), streaming: true, model: agent.model }
-      set((s) => withActive(s, agentId, (ses) => ({ ...ses, messages: [...ses.messages, replyMsg] })))
+      set((s) => withActiveIn(s, scope, agentId, (ses) => ({ ...ses, messages: [...ses.messages, replyMsg] })))
       set((s) => ({ activeStreams: { ...s.activeStreams, [streamKey]: agentId } }))
 
       // CLI Agent 工作目录兜底（存量 Agent 未设 workDir 时）：默认文档工作区并持久化告知——
@@ -284,7 +399,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       } catch { /* 清单拉不到不影响本次对话 */ }
       // 先按条数开窗，再按 token 预算折叠最旧的轮次：以前只裁条数，
       // 长会话要么撑爆窗口报错、要么悄悄丢掉上下文，现在改成明确标出的规则式摘要
-      const turns = (activeOf(get(), agentId)?.messages ?? [])
+      const turns = (activeIn(get(), scope, agentId)?.messages ?? [])
         // 排除：报错消息（占位文本非模型输出）、演示消息、流式中的消息（含本轮刚 push 的空回复占位）
         .filter((m) => !m.error && !m.demo && !m.streaming && m.id !== msgId)
         // handoff 交接此前只留在界面上：它写入的是 role:'system'，被旧的"只放行 user/assistant"
@@ -333,17 +448,19 @@ export const useSessions = create<SessionsState>()((set, get) => ({
         if (ev.reqId !== reqId) return
         if (ev.type === 'delta' && ev.text) {
           reasoningOpen = false
-          set((s) => withActive(s, agentId, (ses) => ({
+          set((s) => withActiveIn(s, scope, agentId, (ses) => ({
             ...ses,
             messages: ses.messages.map((m) => (m.id === msgId ? { ...m, text: m.text + ev.text, segments: applyEventToSegments(m.segments, { type: 'delta', text: ev.text }) } : m))
           })))
         } else if (ev.type === 'reasoning' && ev.text) {
           // 思考模型的思考过程：追加到消息 reasoning 字段（UI 折叠展示；多轮对话回传协议）
+          // sep（\n\n）只用于聚合字段区分思考轮次；segments 时间线按事件边界自然分段
+          // （工具/正文之后的新思考在时间线上是新段），原样传增量、不预置分隔符
           const sep = reasoningOpen ? '' : '\n\n'
           reasoningOpen = true
-          set((s) => withActive(s, agentId, (ses) => ({
+          set((s) => withActiveIn(s, scope, agentId, (ses) => ({
             ...ses,
-            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, reasoning: (m.reasoning ?? '') + sep + ev.text, segments: applyEventToSegments(m.segments, { type: 'reasoning', text: sep + ev.text }) } : m))
+            messages: ses.messages.map((m) => (m.id === msgId ? { ...m, reasoning: (m.reasoning ?? '') + sep + ev.text, segments: applyEventToSegments(m.segments, { type: 'reasoning', text: ev.text }) } : m))
           })))
         } else if (ev.type === 'notice' && ev.text) {
           // CLI 心跳提示（如 90 秒无输出可能卡在权限审批）：toast 一次，不打断消息
@@ -353,7 +470,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           const usage = { tokens: ev.usage.tokens, prompt: ev.usage.prompt, completion: ev.usage.completion }
           if (ev.usage.tokens) useAgents.getState().addTokens(agentId, ev.usage.tokens)
           const cost = estimateCost(agent.modelConfig?.modelId ?? agent.model, usage)
-          set((s) => withActive(s, agentId, (ses) => ({
+          set((s) => withActiveIn(s, scope, agentId, (ses) => ({
             ...ses,
             messages: ses.messages.map((m) => (m.id === msgId ? { ...m, usage, ...(cost != null ? { cost } : {}) } : m))
           })))
@@ -361,7 +478,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           // 工具调用执行记录：合并进当前回复消息（同 id 更新状态与结果，新 id 追加）
           const tc = ev.toolCall
           reasoningOpen = false
-          set((s) => withActive(s, agentId, (ses) => ({
+          set((s) => withActiveIn(s, scope, agentId, (ses) => ({
             ...ses,
             messages: ses.messages.map((m) => {
               if (m.id !== msgId) return m
@@ -380,7 +497,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
             delete activeStreams[streamKey]
             return {
               activeStreams,
-              ...withActive(s, agentId, (ses) => ({
+              ...withActiveIn(s, scope, agentId, (ses) => ({
                 ...ses,
                 messages: ses.messages.map((m) =>
                   m.id === msgId ? { ...m, streaming: false, error: ev.message ?? '未知错误' } : m
@@ -395,7 +512,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
             delete activeStreams[streamKey]
             return {
               activeStreams,
-              ...withActive(s, agentId, (ses) => ({
+              ...withActiveIn(s, scope, agentId, (ses) => ({
                 ...ses,
                 messages: ses.messages.map((m) => (m.id === msgId ? { ...m, streaming: false } : m)),
                 updatedAt: Date.now()
@@ -404,7 +521,9 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           })
           if (useAgents.getState().selectedId !== agentId) useAgents.getState().bumpUnread(agentId)
           useAgents.getState().setStatus(agentId, 'available')
-          persistAgent(agentId)
+          persistAgent(agentId, scope)
+          // 后台收尾：记忆沉淀 / git 自动提交（开关在设置；失败静默）
+          void afterTurn(agent, scope, agentId)
         }
       })
 
@@ -414,11 +533,11 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       // 本次回复若改过文件，主进程会给出检查点 id：界面据此挂出"看 diff / 回滚"入口
       const cp = (r as { ok: boolean; checkpoint?: string }).checkpoint
       if (cp) {
-        set((s) => withActive(s, agentId, (ses) => ({
+        set((s) => withActiveIn(s, scope, agentId, (ses) => ({
           ...ses,
           messages: ses.messages.map((m) => (m.id === msgId ? { ...m, checkpoint: cp } : m))
         })))
-        persistAgent(agentId)
+        persistAgent(agentId, scope)
       }
       if (!r.ok) {
         set((s) => {
@@ -426,7 +545,7 @@ export const useSessions = create<SessionsState>()((set, get) => ({
           delete activeStreams[streamKey]
           return {
             activeStreams,
-            ...withActive(s, agentId, (ses) => ({
+            ...withActiveIn(s, scope, agentId, (ses) => ({
               ...ses,
               messages: ses.messages.map((m) =>
                 m.id === msgId ? { ...m, streaming: false, error: agent.kind === 'cli' ? '请求未发出（CLI 不可用或已卸载）' : '请求未发出（缺少 API Key 或配置）' } : m
@@ -445,61 +564,65 @@ export const useSessions = create<SessionsState>()((set, get) => ({
       id: uid('msg'), role: 'system', text: '该 Agent 尚未连接，无法执行。请在"添加 Agent"中完成连接或选择演示 Agent。',
       ts: Date.now()
     }
-    set((s) => withActive(s, agentId, (ses) => ({ ...ses, messages: [...ses.messages, sysMsg] })))
+    set((s) => withActiveIn(s, scope, agentId, (ses) => ({ ...ses, messages: [...ses.messages, sysMsg] })))
     agents.setStatus(agentId, 'awaiting')
   },
 
-  newSession: (agentId) => {
-    if (get().activeStreams[`chat:${agentId}`]) {
+  newSession: (agentId, scope) => {
+    const k = key(scope ?? curUid, agentId)
+    if (get().activeStreams[`chat:${k}`]) {
       useUi.getState().toast('回复进行中，稍后再开新会话', 'warn')
       return
     }
     const ns = mkSession(agentId)
     set((s) => ({
-      sessions: { ...s.sessions, [agentId]: [ns, ...(s.sessions[agentId] ?? [])] },
-      activeOf: { ...s.activeOf, [agentId]: ns.id }
+      sessions: { ...s.sessions, [k]: [ns, ...(s.sessions[k] ?? [])] },
+      activeOf: { ...s.activeOf, [k]: ns.id }
     }))
-    persistAgent(agentId)
+    persistAgent(agentId, scope)
     useUi.getState().toast('已开始新会话', 'ok')
   },
 
-  switchSession: (agentId, sessionId) => {
-    if (get().activeStreams[`chat:${agentId}`]) {
+  switchSession: (agentId, sessionId, scope) => {
+    const k = key(scope ?? curUid, agentId)
+    if (get().activeStreams[`chat:${k}`]) {
       useUi.getState().toast('回复进行中，稍后再切换会话', 'warn')
       return
     }
-    const list = get().sessions[agentId]
+    const list = get().sessions[k]
     if (!list?.some((x) => x.id === sessionId)) return
-    set((s) => ({ activeOf: { ...s.activeOf, [agentId]: sessionId } }))
-    persistAgent(agentId)
+    set((s) => ({ activeOf: { ...s.activeOf, [k]: sessionId } }))
+    persistAgent(agentId, scope)
   },
 
-  renameSession: (agentId, sessionId, title) => {
+  renameSession: (agentId, sessionId, title, scope) => {
     const t = title.trim().slice(0, 40)
     if (!t) return
+    const k = key(scope ?? curUid, agentId)
     set((s) => ({
       sessions: {
         ...s.sessions,
-        [agentId]: (s.sessions[agentId] ?? []).map((x) => (x.id === sessionId ? { ...x, title: t } : x))
+        [k]: (s.sessions[k] ?? []).map((x) => (x.id === sessionId ? { ...x, title: t } : x))
       }
     }))
-    persistAgent(agentId)
+    persistAgent(agentId, scope)
   },
 
-  deleteSession: (agentId, sessionId) => {
-    if (get().activeStreams[`chat:${agentId}`]) {
+  deleteSession: (agentId, sessionId, scope) => {
+    const k = key(scope ?? curUid, agentId)
+    if (get().activeStreams[`chat:${k}`]) {
       useUi.getState().toast('回复进行中，稍后再删除会话', 'warn')
       return
     }
     set((s) => {
-      const list = (s.sessions[agentId] ?? []).filter((x) => x.id !== sessionId)
+      const list = (s.sessions[k] ?? []).filter((x) => x.id !== sessionId)
       // 删空时保持至少一个默认会话（与"新会话"入口一致）
       const final = list.length > 0 ? list : [mkSession(agentId)]
-      const cur = s.activeOf[agentId]
+      const cur = s.activeOf[k]
       const act = final.some((x) => x.id === cur) ? cur : final[0].id
-      return { sessions: { ...s.sessions, [agentId]: final }, activeOf: { ...s.activeOf, [agentId]: act } }
+      return { sessions: { ...s.sessions, [k]: final }, activeOf: { ...s.activeOf, [k]: act } }
     })
-    persistAgent(agentId)
+    persistAgent(agentId, scope)
     useUi.getState().toast('会话已删除', 'ok')
   },
 
@@ -528,6 +651,30 @@ export const useSessions = create<SessionsState>()((set, get) => ({
     const name = safeName(`agenthub-chat-${agent?.name ?? agentId}-${ses.title}-${Date.now()}`) + '.md'
     const r = await bridge.dialogs.saveFile(name, lines.join('\n'))
     useUi.getState().toast(r.ok ? `已导出到 ${r.message}` : '已取消导出', r.ok ? 'ok' : 'info')
+  },
+
+  delegate: async (fromAgentId, toAgentId, task) => {
+    const agents = useAgents.getState()
+    const from = agents.agents.find((a) => a.id === fromAgentId)
+    const to = agents.agents.find((a) => a.id === toAgentId)
+    if (!from || !to) { useUi.getState().toast('Agent 不存在', 'error'); return }
+    if (to.kind !== 'model' || !to.modelConfig) { useUi.getState().toast('子代理暂只支持已配置的自定义模型 Agent', 'warn'); return }
+    const t = task.trim()
+    if (!t) { useUi.getState().toast('先写要委派的任务', 'warn'); return }
+    useUi.getState().toast(`已委派子代理「${to.name}」，完成后结果回注对话`)
+    const result = await oneShot(to.modelConfig, [
+      { role: 'system', content: `你是「${to.name}」，作为子代理被主对话委派执行一个独立子任务。直接输出最终结果，不要寒暄、不要复述任务、不要提问。` },
+      { role: 'user', content: t.slice(0, 4000) }
+    ])
+    const msg: ChatMessage = {
+      id: uid('msg'),
+      role: 'system',
+      text: `子代理「${to.name}」完成任务：${t.slice(0, 80)}${t.length > 80 ? '…' : ''}\n\n${result || '（子代理无输出）'}`,
+      ts: Date.now(),
+      handoff: { fromAgentId: toAgentId, fromAgentName: to.name }
+    }
+    set((s) => withActive(s, fromAgentId, (ses) => ({ ...ses, messages: [...ses.messages, msg], updatedAt: Date.now() })))
+    persistAgent(fromAgentId)
   },
 
   handoff: (fromId, toId) => {

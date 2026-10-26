@@ -1,5 +1,7 @@
 import { app, safeStorage } from 'electron'
-import { migrateV0toV1, migrateV1toV2, migrateV2toV3, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
+import { migrateV0toV1, migrateV1toV2, migrateV2toV3, migrateV3toV4, normalizeImported, SCHEMA_HEAD, type McpConfigShape } from '../shared/config-migration'
+// auth：会话作用域收养要问"谁是主账号"（auth 不反向依赖 store，无环）
+import * as auth from './auth'
 import { join, dirname, basename, relative } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync, renameSync, copyFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -71,7 +73,9 @@ export class Store {
   private writeJson(p: string, data: unknown) {
     // 原子落盘：先写同目录临时文件再 rename 整体替换，防"写一半进程崩了/被杀了"留下半份 JSON，
     // 把整份 config/会话/记忆清零。断电级持久不是本层承诺（rename 前掉电仍可能是旧文件）。
+    // 目录不存在就建（会话按用户作用域分目录后，sessions/<uid>/ 首次写入必须自建，否则 ENOENT）
     const tmp = `${p}.tmp`
+    try { mkdirSync(dirname(p), { recursive: true }) } catch { /* 已存在或不可建——写出错时上层如实报 */ }
     writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8')
     renameSync(tmp, p)
   }
@@ -144,9 +148,9 @@ export class Store {
   }
 
   // ---------- 配置（带版本迁移） ----------
-  getConfig(): AppConfig {
+  private readRawCfg(): RawCfg {
     let raw: RawCfg = this.readJson<RawCfg>(this.dirs.config, {} as RawCfg)
-    // 迁移链：v0(空/旧结构) -> v1 -> v2 -> v3。规则在 shared/config-migration.ts，这里只读写盘
+    // 迁移链：v0(空/旧结构) -> v1 -> v2 -> v3 -> v4。规则在 shared/config-migration.ts，这里只读写盘
     const v = (raw as { schemaVersion?: number }).schemaVersion ?? 0
     let changed = false
     if (v < 1) {
@@ -164,70 +168,196 @@ export class Store {
       raw.schemaVersion = SCHEMA_HEAD
       changed = true
     }
+    if (v < 4) {
+      // v4：账号档案化——agents/workflowDefaults/presets 收进 profiles.<uid>（机主遗留数据进 local）
+      raw = migrateV3toV4(raw as unknown as Record<string, unknown>) as unknown as RawCfg
+      raw.schemaVersion = SCHEMA_HEAD
+      changed = true
+    }
     if (changed) this.writeJson(this.dirs.config, raw)
-    return raw as AppConfig
+    return raw
+  }
+
+  /** 当前账号档案的合并视图：顶层 agents/workflowDefaults/presets = 当前账号的数据 */
+  getConfig(): AppConfig {
+    const cfg = this.readRawCfg() as AppConfig
+    const p = this.profileOf(cfg as unknown as Record<string, unknown>)
+    // workflowDefaults 类型上必填、新建档案时可能还没有（消费方都有 wd?. 守卫）
+    return { ...cfg, agents: p.agents, workflowDefaults: p.workflowDefaults as AppConfig['workflowDefaults'], presets: p.presets }
+  }
+
+  /** 指定账号档案的视图（手机侧按请求者 uid 读取，不借桌面当前档案） */
+  getConfigFor(uid: string): AppConfig {
+    const cfg = this.readRawCfg() as AppConfig
+    const profiles = (cfg as unknown as Record<string, unknown>).profiles as Record<string, { agents?: AppConfig['agents']; workflowDefaults?: AppConfig['workflowDefaults']; presets?: AppConfig['presets'] }> | undefined
+    const p = profiles?.[uid]
+    return { ...cfg, agents: p?.agents ?? [], workflowDefaults: p?.workflowDefaults as AppConfig['workflowDefaults'], presets: p?.presets ?? [] }
+  }
+
+  /**
+   * 启动收养（修复"我的 Agent 没了"）：账号在旧版本创建、v4 迁移在之后的场景下，
+   * adoptLegacyProfile（仅挂在 addAccount）永远没机会跑——旧 Agent 停在 profiles.local，
+   * 用户停在空档案里。每次启动补一道：主账号还没档案而 local 有 → 搬过去；
+   * 若当前停留的档案没有 Agent 而主账号有 → 把当前档案切回主账号（数据跟人走）
+   */
+  adoptLegacyProfileAtBoot() {
+    const raw = this.readRawCfg()
+    const primary = auth.primaryAccountId()
+    if (!primary) return
+    const profiles = (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, { agents?: unknown[] }>
+    if (profiles.local && !profiles[primary]) {
+      profiles[primary] = profiles.local
+      delete profiles.local
+      raw.profiles = profiles
+      this.writeJson(this.dirs.config, raw)
+    }
+    const active = auth.activeUid()
+    const agentsOf = (uid: string) => {
+      const p = profiles[uid] as { agents?: unknown[] } | undefined
+      return Array.isArray(p?.agents) ? p!.agents!.length : 0
+    }
+    if (active !== primary && agentsOf(active) === 0 && agentsOf(primary) > 0) {
+      auth.setActive(primary)
+    }
+  }
+
+  /**
+   * 孤儿档案收容（2026-10-26）：账号缓存毒化期的每次重启+建号都会覆盖 auth.json 的账号表，
+   * 只剩最后一个存活——但那些账号名下的档案数据（agents）都还在 config.profiles 里。
+   * 这里给"有数据、无账号"的孤儿档案按原 id 补建账号（初始密码 agenthub123，用户可改密），
+   * 数据一个字节不动，侧栏切回去即可继续用。返回找回名单（供日志）。
+   */
+  recoverOrphanProfiles(): string[] {
+    const raw = this.readRawCfg()
+    const profiles = (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, { agents?: unknown[] }>
+    const out: string[] = []
+    for (const uid of Object.keys(profiles)) {
+      if (uid === 'local' || !auth || auth.hasAccount(uid)) continue
+      const agents = profiles[uid]?.agents
+      if (!Array.isArray(agents) || agents.length === 0) continue
+      const name = auth.recoverAccount(uid, 'agenthub123')
+      if (name) out.push(`${name}(${agents.length} 个 Agent)`)
+    }
+    return out
+  }
+
+  /** 手机侧在指定档案里追加 Agent（主进程直建：连接已测、Key 已入凭据存储后调用） */
+  appendAgentToProfile(uid: string, agent: AppConfig['agents'][number]) {
+    if (!safeFileId(uid)) return
+    const raw = this.readRawCfg() as Record<string, unknown>
+    const profiles = (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, Record<string, unknown>>
+    const p = profiles[uid] ?? {}
+    const list = Array.isArray(p.agents) ? p.agents : []
+    profiles[uid] = { ...p, agents: [...list, agent] }
+    raw.profiles = profiles
+    this.writeJson(this.dirs.config, raw)
+  }
+
+  /** 云端同步：全部档案数据（不动 prefs/账本/任务——那些是设备本地的运行痕迹） */
+  syncProfiles(): Record<string, unknown> {
+    const raw = this.readRawCfg() as Record<string, unknown>
+    return (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, unknown>
+  }
+
+  restoreProfiles(profiles: Record<string, unknown>) {
+    if (!profiles || typeof profiles !== 'object' || Object.keys(profiles).length === 0) return
+    const raw = this.readRawCfg() as Record<string, unknown>
+    raw.profiles = profiles
+    this.writeJson(this.dirs.config, raw)
+  }
+
+  /**
+   * 账号档案：agents / workflowDefaults / presets 按账号隔离。
+   * getConfig 返回的是「当前档案的合并视图」（顶层 agents 等键 = 当前账号的数据），
+   * 既有消费者（ipc config:get、scheduler、导出…）零改动；写入走 set* 系列直写 profile。
+   */
+  private profileOf(raw: Record<string, unknown>): { agents: AppConfig['agents']; workflowDefaults: AppConfig['workflowDefaults']; presets: AppConfig['presets'] } {
+    const profiles = (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, { agents?: AppConfig['agents']; workflowDefaults?: AppConfig['workflowDefaults']; presets?: AppConfig['presets'] }>
+    const p = profiles[auth.activeUid()]
+    return {
+      agents: p?.agents ?? [],
+      workflowDefaults: p?.workflowDefaults as AppConfig['workflowDefaults'],
+      presets: p?.presets ?? []
+    }
+  }
+
+  private writeProfile(patch: { agents?: AppConfig['agents']; workflowDefaults?: AppConfig['workflowDefaults']; presets?: AppConfig['presets'] }) {
+    const raw = this.readRawCfg()
+    const profiles = (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, Record<string, unknown>>
+    const uid = auth.activeUid()
+    profiles[uid] = { ...(profiles[uid] ?? {}), ...patch }
+    raw.profiles = profiles
+    this.writeJson(this.dirs.config, raw)
+  }
+
+  /**
+   * 首个账号创建时调用（ipc auth:addAccount）：机主遗留档案（profiles.local）搬给主账号——
+   * 建账号的人就是机主，历史 Agent/配置跟人走；其他账号永远空档案起步。
+   */
+  adoptLegacyProfile(newId: string) {
+    const raw = this.readRawCfg()
+    const profiles = (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, Record<string, unknown>>
+    if (!profiles.local || profiles[newId]) return
+    profiles[newId] = profiles.local
+    delete profiles.local
+    raw.profiles = profiles
+    this.writeJson(this.dirs.config, raw)
   }
 
   setPrefs(prefs: Prefs) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.prefs = prefs
     this.writeJson(this.dirs.config, cfg)
   }
 
   setAgents(agents: AppConfig['agents']) {
-    const cfg = this.getConfig()
-    cfg.agents = agents
-    this.writeJson(this.dirs.config, cfg)
+    this.writeProfile({ agents })
   }
 
   setWorkflowDefaults(wd: AppConfig['workflowDefaults']) {
-    const cfg = this.getConfig()
-    cfg.workflowDefaults = wd
-    this.writeJson(this.dirs.config, cfg)
+    this.writeProfile({ workflowDefaults: wd })
   }
 
   setPresets(list: AppConfig['presets']) {
-    const cfg = this.getConfig()
-    cfg.presets = list
-    this.writeJson(this.dirs.config, cfg)
+    this.writeProfile({ presets: list })
   }
 
   /** 定时任务整表（lastRunAt 记账也走这里，scheduler.ts 每次触发后写回） */
   setTaskSchedules(list: AppConfig['taskSchedules']) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.taskSchedules = list
     this.writeJson(this.dirs.config, cfg)
   }
 
   /** 工作流剧本整表（与 setPresets 同一条"读整份 config、改一个键、写回"路径） */
   setTemplates(list: AppConfig['workflowTemplates']) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.workflowTemplates = list
     this.writeJson(this.dirs.config, cfg)
   }
 
   /** 自定义单价覆盖：随 config 一起导出/导入，换机器不用重抄一遍价格 */
   setPriceOverrides(list: AppConfig['priceOverrides']) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.priceOverrides = list
     this.writeJson(this.dirs.config, cfg)
   }
 
   setHooks(list: AppConfig['hooks']) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.hooks = list
     this.writeJson(this.dirs.config, cfg)
   }
 
   setMcpServers(list: AppConfig['mcpServers']) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.mcpServers = list
     this.writeJson(this.dirs.config, cfg)
   }
 
   /** 已全局停用的内置 MCP server id（内置组启停；写入方 ipc 已限定为已知内置 id） */
   setMcpBuiltinOff(list: AppConfig['mcpBuiltinOff']) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.mcpBuiltinOff = list
     this.writeJson(this.dirs.config, cfg)
   }
@@ -237,7 +367,7 @@ export class Store {
    * 调用方（ipc.ts）已把值限定在 auto/ask/off，脏值进不来。
    */
   setSandboxFallback(policy: NonNullable<AppConfig['sandboxFallback']>) {
-    const cfg = this.getConfig()
+    const cfg = this.readRawCfg()
     cfg.sandboxFallback = policy
     this.writeJson(this.dirs.config, cfg)
     return cfg.sandboxFallback
@@ -246,6 +376,8 @@ export class Store {
   /** 导出配置：剥离一切敏感信息（API Key 只在凭据存储，本方法额外确保不含 keyId 明文密钥） */
   exportConfig(): string {
     const cfg = JSON.parse(JSON.stringify(this.getConfig())) as AppConfig
+    // 导出的是「当前账号档案的合并视图」：剥离 profiles 全量（那是所有人的数据），顶层键即当前档案
+    delete (cfg as unknown as Record<string, unknown>).profiles
     for (const a of cfg.agents) {
       if (a.modelConfig) a.modelConfig.hasKey = false
     }
@@ -275,23 +407,36 @@ export class Store {
           a.status = 'disconnected'
         }
       }
-      this.writeJson(this.dirs.config, merged)
+      // 导入 = 整体替换，但档案隔离不破坏：导入文件的 agents/wd/presets（v4 后在 profiles.local）
+      // 归到**当前账号**的档案；其他账号的既有档案原样保留
+      const raw = this.readRawCfg() as Record<string, unknown>
+      const importedProfile = ((merged as unknown as Record<string, unknown>).profiles as Record<string, Record<string, unknown>> | undefined)?.local
+        ?? { agents: merged.agents ?? [], workflowDefaults: merged.workflowDefaults, presets: merged.presets }
+      const profiles = (raw.profiles && typeof raw.profiles === 'object' ? raw.profiles : {}) as Record<string, Record<string, unknown>>
+      profiles[auth.activeUid()] = importedProfile
+      raw.profiles = profiles
+      delete (merged as unknown as Record<string, unknown>).profiles
+      this.writeJson(this.dirs.config, { ...merged, profiles: raw.profiles })
       return { ok: true, message: '导入成功；API Key 需重新填写并测试连接' }
     } catch (e) {
       return { ok: false, message: `导入失败：${(e as Error).message}` }
     }
   }
 
-  // ---------- 会话（v2 多会话：每 Agent 一个文件，内容为会话数组；旧单会话格式加载时自动迁移） ----------
-  saveSessions(agentId: string, sessions: AgentSession[], activeId?: string) {
+  // ---------- 会话（v3 按用户作用域：sessions/<uid>/<agentId>.json；旧平铺文件由机主/主账号收养） ----------
+  // uid 作用域：'local'=无账号时代的机主数据；账号 id=各自独立。多用户各自的会话互不可见。
+  saveSessions(uid: string, agentId: string, sessions: AgentSession[], activeId?: string) {
     // ID 不合法直接 no-op：宁可不落这次会话，也不在任意路径建文件
-    if (!safeFileId(agentId)) return
-    this.writeJson(join(this.dirs.sessions, `${agentId}.json`), { v: 2, sessions, activeId })
+    if (!safeFileId(agentId) || !safeFileId(uid)) return
+    this.writeJson(join(this.dirs.sessions, uid, `${agentId}.json`), { v: 2, sessions, activeId })
   }
 
-  loadSessions(agentId: string): { sessions: AgentSession[]; activeId?: string } | null {
-    if (!safeFileId(agentId)) return null
-    const raw = this.readJson<Record<string, unknown> | null>(join(this.dirs.sessions, `${agentId}.json`), null)
+  loadSessions(uid: string, agentId: string): { sessions: AgentSession[]; activeId?: string } | null {
+    if (!safeFileId(agentId) || !safeFileId(uid)) return null
+    const scoped = this.readJson<Record<string, unknown> | null>(join(this.dirs.sessions, uid, `${agentId}.json`), null)
+    // 旧平铺文件只收养给机主作用域（'local'）与主账号——其他用户绝不能看到机主的历史
+    const adoptLegacy = uid === 'local' || uid === auth.primaryAccountId()
+    const raw = scoped ?? (adoptLegacy ? this.readJson<Record<string, unknown> | null>(join(this.dirs.sessions, `${agentId}.json`), null) : null)
     if (!raw) return null
     if (Array.isArray(raw.sessions)) {
       const sessions = (raw.sessions as AgentSession[]).map((s) => ({
@@ -320,36 +465,57 @@ export class Store {
     // ID 不合法 no-op：清空/写回都不该落到 userData 之外的路径
     if (!safeFileId(agentId)) return
     if (deleteHistory) {
-      const p = join(this.dirs.sessions, `${agentId}.json`)
-      if (existsSync(p)) writeFileSync(p, JSON.stringify({ v: 2, sessions: [], activeId: undefined }))
+      // 所有用户作用域 + 旧平铺文件一起清（删除 Agent 是全局动作，不能留下别的用户的幽灵历史）
+      const legacy = join(this.dirs.sessions, `${agentId}.json`)
+      if (existsSync(legacy)) writeFileSync(legacy, JSON.stringify({ v: 2, sessions: [], activeId: undefined }))
+      try {
+        for (const d of readdirSync(this.dirs.sessions, { withFileTypes: true })) {
+          if (!d.isDirectory()) continue
+          const p = join(this.dirs.sessions, d.name, `${agentId}.json`)
+          if (existsSync(p)) writeFileSync(p, JSON.stringify({ v: 2, sessions: [], activeId: undefined }))
+        }
+      } catch { /* 目录不存在=本来就没有 */ }
     }
   }
 
-  // ---------- 工作流任务记录 ----------
-  saveRun(run: WorkflowRun) {
+  // ---------- 工作流任务记录（按账号归属：run.uid；无 uid 的旧记录归机主 'local'） ----------
+  saveRun(run: WorkflowRun, uid?: string) {
     // run.id 来自渲染层，同 saveSessions 的闸门口径
     if (!safeFileId(run.id)) return
-    this.writeJson(join(this.dirs.runs, `${run.id}.json`), run)
+    const stamped = { ...run, uid: uid ?? run.uid ?? auth.activeUid() }
+    this.writeJson(join(this.dirs.runs, `${stamped.id}.json`), stamped)
   }
 
-  listRuns(): WorkflowRun[] {
+  listRuns(uid?: string): WorkflowRun[] {
+    const want = uid ?? auth.activeUid()
+    const primary = auth.primaryAccountId()
+    const out: WorkflowRun[] = []
     try {
-      const fs = require('node:fs') as typeof import('node:fs')
-      const files = fs.readdirSync(this.dirs.runs) as string[]
-      return files
-        .filter((f) => f.endsWith('.json'))
-        .map((f) => this.readJson<WorkflowRun | null>(join(this.dirs.runs, f), null))
-        .filter((r): r is WorkflowRun => !!r)
-        .sort((a, b) => b.startedAt - a.startedAt)
-    } catch {
-      return []
-    }
+      for (const f of readdirSync(this.dirs.runs)) {
+        if (!f.endsWith('.json')) continue
+        try {
+          const r = JSON.parse(readFileSync(join(this.dirs.runs, f), 'utf-8')) as WorkflowRun
+          const ru = (r as { uid?: string }).uid ?? 'local'
+          // 主账号能看到机主遗留任务；其他账号只看自己的
+          if (ru === want || (want === primary && ru === 'local')) out.push(r)
+        } catch { /* 单文件坏不影响整体 */ }
+      }
+    } catch { /* 目录不存在 */ }
+    return out.sort((a, b) => b.startedAt - a.startedAt)
   }
 
-  removeRun(id: string) {
+  removeRun(id: string, uid?: string) {
+    // 越权防护：只能删自己作用域内的任务
     if (!safeFileId(id)) return
     const p = join(this.dirs.runs, `${id}.json`)
-    if (existsSync(p)) unlinkSync(p)
+    try {
+      const r = JSON.parse(readFileSync(p, 'utf-8')) as { uid?: string }
+      const ru = r.uid ?? 'local'
+      const want = uid ?? auth.activeUid()
+      const primary = auth.primaryAccountId()
+      if (!(ru === want || (want === primary && ru === 'local'))) return
+      unlinkSync(p)
+    } catch { /* 文件不存在/损坏 → 视为已删 */ }
   }
 
   // ---------- 长期记忆 ----------
