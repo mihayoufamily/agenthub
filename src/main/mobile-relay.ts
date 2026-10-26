@@ -14,7 +14,7 @@ import { ipcMain } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { Store } from './store'
 
-const DEFAULT_RELAY_URL = 'wss://gw.zdymodel.de5.net'
+const DEFAULT_RELAY_URL = 'wss://relay.zdymodel.de5.net'
 const RECONNECT_MAX_MS = 30000
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 const MAX_PAYLOAD = 512 * 1024
