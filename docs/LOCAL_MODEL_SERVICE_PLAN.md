@@ -1,6 +1,6 @@
 # 方案：本地三模型内置到 AgentHub 对外提供服务
 
-> 状态：方案已确认架构，待实施。本文档是跨会话的工作交接文档——新窗口从这里继续。
+> 状态：已实施并上线（2026-10-25）。公网入口 https://zdymodel.de5.net/v1 实测全通（健康/401/带 key/对话/生图/图片取回）。
 > 日期：2026-10-25。提出人：用户（marypoem）。
 
 ## 需求原话与解读
@@ -66,14 +66,24 @@ AgentHub 调用走**现有的"自定义模型（OpenAI 兼容）"通道，模型
 
 ## AgentHub 端实施清单（新窗口从这里开工）
 
-1. [ ] 向用户确认：三个模型的服务化方式（Ollama/llama.cpp/LM Studio/vLLM？）、端口、是否已有公网入口与网关；
-2. [ ] 注册表仓库 `agenthub-models`（gh 已登录 marypoem；git 推送需走代理 `git -c http.proxy=http://127.0.0.1:12450`）：`index.json`（endpoint、models[]{id,name,desc,contextWindow}、updatedNote）+ README；
-3. [ ] shared 解析器：注册表 index 校验（照 agenthub-skills 的 `parseRegistryIndex` 模式）；
-4. [ ] 主进程通道 `officialModels:list`（net.fetch + ETag 缓存，照 updater/market 先例）；
-5. [ ] 添加 Agent 流程的"官方模型"入口：一键生成三条预置模型 Agent（端点预置、用户只填 key），连接测试走既有 `model:test`；
-6. [ ] 401/403 的错误文案映射（humanizeError 增加官方服务条目）；
-7. [ ] 断言：注册表解析行为 + 官方入口绊线（fixes-check [OM] 段）；
-8. [ ] 全量验证（verify 831+ / ui-shot 134）→ pack → 部署 D:\AgentHub → 提交推送。
+1. [x] 现状确认：llama.cpp + 自写 gateway.js 三路网关（9B/27B/FLUX，OpenAI 兼容 127.0.0.1:8080）——服务化早已就绪；
+2. [x] 注册表仓库：https://github.com/mihayoufamily/agenthub-models（index.json：endpoint=https://zdymodel.de5.net/v1 + auto/9B/27B + README）；
+3. [x] 解析器：src/main/official-models.ts 的 parseOfficialModelsIndex（照 parseRegistryIndex 模式）；
+4. [x] 主进程通道 officialModels:list（net.fetch + ETag 缓存 official-models-cache.json）；
+5. [x] 添加 Agent 流程「官方模型」页签：注册表清单一键添加，端点预置、只填 key；
+6. [x] 401 文案：humanizeError「已被吊销」规则（先于通用 401）+ testConnection 透出服务端错误正文；
+7. [x] 断言：fixes-check [OM] 段 15 条（fixes 下限 671→686 实测钉死）；
+8. [x] 全量验证：逻辑 846 PASS / UI 真机 134 PASS → worktree 打包 → 部署 D:\AgentHub（哈希一致）→ commit 23b7ac0 已推送。
+
+## 实施记录（2026-10-25）
+
+- **架构修订**：不架 new-api——直接在自写 gateway.js 上加鉴权（`D:\local-llm\keys.json`：1 本机 + 5 朋友，吊销改文件即时生效）、用量日志（`logs/usage.log`）、图片链接公网化（跟随 Host/X-Forwarded-*）、`/v1/models` 补 `auto`；
+- **域名**：`zdymodel.de5.net`（DNSHE 免费二级域名，在 PSL 里 → 可托管进个人 Cloudflare 免费账号；NS 委派 meera/mustafa.ns.cloudflare.com 生效）。abrdns.com（ClouDNS）也在 PSL 但 NS 委派无证据，弃用；
+- **代码**（commit 23b7ac0）：`src/main/official-models.ts` + ipc `officialModels:list` + preload 桥 + AgentModals「官方模型」页签 + humanizeError 吊销规则 + testConnection 错误正文。与并行窗口的 AgentEditModal 波次**分离提交**（混合文件 preload/ipc：备份→checkout→重放我方 hunk→提交→还原）；
+- **验证部署**：逻辑 846 PASS（fixes 686/deliver 59/engine 28/mcp 31/market 42）+ UI 真机 134 PASS；`D:\dsh\agenthub-deploy` worktree（挂提交、node_modules junction）打包 → D:\AgentHub，exe/主进程/bundle 哈希一致；
+- **隧道**：cloudflared 2026.10.3（D:\local-llm\cloudflared.exe）；隧道 `agenthub-models`（c7a73510-…），config.yml 在 `~/.cloudflared/`，CNAME zdymodel.de5.net → 隧道；服务化装不了（无管理员权限）→ **随 start-gateway.cmd 同起同停**（stop-all.ps1 一并清 cloudflared）；
+- **E2E 实测（全过）**：公网 /health ✓、无 key 401（中文文案）✓、朋友 key 取模型列表（含 auto）✓、真实对话（9B "1+1 等于 2"带 usage）✓、生图返回公网图片链接 ✓、图片 URL 公网取回（732KB）✓；
+- **朋友接入**：装 AgentHub → 添加 Agent → 官方模型 → 粘 keys.json 朋友 key → 添加即用。本机同理（owner=本机 的 key）。
 
 ## 相关记忆/上下文
 

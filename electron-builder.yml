@@ -20,5 +20,8 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   artifactName: AgentHub-Setup-${version}.${ext}
+  # NSIS 3.04 的 MUI2 宏在 uninstaller-only 编译路径下会吐 warning 6001（MUI_TEMP1 未引用），
+  # 本机 makensis 的 -WX（警告即错误）把它升级成失败 → 安装包打不出来。警告不是缺陷，关掉该升级。
+  warningsAsErrors: false
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
