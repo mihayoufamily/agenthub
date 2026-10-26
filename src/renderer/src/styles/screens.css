@@ -28,8 +28,8 @@
   width: clamp(72px, 16vh, 128px);
   height: clamp(72px, 16vh, 128px);
   opacity: 0;
-  transform: scale(0.94);
-  transition: opacity 500ms var(--ease), transform 500ms var(--ease);
+  transform: scale(0.8);
+  transition: opacity 400ms var(--ease), transform 600ms var(--ease-spring);
 }
 .splash:is([data-stage='logo'], [data-stage='word'], [data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-logo {
   opacity: 1;
@@ -63,12 +63,12 @@
   display: flex;
   justify-content: center;
   opacity: 0;
-  transform: translateY(10px);
-  transition: opacity 500ms var(--ease), transform 500ms var(--ease);
+  transform: translateY(16px) scale(0.95);
+  transition: opacity 400ms var(--ease), transform 500ms var(--ease-spring);
   pointer-events: none;
 }
 .splash[data-stage='ready'] .splash-start-wrap,
-.splash[data-stage='stable'] .splash-start-wrap { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.splash[data-stage='stable'] .splash-start-wrap { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
 
 /* 引导文案：Logo 与"开始"按钮之间（文档二.1）；cream 阶段奶白背景形成后上移淡入 */
 .splash-guide {
@@ -90,7 +90,7 @@
 .splash[data-stage='ready'] .splash-guide,
 .splash[data-stage='stable'] .splash-guide { opacity: 1; transform: translateY(0); }
 
-/* 简约背景动态（文档二.2）：奶白背景上两个暖色光斑缓慢漂移；单一主效果、位于内容后方、不拦截点击；
+/* 简约背景动态：两个暖色光斑缓慢漂移 + 几个小光点划过；
    reduced motion / 动画关闭时由全局规则压到 1ms 等效静止；退出开始页后随组件卸载停止 */
 .splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::before,
 .splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::after {
@@ -104,22 +104,217 @@
 .splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::before {
   width: 46vmin; height: 46vmin;
   left: -10vmin; top: 8vh;
-  background: radial-gradient(circle, rgba(217, 119, 87, 0.10), transparent 68%);
+  background: radial-gradient(circle, rgba(217, 119, 87, 0.18), transparent 68%);
   animation: splash-drift-a 26s ease-in-out infinite alternate;
 }
 .splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable'])::after {
   width: 40vmin; height: 40vmin;
   right: -8vmin; bottom: 6vh;
-  background: radial-gradient(circle, rgba(191, 155, 61, 0.08), transparent 68%);
+  background: radial-gradient(circle, rgba(191, 155, 61, 0.15), transparent 68%);
   animation: splash-drift-b 33s ease-in-out infinite alternate;
 }
 @keyframes splash-drift-a {
-  from { transform: translate(0, 0) scale(1); }
-  to { transform: translate(9vmin, 5vh) scale(1.12); }
+  from { transform: translate(0, 0) scale(1); opacity: 0.7; }
+  to { transform: translate(9vmin, 5vh) scale(1.18); opacity: 1; }
 }
 @keyframes splash-drift-b {
-  from { transform: translate(0, 0) scale(1.06); }
-  to { transform: translate(-8vmin, -6vh) scale(0.94); }
+  from { transform: translate(0, 0) scale(1.1); opacity: 1; }
+  to { transform: translate(-8vmin, -6vh) scale(0.9); opacity: 0.6; }
+}
+
+/* 划过的小光点：一个伪元素用 box-shadow 复制出多个光点 */
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-inner::before,
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-inner::after {
+  content: '';
+  position: fixed;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #e07040;
+  box-shadow:
+    12vw 8vh 0 1px #e07040,
+    25vw -12vh 0 0.5px #d46535,
+    40vw 15vh 0 1.5px #e07040,
+    55vw -5vh 0 0.5px #c95a2a,
+    70vw 10vh 0 1px #e07040,
+    85vw -8vh 0 0.5px #d46535,
+    0 0 16px 6px rgba(224, 112, 64, 0.6);
+  pointer-events: none;
+  z-index: 0;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-inner::before {
+  top: 25vh;
+  left: -10px;
+  animation: splash-spark-a 5s linear infinite;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-inner::after {
+  top: 60vh;
+  left: -10px;
+  background: #c9a227;
+  box-shadow:
+    10vw -5vh 0 1px #c9a227,
+    22vw 12vh 0 0.5px #b89220,
+    38vw -8vh 0 1.5px #c9a227,
+    52vw 6vh 0 0.5px #a8841c,
+    68vw -10vh 0 1px #c9a227,
+    82vw 4vh 0 0.5px #b89220,
+    0 0 16px 6px rgba(201, 162, 39, 0.55);
+  animation: splash-spark-b 7s linear infinite;
+  animation-delay: 2.5s;
+}
+@keyframes splash-spark-a {
+  0% { transform: translateX(0) translateY(0); opacity: 0; }
+  8% { opacity: 1; }
+  92% { opacity: 1; }
+  100% { transform: translateX(110vw) translateY(-15vh); opacity: 0; }
+}
+@keyframes splash-spark-b {
+  0% { transform: translateX(0) translateY(0); opacity: 0; }
+  12% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { transform: translateX(110vw) translateY(10vh); opacity: 0; }
+}
+
+/* 流星：一个伪元素复制出多颗流星 */
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word::before,
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word::after {
+  content: '';
+  position: fixed;
+  width: 3px; height: 3px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    15vw 5vh 0 0.5px #fff,
+    30vw -8vh 0 1px #fff,
+    45vw 3vh 0 0.5px #fff,
+    60vw -5vh 0 1px #fff,
+    75vw 8vh 0 0.5px #fff,
+    0 0 8px 2px rgba(255,255,255,0.9);
+  pointer-events: none;
+  z-index: 0;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word::before {
+  top: 8vh; right: 5vw;
+  animation: splash-meteor-a 4s ease-in-out infinite;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-word::after {
+  top: 3vh; right: 25vw;
+  width: 4px; height: 4px;
+  box-shadow:
+    12vw 6vh 0 1px #fff,
+    28vw -6vh 0 0.5px #fff,
+    42vw 4vh 0 1.5px #fff,
+    58vw -4vh 0 0.5px #fff,
+    72vw 7vh 0 1px #fff,
+    0 0 10px 3px rgba(255,255,255,0.9);
+  animation: splash-meteor-b 6s ease-in-out infinite;
+  animation-delay: 2s;
+}
+@keyframes splash-meteor-a {
+  0% { transform: translate(0, 0) rotate(-35deg); opacity: 0; }
+  5% { opacity: 1; }
+  20% { transform: translate(-40vw, 25vh) rotate(-35deg); opacity: 0; }
+  100% { transform: translate(-40vw, 25vh) rotate(-35deg); opacity: 0; }
+}
+@keyframes splash-meteor-b {
+  0% { transform: translate(0, 0) rotate(-30deg); opacity: 0; }
+  8% { opacity: 1; }
+  25% { transform: translate(-35vw, 20vh) rotate(-30deg); opacity: 0; }
+  100% { transform: translate(-35vw, 20vh) rotate(-30deg); opacity: 0; }
+}
+
+/* 上升的气泡：一个伪元素复制出多个气泡 */
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-guide::before,
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-guide::after {
+  content: '';
+  position: fixed;
+  bottom: -30px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(circle, rgba(224, 112, 64, 0.4), transparent 70%);
+  box-shadow:
+    8vw 5vh 0 10px rgba(224, 112, 64, 0.3),
+    20vw -3vh 0 6px rgba(224, 112, 64, 0.25),
+    35vw 8vh 0 14px rgba(224, 112, 64, 0.35),
+    50vw -6vh 0 8px rgba(224, 112, 64, 0.2),
+    65vw 4vh 0 11px rgba(224, 112, 64, 0.3),
+    80vw -4vh 0 7px rgba(224, 112, 64, 0.28);
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-guide::before {
+  left: 12vw;
+  width: 60px; height: 60px;
+  animation: splash-bubble-a 12s ease-in infinite;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-guide::after {
+  left: 72vw;
+  width: 45px; height: 45px;
+  background: radial-gradient(circle, rgba(201, 162, 39, 0.35), transparent 70%);
+  box-shadow:
+    -10vw 6vh 0 8px rgba(201, 162, 39, 0.3),
+    -25vw -2vh 0 5px rgba(201, 162, 39, 0.25),
+    -40vw 5vh 0 12px rgba(201, 162, 39, 0.35),
+    -55vw -5vh 0 7px rgba(201, 162, 39, 0.22),
+    -70vw 3vh 0 9px rgba(201, 162, 39, 0.28);
+  animation: splash-bubble-b 16s ease-in infinite;
+  animation-delay: 4s;
+}
+@keyframes splash-bubble-a {
+  0% { transform: translateY(0) translateX(0) scale(0.8); opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 0.8; }
+  100% { transform: translateY(-90vh) translateX(3vw) scale(1.2); opacity: 0; }
+}
+@keyframes splash-bubble-b {
+  0% { transform: translateY(0) translateX(0) scale(0.9); opacity: 0; }
+  20% { opacity: 0.9; }
+  80% { opacity: 0.7; }
+  100% { transform: translateY(-80vh) translateX(-4vw) scale(1.1); opacity: 0; }
+}
+
+/* 闪烁的小星星：一个伪元素复制出多颗星星 */
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-start-wrap::before,
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-start-wrap::after {
+  content: '';
+  position: fixed;
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    10vw 8vh 0 1px #fff,
+    22vw -5vh 0 0.5px #fff,
+    38vw 12vh 0 1.5px #fff,
+    52vw -8vh 0 0.5px #fff,
+    68vw 6vh 0 1px #fff,
+    82vw -4vh 0 0.5px #fff,
+    0 0 10px 3px rgba(255,255,255,0.8);
+  pointer-events: none;
+  z-index: 0;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-start-wrap::before {
+  top: 12vh; left: 22vw;
+  animation: splash-twinkle-a 2.5s ease-in-out infinite;
+}
+.splash:is([data-stage='cream'], [data-stage='ready'], [data-stage='stable']) .splash-start-wrap::after {
+  top: 32vh; right: 18vw;
+  width: 4px; height: 4px;
+  box-shadow:
+    -8vw 6vh 0 1px #fff,
+    -20vw -4vh 0 0.5px #fff,
+    -35vw 10vh 0 1px #fff,
+    -50vw -6vh 0 0.5px #fff,
+    -65vw 5vh 0 1.5px #fff,
+    -80vw -3vh 0 0.5px #fff,
+    0 0 10px 3px rgba(255,255,255,0.8);
+  animation: splash-twinkle-b 3.5s ease-in-out infinite;
+  animation-delay: 1.2s;
+}
+@keyframes splash-twinkle-a {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.3); }
+}
+@keyframes splash-twinkle-b {
+  0%, 100% { opacity: 0.2; transform: scale(0.7); }
+  50% { opacity: 0.9; transform: scale(1.2); }
 }
 /* 光斑不盖住内容：内容层级抬到光斑之上（position 各自定义于上方规则） */
 .splash-inner, .splash-guide, .splash-start-wrap, .splash-skip { z-index: 1; }
@@ -129,18 +324,17 @@
   height: 46px;
   border-radius: var(--r-md);
   border: none;
-  background: var(--brand-yellow);
+  background: var(--btn-primary-grad, var(--brand-yellow));
   color: #fff;
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.25em;
-  /* 半字距补偿 letter-spacing 尾随空隙，保证文字视觉居中 */
   text-indent: 0.125em;
-  box-shadow: var(--shadow-1);
-  transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255,255,255,0.18);
+  transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), transform 100ms cubic-bezier(0.4,0,0.2,1);
 }
-.btn-start:hover { background: var(--brand-yellow-hover); box-shadow: var(--shadow-2); }
-.btn-start:active { transform: scale(0.98); background: var(--brand-yellow-active); }
+.btn-start:hover { background: var(--btn-primary-grad-hover, var(--brand-yellow-hover)); box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255,255,255,0.22); transform: translateY(-1px); }
+.btn-start:active { transform: scale(0.96) translateY(2px); background: var(--btn-primary-grad-active, var(--brand-yellow-active)); box-shadow: inset 0 2px 6px rgba(0,0,0,0.25); }
 .btn-start:focus-visible { outline: 2px solid var(--brand-yellow-ring); outline-offset: 3px; }
 
 /* 跳过提示 */
@@ -164,7 +358,11 @@
 .brand-home {
   position: absolute;
   inset: 0;
-  background: var(--brand-cream);
+  background:
+    radial-gradient(circle at 20% 20%, rgba(244,114,182,0.08), transparent 45%),
+    radial-gradient(circle at 80% 30%, rgba(251,191,36,0.10), transparent 45%),
+    radial-gradient(circle at 60% 85%, rgba(96,165,250,0.06), transparent 50%),
+    var(--brand-cream);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -225,11 +423,11 @@
   font-size: 12.5px;
   font-weight: 600;
   color: rgba(11, 11, 12, 0.62);
-  transition: background var(--t-fast), color var(--t-fast);
+  transition: background var(--t-fast), color var(--t-fast), transform 100ms cubic-bezier(0.4,0,0.2,1);
 }
 .mode-pill button:hover { color: var(--brand-ink); }
+.mode-pill button:active { transform: scale(0.94); }
 .mode-pill button:focus-visible { outline: 2px solid var(--brand-ink); outline-offset: -2px; }
-.mode-pill button:active { transform: translateY(0.5px); }
 .mode-pill button.active { background: var(--brand-ink); color: var(--brand-cream); }
 
 /* C1：模式选择下移到输入卡下方——右上角那个位置原先离"要做的决定"最远，

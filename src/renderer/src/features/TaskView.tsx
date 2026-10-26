@@ -420,6 +420,7 @@ function AcceptanceList({ run }: { run: WorkflowRun }) {
 }
 
 function CardRenderer({ card, run, config }: { card: RoleCardType; run: WorkflowRun; config: WorkflowConfig }) {
+  const [expanded, setExpanded] = useState(false)
   // 卡片结论里的远程图片也要看该 Agent 的联网授权（allowWeb）：卡片上只有 agentName，
   // 最近便的取法是按角色从工作流配置拿 agentId 再查 Agent。角色换过人的旧任务以当前
   // 配置为准——这是"最近便"的如实取舍，不假装能追溯历史快照（run 上没拍 agentId 快照）
@@ -438,7 +439,10 @@ function CardRenderer({ card, run, config }: { card: RoleCardType; run: Workflow
   }
   const roleColor = card.role === 'planner' ? 'var(--role-planner)' : card.role === 'executor' ? 'var(--role-executor)' : 'var(--role-reviewer)'
   return (
-    <div className={cls('role-card', 'card-enter', card.status === 'streaming' && 'streaming')}>
+    <div
+      className={cls('role-card', 'card-enter', card.status === 'streaming' && 'streaming', expanded && 'expanded')}
+      onClick={() => { if (card.status !== 'streaming') setExpanded(v => !v) }}
+    >
       <div className="rc-head">
         <span className="rc-name" style={{ color: roleColor }}>
           <Icon name={card.role === 'planner' ? 'reorder' : card.role === 'executor' ? 'send' : 'check'} size={14} />

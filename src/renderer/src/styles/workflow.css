@@ -3,7 +3,11 @@
 .workflow {
   position: absolute;
   inset: 0;
-  background: var(--bg);
+  background:
+    radial-gradient(circle at 15% 15%, rgba(244,114,182,0.08), transparent 45%),
+    radial-gradient(circle at 85% 25%, rgba(251,191,36,0.10), transparent 45%),
+    radial-gradient(circle at 70% 90%, rgba(96,165,250,0.06), transparent 50%),
+    var(--bg);
   display: flex;
   flex-direction: column;
 }
@@ -48,13 +52,18 @@
   padding: 6px 12px;
   border-radius: var(--r-sm);
   border: 1px solid var(--border-strong);
-  background: var(--surface);
+  background: rgba(255,255,255,0.55);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   font-size: 12.5px;
   color: var(--text-2);
-  transition: border-color var(--t-fast), background var(--t-fast);
+  transition: border-color var(--t-fast), background var(--t-fast), transform 100ms cubic-bezier(0.4,0,0.2,1);
   position: relative;
 }
-.cfg-chip:hover { border-color: var(--brand-yellow); background: var(--surface-2); }
+:root[data-theme='dark'] .cfg-chip { background: rgba(28,30,36,0.55); }
+.cfg-chip:hover { border-color: var(--brand-yellow); background: rgba(255,255,255,0.75); }
+:root[data-theme='dark'] .cfg-chip:hover { background: rgba(28,30,36,0.75); }
+.cfg-chip:active { transform: scale(0.96); }
 .cfg-chip .role-tag { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; color: #fff; }
 .cfg-chip .role-tag.planner { background: var(--role-planner); }
 .cfg-chip .role-tag.executor { background: var(--role-executor); }
@@ -148,7 +157,7 @@
   overflow-y: auto;
   position: relative;
 }
-.wf-cards { max-width: 860px; margin: 0 auto; padding: 20px 24px 28px; display: flex; flex-direction: column; gap: 14px; }
+.wf-cards { max-width: 860px; margin: 0 auto; padding: 20px 24px 28px; display: flex; flex-direction: column; gap: 0; }
 
 /* 用户需求条 */
 .wf-user-msg {
@@ -162,27 +171,63 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  margin-bottom: 12px;
 }
 
-/* 角色卡片 */
+/* 角色卡片 —— 堆叠书页：默认折叠只露头，hover 浮起，点击展开抽出 */
 .role-card {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: var(--shadow-1);
+  background: rgba(255,255,255,0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 1px 3px rgba(16,18,22,0.05);
   overflow: hidden;
+  margin-top: -3px;
+  position: relative;
+  z-index: 1;
+  max-height: 44px;
+  cursor: pointer;
+  transition:
+    max-height 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 600ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 500ms ease;
 }
-.role-card.streaming { border-color: rgba(37, 99, 235, 0.35); }
+:root[data-theme='dark'] .role-card { background: rgba(28,30,36,0.8); }
+/* hover 只浮起，不展开 */
+.role-card:hover {
+  transform: translateY(-4px);
+  z-index: 10;
+  box-shadow: 0 12px 28px rgba(16,18,22,0.1);
+}
+/* 点击展开后才完整展开 */
+.role-card.expanded,
+.role-card.streaming {
+  max-height: 2400px;
+  cursor: default;
+}
+.role-card.expanded {
+  transform: translateY(-8px);
+  z-index: 20;
+  box-shadow: 0 28px 60px rgba(16,18,22,0.18), 0 8px 20px rgba(16,18,22,0.08);
+}
+.role-card.streaming { border-color: rgba(37, 99, 235, 0.35); z-index: 5; }
+.role-card.streaming:hover { z-index: 10; }
+/* 第一张卡片不往上叠 */
+.role-card:first-of-type { margin-top: 0; }
+/* 用户消息后面的第一张卡片也不叠 */
+.wf-user-msg + .role-card { margin-top: 0; }
 
 .rc-head {
   display: flex;
   align-items: center;
   gap: 9px;
   padding: 10px 14px;
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.4);
+  border-bottom: 1px solid rgba(120,128,140,0.15);
   flex-wrap: wrap;
 }
+:root[data-theme='dark'] .rc-head { background: rgba(255,255,255,0.04); }
 .rc-head .rc-name { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px; }
 .rc-head .rc-agent { font-size: 12px; color: var(--text-2); }
 .rc-head .rc-round { font-size: 11px; color: var(--text-3); }

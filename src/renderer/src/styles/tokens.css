@@ -55,11 +55,23 @@
   --t-base: 240ms;
   --t-page: 420ms;
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* 回弹（switch / 浮层）：轻微过冲 */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
 
   /* 布局 */
   --sidebar-w: 264px;
   --sidebar-w-collapsed: 56px;
   --font-size: 14px;
+
+  /* 材质（方案B 玻璃分层）：浮层半透 + backdrop-blur */
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-bg-strong: rgba(255, 255, 255, 0.68);
+  --glass-border: rgba(255, 255, 255, 0.6);
+  --glass-blur: blur(24px) saturate(1.6);
+  /* 主按钮渐变（立体按键感） */
+  --btn-primary-grad: linear-gradient(180deg, #d97706 0%, #b45309 100%);
+  --btn-primary-grad-hover: linear-gradient(180deg, #e08a1e 0%, #a84d08 100%);
+  --btn-primary-grad-active: linear-gradient(180deg, #9a4d0a 0%, #7c3a06 100%);
 }
 
 /* 暗色主题 */
@@ -77,9 +89,13 @@
   --danger-bg: #2b1416;
   --info-bg: #12203a;
   --brand-cream: #f7f2e8;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.4);
-  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.45), 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.5), 0 12px 40px rgba(0, 0, 0, 0.6);
+  /* 暗色玻璃：深灰半透 */
+  --glass-bg: rgba(28, 30, 36, 0.72);
+  --glass-bg-strong: rgba(28, 30, 36, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.08);
 }
 
 /* 动画总开关 / 减少动态效果：所有过渡压到 1ms */
