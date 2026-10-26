@@ -24,6 +24,7 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
   const [st, setSt] = useState<Status | null>(null)
   const [tun, setTun] = useState<TunnelStatus | null>(null)
   const [qrMode, setQrMode] = useState<'lan' | 'public'>('lan')
+  const [lanIdx, setLanIdx] = useState(0)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -60,7 +61,9 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
 
   const on = st?.enabled === true
   const running = st?.running === true
-  const lanUrl = st?.urls?.[0] ?? ''
+  // 多网卡（有线+Wi-Fi 同路由器）时某个 IP 可能被路由器跨域隔离：列出全部地址供切换
+  const lanUrls = st?.urls ?? []
+  const lanUrl = lanUrls[Math.min(lanIdx, lanUrls.length - 1)] ?? ''
   const token = st?.token ?? ''
   const publicUrl = tun?.url ? `${tun.url}/?t=${token}` : ''
   const showPublic = qrMode === 'public' && !!publicUrl
@@ -122,6 +125,21 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
               <code>{url}</code>
               <CopyButton getText={() => url} label="复制" />
             </div>
+            {/* 局域网多地址切换：哪个 IP 手机打得开就用哪个（有线/无线跨域隔离时只有个别通） */}
+            {!showPublic && lanUrls.length > 1 && (
+              <div className="mob-qr-switch">
+                {lanUrls.map((u, i) => (
+                  <button
+                    key={u}
+                    type="button"
+                    className={i === Math.min(lanIdx, lanUrls.length - 1) ? 'active' : ''}
+                    onClick={() => setLanIdx(i)}
+                  >
+                    {u.match(/\/\/([^:]+):/)?.[1] ?? `地址 ${i + 1}`}
+                  </button>
+                ))}
+              </div>
+            )}
             {tun?.running && publicUrl && (
               <div className="mob-qr-switch">
                 <button type="button" className={!showPublic ? 'active' : ''} onClick={() => setQrMode('lan')}>局域网</button>
