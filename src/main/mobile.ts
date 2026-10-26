@@ -15,6 +15,7 @@ import type { Store } from './store'
 import * as ledger from './ledger'
 import { MOBILE_PAGE_HTML } from './mobile-page'
 import { initMobileTunnel, syncTunnelForService } from './mobile-tunnel'
+import { initMobileRelay, syncRelayForService } from './mobile-relay'
 import type { ChatMessage, WorkflowRun } from '../shared/types'
 
 const DEFAULT_PORT = 8748
@@ -289,6 +290,8 @@ export function initMobile(opts: { getStore: () => Store; getWin: () => BrowserW
     if (on) await startServer(); else stopServer()
     // 公网隧道跟随服务：服务开→按 tunnel 意图拉起；服务关→隧道必停
     syncTunnelForService(on)
+    // 中继网关同一口径（出站 WS，下载者零配置公网）
+    syncRelayForService(on)
     return { ok: true, ...status() }
   })
 
@@ -296,4 +299,6 @@ export function initMobile(opts: { getStore: () => Store; getWin: () => BrowserW
   if (readPref().enabled) startServer()
   // 公网隧道的 IPC + 恢复（自己判断 enabled && tunnel，服务端口的 listen 异步落定前它已能连边缘）
   initMobileTunnel({ getStore: opts.getStore, getWin: opts.getWin })
+  // 中继网关的 IPC + 恢复（自己判断 enabled && relay）
+  initMobileRelay({ getStore: opts.getStore, getWin: opts.getWin })
 }

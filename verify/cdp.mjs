@@ -76,6 +76,8 @@ export function launchEnv() {
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_NO_ATTACH_CONSOLE
+  // NODE_OPTIONS 是宿主会话注入的 shim require（打包应用不支持且与主进程启动竞态），一律剥离
+  delete env.NODE_OPTIONS
   return env
 }
 
@@ -83,7 +85,7 @@ export function waitHttp(port, timeoutMs) {
   const t0 = Date.now()
   return new Promise((res, rej) => {
     const tick = () => {
-      http.get({ hostname: '127.0.0.1', port, path: '/json/list' }, (r) => {
+      const rq = http.get({ hostname: '127.0.0.1', port, path: '/json/list' }, (r) => {
         let body = ''
         r.on('data', (d) => (body += d))
         r.on('end', () => {

@@ -136,6 +136,16 @@ const api = {
       const handler = (_e: unknown, data: { enabled: boolean; running: boolean; connecting: boolean; url?: string; error?: string; binaryFound: boolean }) => cb(data)
       ipcRenderer.on('mobile:tunnel-status', handler)
       return () => { ipcRenderer.removeListener('mobile:tunnel-status', handler) }
+    },
+    /** 中继网关（mobile-relay.ts）：出站 WS 到中继，零配置固定公网入口 */
+    relayStatus: () =>
+      ipcRenderer.invoke('mobile:relayStatus') as Promise<{ enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }>,
+    setRelayEnabled: (on: boolean) =>
+      ipcRenderer.invoke('mobile:setRelayEnabled', on) as Promise<{ ok: boolean } & { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }>,
+    onRelayStatus: (cb: (s: { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }) => void) => {
+      const handler = (_e: unknown, data: { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }) => cb(data)
+      ipcRenderer.on('mobile:relay-status', handler)
+      return () => { ipcRenderer.removeListener('mobile:relay-status', handler) }
     }
   },
   /** 工作流剧本（目标模板 + 预设 + 计划档的一键载入方案）；rejected 口径同 schedule.set */

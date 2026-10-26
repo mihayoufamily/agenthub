@@ -526,6 +526,13 @@ export interface Prefs {
      * 只存"上次开关状态"——实际拉起跟随 enabled（服务关则隧道必停）；trycloudflare 地址每次启动都变。
      */
     tunnel?: boolean
+    /**
+     * 中继网关意图（2026-10-26 追加）：出站 WebSocket 连中继（默认 wss://gw.zdymodel.de5.net），
+     * 下载者零配置公网访问——免端口/免防火墙/免域名。跟随 enabled；固定地址不随重启变化。
+     */
+    relay?: boolean
+    /** 自架网关者的网关地址（wss://），缺省连官方网关 */
+    relayUrl?: string
   }
 }
 

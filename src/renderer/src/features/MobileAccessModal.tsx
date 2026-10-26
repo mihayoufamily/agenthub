@@ -11,6 +11,7 @@ import { bridge } from '../lib/ipc'
 
 type Status = { enabled: boolean; running: boolean; port: number; hasToken: boolean; token?: string; urls: string[] }
 type TunnelStatus = { enabled: boolean; running: boolean; connecting: boolean; url?: string; error?: string; binaryFound: boolean }
+type RelayStatus = { enabled: boolean; connected: boolean; publicUrl?: string; relayUrl: string; error?: string }
 
 /** 二维码：qrcode-generator（零依赖、自带类型），scalable SVG 由手机相机/微信扫码识别 */
 function qrSvg(url: string): string {
@@ -23,6 +24,7 @@ function qrSvg(url: string): string {
 export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [st, setSt] = useState<Status | null>(null)
   const [tun, setTun] = useState<TunnelStatus | null>(null)
+  const [relay, setRelay] = useState<RelayStatus | null>(null)
   const [qrMode, setQrMode] = useState<'lan' | 'public'>('lan')
   const [lanIdx, setLanIdx] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -31,8 +33,10 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
     if (!open) return
     bridge.mobile.status().then(setSt).catch(() => setSt(null))
     bridge.mobile.tunnelStatus().then(setTun).catch(() => setTun(null))
-    const off = bridge.mobile.onTunnelStatus(setTun)
-    return off
+    bridge.mobile.relayStatus().then(setRelay).catch(() => setRelay(null))
+    const offT = bridge.mobile.onTunnelStatus(setTun)
+    const offR = bridge.mobile.onRelayStatus(setRelay)
+    return () => { offT(); offR() }
   }, [open])
 
   const toggle = async (on: boolean) => {
@@ -40,9 +44,10 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
     try {
       const r = await bridge.mobile.setEnabled(on)
       setSt({ enabled: on, running: r.running, port: r.port, hasToken: !!r.token, token: r.token, urls: r.urls })
-      // 服务关了公网入口跟着失效；开回来隧道按记忆的意图重连（推送会更新 tun）
+      // 服务关了公网入口跟着失效；开回来隧道/中继按记忆的意图重连（推送会更新状态）
       if (!on) setQrMode('lan')
       bridge.mobile.tunnelStatus().then(setTun).catch(() => {})
+      bridge.mobile.relayStatus().then(setRelay).catch(() => {})
     } finally {
       setBusy(false)
     }
@@ -59,13 +64,25 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
     }
   }
 
+  const toggleRelay = async (on: boolean) => {
+    try {
+      const r = await bridge.mobile.setRelayEnabled(on)
+      setRelay({ enabled: r.enabled, connected: r.connected, publicUrl: r.publicUrl, relayUrl: r.relayUrl, error: r.error })
+      if (on && r.publicUrl) setQrMode('public')
+    } catch {
+      bridge.mobile.relayStatus().then(setRelay).catch(() => {})
+    }
+  }
+
   const on = st?.enabled === true
   const running = st?.running === true
   // 多网卡（有线+Wi-Fi 同路由器）时某个 IP 可能被路由器跨域隔离：列出全部地址供切换
   const lanUrls = st?.urls ?? []
   const lanUrl = lanUrls[Math.min(lanIdx, lanUrls.length - 1)] ?? ''
   const token = st?.token ?? ''
-  const publicUrl = tun?.url ? `${tun.url}/?t=${token}` : ''
+  // 公网地址：中继（固定，推荐）优先，quick tunnel（临时）备选
+  const publicUrl = relay?.connected && relay.publicUrl ? relay.publicUrl : tun?.url ? `${tun.url}/?t=${token}` : ''
+  const publicSource: 'relay' | 'tunnel' | null = relay?.connected && relay.publicUrl ? 'relay' : (tun?.url ? 'tunnel' : null)
   const showPublic = qrMode === 'public' && !!publicUrl
   const url = showPublic ? publicUrl : lanUrl
 
@@ -86,33 +103,47 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
           </div>
         )}
 
-        {/* 公网接入：服务本体开着才显示；二进制未捆绑时如实说明 */}
-        {on && running && tun && (
+        {/* 公网接入：两条路——中继（固定地址，推荐）与 quick tunnel（临时，备选） */}
+        {on && running && (
           <div className="mob-tunnel">
             <div className="mob-row">
               <div>
                 <div className="mob-title">
-                  公网接入 <Badge tone="warn">试运行</Badge>
+                  公网（固定入口） <Badge tone="ok">推荐</Badge>
                 </div>
-                <div className="mob-sub">不在同一 Wi-Fi 也能用：经 Cloudflare 临时隧道转发，地址每次开启都会变化</div>
+                <div className="mob-sub">经官方中继网关转发，地址固定不变，手机任意网络可用；电脑重启后不用重新扫码</div>
+              </div>
+              <Switch on={relay?.enabled === true} onChange={(v) => void toggleRelay(v)} label="公网中继" />
+            </div>
+            {relay?.enabled === true && relay.connected && relay.publicUrl && (
+              <div className="mob-status"><Badge tone="ok">已连接中继</Badge></div>
+            )}
+            {relay?.enabled === true && !relay.connected && (
+              <div className="mob-sub">正在连接中继网关…（断线会自动重连）{relay.error ? ` · ${relay.error}` : ''}</div>
+            )}
+
+            <div className="mob-row" style={{ marginTop: 10 }}>
+              <div>
+                <div className="mob-title">
+                  公网（临时隧道） <Badge tone="warn">备选</Badge>
+                </div>
+                <div className="mob-sub">P2P 临时地址，每次开启都变化；国内网络常被 DNS 污染，打不开就用上面的固定入口</div>
               </div>
               <Switch
-                on={tun.enabled}
+                on={tun?.enabled === true}
                 onChange={(v) => void toggleTunnel(v)}
-                disabled={!tun.binaryFound && !tun.enabled}
-                label="公网接入"
+                disabled={tun ? !tun.binaryFound && !tun.enabled : false}
+                label="临时隧道"
               />
             </div>
-            {!tun.binaryFound && (
-              <div className="mob-sub">未找到 cloudflared 组件（resources/bin/cloudflared.exe），此安装包未捆绑公网接入，局域网功能不受影响</div>
+            {tun?.enabled === true && !tun.binaryFound && (
+              <div className="mob-sub">未找到 cloudflared 组件（resources/bin/cloudflared.exe），此安装包未捆绑，固定入口不受影响</div>
             )}
-            {tun.binaryFound && tun.enabled && tun.connecting && <div className="mob-sub">正在连接 Cloudflare 边缘…（最长约 15 秒）</div>}
-            {tun.binaryFound && tun.enabled && tun.running && publicUrl && (
-              <div className="mob-status">
-                <Badge tone="ok">公网已就绪</Badge>
-              </div>
+            {tun?.binaryFound && tun.enabled && tun.connecting && <div className="mob-sub">正在连接 Cloudflare 边缘…（最长约 15 秒）</div>}
+            {tun?.binaryFound && tun.enabled && tun.running && (
+              <div className="mob-status"><Badge tone="ok">临时隧道已就绪</Badge></div>
             )}
-            {tun.binaryFound && tun.enabled && !tun.connecting && !tun.running && tun.error && (
+            {tun?.binaryFound && tun.enabled && !tun.connecting && !tun.running && tun.error && (
               <div className="mob-sub" style={{ color: 'var(--danger, #e5484d)' }}>{tun.error}</div>
             )}
           </div>
@@ -140,7 +171,7 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
                 ))}
               </div>
             )}
-            {tun?.running && publicUrl && (
+            {publicSource && (
               <div className="mob-qr-switch">
                 <button type="button" className={!showPublic ? 'active' : ''} onClick={() => setQrMode('lan')}>局域网</button>
                 <button type="button" className={showPublic ? 'active' : ''} onClick={() => setQrMode('public')}>公网</button>
@@ -148,15 +179,23 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
             )}
             <ul className="mob-notes">
               {showPublic ? (
-                <>
-                  <li>公网模式：手机用<b>任意网络</b>（蜂窝/别的 Wi-Fi）扫码即可</li>
-                  <li>流量经 <b>Cloudflare 加密隧道</b>；国内直连 Cloudflare 偶尔不稳，打不开可切回局域网模式</li>
-                  <li>地址每次开启都变，重开公网接入后需重新扫码</li>
-                </>
+                publicSource === 'relay' ? (
+                  <>
+                    <li>公网固定入口：手机用<b>任意网络</b>（蜂窝/别的 Wi-Fi）扫码即可</li>
+                    <li>地址<b>固定不变</b>，电脑重启后无需重新扫码；流量经中继网关转发</li>
+                    <li>token 即完整访问权（看会话/发消息/审批），不要发给不信任的人</li>
+                  </>
+                ) : (
+                  <>
+                    <li>公网临时隧道：地址<b>每次开启都变</b>，重开后需重新扫码</li>
+                    <li>国内网络对临时隧道域名常有干扰，打不开请改用「公网（固定入口）」</li>
+                  </>
+                )
               ) : (
                 <>
                   <li>手机与电脑连<b>同一个 Wi-Fi</b>；扫码或输入地址即可打开</li>
                   <li>首次启用 Windows 防火墙可能弹窗，请<b>允许（专用网络）</b>，否则手机连不上</li>
+                  <li>多网卡电脑有多个地址：某个扫码打不开就切下面的 IP 再扫</li>
                 </>
               )}
               <li>手机浏览器里点「添加到主屏幕」可当 App 用</li>
