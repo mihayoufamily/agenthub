@@ -204,7 +204,7 @@ async function handleReq(pack: { id: string; method?: string; path: string; quer
 
 // ---------- 连接生命周期 ----------
 
-function connect() {
+function connect(overrideUrl?: string) {
   const p = readPref()
   if (!p.enabled || !p.relay || sock) return
   if (!p.token) { curError = '手机端服务尚未生成 token（先开关一次服务）'; push(); return }
@@ -212,10 +212,11 @@ function connect() {
   curError = undefined
   push()
 
+  const relayUrl = overrideUrl ?? p.relayUrl
   let client: WsClient
   try {
     // URL 携带 token：Worker 版网关靠它路由 DO（Node 版在 hello 里兼容）
-    client = new WsClient(p.relayUrl + '/?t=' + p.token)
+    client = new WsClient(relayUrl + '/?t=' + p.token)
   } catch (e) {
     curError = `网关地址无效：${e instanceof Error ? e.message : String(e)}`
     scheduleReconnect()
@@ -244,6 +245,7 @@ function connect() {
     sock = null
     helloOk = false
     if (closedByUs) { push(); return } // 主动关闭：不重连、不报错
+    if (!curError) curError = '无法连接中继网关（本机网络到 Cloudflare 可能受限，自动重试中；局域网入口不受影响）'
     scheduleReconnect()
   }
 }
@@ -255,7 +257,10 @@ function scheduleReconnect() {
   const delay = Math.min(1000 * 2 ** reconnectAttempt, RECONNECT_MAX_MS)
   reconnectAttempt++
   if (reconnectTimer) clearTimeout(reconnectTimer)
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect() }, delay)
+  // 双端口容灾：wss:443 与 ws:80 交替尝试——运营商对 443 的间歇性阻断常放过 80（实测 2026-10-26）
+  const attemptWs = reconnectAttempt % 2 === 1 && p.relayUrl.startsWith('wss:')
+  const url = attemptWs ? p.relayUrl.replace(/^wss:/, 'ws:').replace(/:443$/, '').replace(/(:\d+)?$/, ':80') : p.relayUrl
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(url) }, delay)
 }
 
 function disconnect() {

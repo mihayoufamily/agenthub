@@ -151,32 +151,47 @@ export function MobileAccessModal({ open, onClose }: { open: boolean; onClose: (
 
         {on && running && url && (
           <>
-            <div className="mob-qr" dangerouslySetInnerHTML={{ __html: qrSvg(url) }} />
-            <div className="mob-url">
-              <code>{url}</code>
-              <CopyButton getText={() => url} label="复制" />
+            {/* 模式切换置顶：先选通道，再看对应的码 */}
+            <div className="mob-qr-tabs">
+              <button type="button" className={!showPublic ? 'active' : ''} onClick={() => setQrMode('lan')}>
+                📶 局域网
+              </button>
+              {publicSource && (
+                <button type="button" className={showPublic ? 'active' : ''} onClick={() => setQrMode('public')}>
+                  🌐 公网{publicSource === 'relay' ? ' · 固定' : ' · 临时'}
+                </button>
+              )}
             </div>
-            {/* 局域网多地址切换：哪个 IP 手机打得开就用哪个（有线/无线跨域隔离时只有个别通） */}
-            {!showPublic && lanUrls.length > 1 && (
-              <div className="mob-qr-switch">
-                {lanUrls.map((u, i) => (
-                  <button
-                    key={u}
-                    type="button"
-                    className={i === Math.min(lanIdx, lanUrls.length - 1) ? 'active' : ''}
-                    onClick={() => setLanIdx(i)}
-                  >
-                    {u.match(/\/\/([^:]+):/)?.[1] ?? `地址 ${i + 1}`}
-                  </button>
-                ))}
+            {/* 二维码卡片：边框颜色区分通道，顶部标签条写明适用场景 */}
+            <div className={'mob-qr-card ' + (showPublic ? 'pub' : 'lan')}>
+              <div className="mob-qr-tag">
+                {showPublic
+                  ? publicSource === 'relay'
+                    ? '🌐 公网 · 手机用任意网络（蜂窝也行）· 地址固定'
+                    : '🌐 公网临时隧道 · 地址每次开启都变'
+                  : '📶 局域网 · 手机连同一个 Wi-Fi'}
               </div>
-            )}
-            {publicSource && (
-              <div className="mob-qr-switch">
-                <button type="button" className={!showPublic ? 'active' : ''} onClick={() => setQrMode('lan')}>局域网</button>
-                <button type="button" className={showPublic ? 'active' : ''} onClick={() => setQrMode('public')}>公网</button>
+              <div className="mob-qr" dangerouslySetInnerHTML={{ __html: qrSvg(url) }} />
+              <div className="mob-url">
+                <code>{url}</code>
+                <CopyButton getText={() => url} label="复制" />
               </div>
-            )}
+              {/* 局域网多地址切换：哪个 IP 手机打得开就用哪个（有线/无线跨域隔离时只有个别通） */}
+              {!showPublic && lanUrls.length > 1 && (
+                <div className="mob-qr-switch">
+                  {lanUrls.map((u, i) => (
+                    <button
+                      key={u}
+                      type="button"
+                      className={i === Math.min(lanIdx, lanUrls.length - 1) ? 'active' : ''}
+                      onClick={() => setLanIdx(i)}
+                    >
+                      {u.match(/\/\/([^:]+):/)?.[1] ?? `地址 ${i + 1}`}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <ul className="mob-notes">
               {showPublic ? (
                 publicSource === 'relay' ? (
