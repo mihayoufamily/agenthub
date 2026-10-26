@@ -110,6 +110,34 @@ const api = {
       return () => { ipcRenderer.removeListener('scheduler:fire', handler) }
     }
   },
+  /** 手机端查看服务（mobile.ts）：开关/状态查询 + 手机侧写操作的转发事件 */
+  mobile: {
+    status: () => ipcRenderer.invoke('mobile:status') as Promise<{ enabled: boolean; running: boolean; port: number; hasToken: boolean; token?: string; urls: string[] }>,
+    setEnabled: (on: boolean) =>
+      ipcRenderer.invoke('mobile:setEnabled', on) as Promise<{ ok: boolean } & { enabled: boolean; running: boolean; port: number; token?: string; urls: string[] }>,
+    /** 手机侧发来消息（已过 token 与 agentId 校验）；返回退订函数 */
+    onSendMessage: (cb: (m: { agentId: string; text: string }) => void) => {
+      const handler = (_e: unknown, data: { agentId: string; text: string }) => cb(data)
+      ipcRenderer.on('mobile:send-message', handler)
+      return () => { ipcRenderer.removeListener('mobile:send-message', handler) }
+    },
+    /** 手机侧发来审批决定（deliver/rework/stop）；返回退订函数 */
+    onGateDecision: (cb: (d: { runId: string; action: 'deliver' | 'rework' | 'stop'; feedback?: string }) => void) => {
+      const handler = (_e: unknown, data: { runId: string; action: 'deliver' | 'rework' | 'stop'; feedback?: string }) => cb(data)
+      ipcRenderer.on('mobile:gate-decision', handler)
+      return () => { ipcRenderer.removeListener('mobile:gate-decision', handler) }
+    },
+    /** 公网接入（mobile-tunnel.ts）：quick tunnel 状态查询/开关 + 状态变化推送 */
+    tunnelStatus: () =>
+      ipcRenderer.invoke('mobile:tunnelStatus') as Promise<{ enabled: boolean; running: boolean; connecting: boolean; url?: string; error?: string; binaryFound: boolean }>,
+    setTunnelEnabled: (on: boolean) =>
+      ipcRenderer.invoke('mobile:setTunnelEnabled', on) as Promise<{ ok: boolean } & { enabled: boolean; running: boolean; connecting: boolean; url?: string; error?: string; binaryFound: boolean }>,
+    onTunnelStatus: (cb: (s: { enabled: boolean; running: boolean; connecting: boolean; url?: string; error?: string; binaryFound: boolean }) => void) => {
+      const handler = (_e: unknown, data: { enabled: boolean; running: boolean; connecting: boolean; url?: string; error?: string; binaryFound: boolean }) => cb(data)
+      ipcRenderer.on('mobile:tunnel-status', handler)
+      return () => { ipcRenderer.removeListener('mobile:tunnel-status', handler) }
+    }
+  },
   /** 工作流剧本（目标模板 + 预设 + 计划档的一键载入方案）；rejected 口径同 schedule.set */
   templates: {
     get: () => ipcRenderer.invoke('templates:get') as Promise<WorkflowTemplate[]>,

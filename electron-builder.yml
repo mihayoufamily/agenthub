@@ -9,6 +9,11 @@ files:
   - build/icon.ico
   - "!node_modules/**/*"
   - package.json
+# 公网接入捆绑：mobile-tunnel.ts 按 process.resourcesPath/bin/cloudflared.exe 定位。
+# bin/ 不进 git——CI（release.yml）打包前从 cloudflared 官方 release 下载；本地缺文件时 npm run dist 会失败（预期，NSIS 只走 CI）
+extraResources:
+  - from: bin/cloudflared.exe
+    to: bin/cloudflared.exe
 asar: true
 win:
   target:

@@ -39,7 +39,7 @@ export function IconButton({
   )
 }
 
-export function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+export function Switch({ on, onChange, label, disabled }: { on: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
   return (
     <button
       role="switch"
@@ -47,7 +47,8 @@ export function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boo
       aria-label={label}
       className="switch"
       data-on={on}
-      onClick={() => onChange(!on)}
+      disabled={disabled}
+      onClick={() => { if (!disabled) onChange(!on) }}
     />
   )
 }

@@ -711,3 +711,23 @@
   font-size: 10px; font-weight: 700; line-height: 1;
 }
 .sidebar.collapsed .foot-btn .notif-badge { display: inline-flex; position: absolute; top: -4px; right: 4px; margin-left: 0; }
+
+/* ---- 手机查看弹窗（MobileAccessModal） ---- */
+.mob-wrap { font-size: 13px; }
+.mob-row { display: flex; align-items: flex-start; gap: 14px; justify-content: space-between; }
+.mob-title { font-weight: 600; font-size: 14px; }
+.mob-sub { color: var(--text-dim); margin-top: 3px; line-height: 1.5; }
+.mob-status { margin-top: 12px; }
+.mob-qr { display: flex; justify-content: center; padding: 14px 0 8px; }
+.mob-qr svg { width: 200px; height: 200px; background: #fff; border-radius: 8px; padding: 8px; }
+.mob-url { display: flex; align-items: center; gap: 8px; justify-content: center; margin: 6px 0 10px; }
+.mob-url code { font-size: 12px; color: var(--text-dim); word-break: break-all; text-align: center; }
+.mob-notes { margin: 8px 0 0 16px; color: var(--text-dim); line-height: 1.7; }
+/* 公网接入区块（quick tunnel）：主开关下方的次级面板 */
+.mob-tunnel { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border, rgba(255,255,255,.08)); border-radius: 10px; background: rgba(255,255,255,.02); }
+/* 局域网/公网二维码切换（分段按钮） */
+.mob-qr-switch { display: flex; justify-content: center; gap: 0; margin-bottom: 10px; }
+.mob-qr-switch button { border: 1px solid var(--border, rgba(255,255,255,.12)); background: transparent; color: var(--text-dim); padding: 4px 14px; font-size: 12px; cursor: pointer; }
+.mob-qr-switch button:first-child { border-radius: 6px 0 0 6px; }
+.mob-qr-switch button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.mob-qr-switch button.active { background: var(--accent, #4c7dff); color: #fff; border-color: var(--accent, #4c7dff); }

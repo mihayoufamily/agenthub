@@ -51,6 +51,12 @@ if (existsSync(join(cwd, 'build', 'icon.ico'))) {
 if (existsSync(join(cwd, 'builtin-skills'))) {
   cpSync(join(cwd, 'builtin-skills'), join(appDir, 'builtin-skills'), { recursive: true })
 }
+// bin/cloudflared.exe：公网接入（手机端 quick tunnel）捆绑——放 outDir/resources/bin/（= process.resourcesPath/bin，
+// mobile-tunnel.ts 按此路径定位；缺省跳过=该包不含公网接入，应用内会如实提示）
+if (existsSync(join(cwd, 'bin', 'cloudflared.exe'))) {
+  mkdirSync(join(outDir, 'resources', 'bin'), { recursive: true })
+  cpSync(join(cwd, 'bin', 'cloudflared.exe'), join(outDir, 'resources', 'bin', 'cloudflared.exe'))
+}
 
 // 自校验：rmSync 的 force 会**静默吞掉**删不掉的文件（杀毒/索引器抓着刚写出的文件时真实发生，
 // 2026-10-25 连续两轮部署因此把陈旧 bundle 当新鲜包打了出去，用户实测"改动一个都没生效"）。

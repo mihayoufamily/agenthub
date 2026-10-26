@@ -510,6 +510,23 @@ export interface Prefs {
   keybindings?: Partial<Record<HotkeyAction, string>>
   /** Agent 管理卡片技能区折叠（可选：缺省展开；记住用户上次的展开/折叠选择） */
   agentCardSkillsCollapsed?: boolean
+  /**
+   * 手机端查看服务（2026-10-26 批次）：主进程内建 HTTP 服务，手机浏览器访问只读看板 + 远程发消息/审批。
+   * enabled 缺省 false——能执行命令的应用绝不默认开网络入口；token 是配对凭据（QR 扫码携带），
+   * 导出配置时必须剥离（store.exportConfig 同 MCP env 口径）。
+   */
+  mobileService?: {
+    enabled: boolean
+    /** 监听端口（固定默认，暂不开放 UI 修改；冲突时用户改 hosts/端口由后续版本处理） */
+    port: number
+    /** 配对 token（hex；生成于首次启用。明文存 config——与"导出剥离、界面不回显"配套） */
+    token: string
+    /**
+     * 公网接入意图（2026-10-26 批次）：捆绑 cloudflared quick tunnel，免 Wi-Fi 同网访问。
+     * 只存"上次开关状态"——实际拉起跟随 enabled（服务关则隧道必停）；trycloudflare 地址每次启动都变。
+     */
+    tunnel?: boolean
+  }
 }
 
 /** 持久化配置（带版本号，支持迁移） */

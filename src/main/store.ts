@@ -256,6 +256,8 @@ export class Store {
         for (const k of Object.keys(s.env)) s.env[k] = ''
       }
     }
+    // 手机端服务的配对 token 同口径：值置空（导入后首次开启服务时会自动重新生成）
+    if (cfg.prefs.mobileService) cfg.prefs.mobileService.token = ''
     return JSON.stringify({ ...cfg, exportedAt: new Date().toISOString(), note: 'API Key 不会被导出，导入后需重新填写；MCP server 的环境变量值已置空，导入后需重填' }, null, 2)
   }
 

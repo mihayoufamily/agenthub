@@ -81,6 +81,20 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M4 20h16" />
       <path d="M7 20v-6M12 20V6M17 20v-9" />
     </>
+  ),
+  /* 通知中心：铃铛（侧栏底栏入口；哑音缺口走钟口下缘，视觉重心和其余 15px 图标对齐） */
+  bell: (
+    <>
+      <path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.7 21a2 2 0 01-3.4 0" />
+    </>
+  ),
+  /* 手机查看：手机轮廓 + 底部 home 条 */
+  phone: (
+    <>
+      <rect x="7" y="2.5" width="10" height="19" rx="2.2" />
+      <path d="M11 18.5h2" />
+    </>
   )
 }
 

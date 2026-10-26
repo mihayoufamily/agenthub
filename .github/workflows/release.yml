@@ -42,6 +42,17 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      # 公网接入（手机端 quick tunnel）捆绑：bin/ 不进 git（15MB 二进制），CI 打包前现下
+      - name: 下载 cloudflared（捆绑到 resources/bin）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile bin/cloudflared.exe
+          $n = (Get-Item bin/cloudflared.exe).Length
+          Write-Host "cloudflared.exe：$([math]::Round($n / 1MB, 1)) MB"
+          if ($n -lt 5MB) { Write-Error "cloudflared.exe 只有 $n 字节，下载不完整"; exit 1 }
+
       - run: npm run pack:portable
 
       - name: 打 zip（平铺，解压即见 AgentHub.exe）
@@ -138,6 +149,14 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      # extraResources 引用 bin/cloudflared.exe（electron-builder.yml），文件必须先就位
+      - name: 下载 cloudflared（捆绑到安装包 resources/bin）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile bin/cloudflared.exe
+          if ((Get-Item bin/cloudflared.exe).Length -lt 5MB) { Write-Error "cloudflared.exe 下载不完整"; exit 1 }
 
       # dist = npm run build && electron-builder --win（build 里含 typecheck，所以不用再单跑一遍 build）
       # --publish never 是必需的：electron-builder 一认出 CI 就自己去发 GitHub Release

@@ -11,6 +11,7 @@ import { NotificationCenter } from '../components/NotificationCenter'
 import { LogoMark } from '../components/Logo'
 import { SkillCenter } from './SkillCenter'
 import { AgentEditModal } from './AgentEditModal'
+import { MobileAccessModal } from './MobileAccessModal'
 import { Avatar, StatusDot, statusText, IconButton } from '../components/primitives'
 import { cls, fmtTokens } from '../lib/utils'
 import { WfTaskList } from './WfChips'
@@ -35,6 +36,8 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
   const openSettings = useUi((s) => s.openSettings)
   // 技能中心开关：纯本弹窗的局部状态，不进 ui store（无跨组件打开需求，少一条全局状态）
   const [skillCenterOpen, setSkillCenterOpen] = useState(false)
+  // 手机查看弹窗：同上局部状态
+  const [mobileOpen, setMobileOpen] = useState(false)
   // 通知中心面板：开关 + 打开瞬间量好的 fixed 坐标（底边贴触发按钮上方）
   const [notifOpen, setNotifOpen] = useState(false)
   const [notifAnchor, setNotifAnchor] = useState<{ left: number; bottom: number } | null>(null)
@@ -305,12 +308,14 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
           onClick={openNotif}
           title="通知中心"
         >
-          {/* Icons.tsx 里没有铃铛（图标集按需添加，不为单处入口扩集），先用文字占位 */}
-          <span>通知</span>
+          <Icon name="bell" size={15} /> <span>通知</span>
           {unreadNtf > 0 && <span className="notif-badge">{unreadNtf > 9 ? '9+' : unreadNtf}</span>}
         </button>
         <button className="foot-btn" onClick={() => setSkillCenterOpen(true)} title="技能中心">
           <Icon name="download" size={15} /> <span>技能中心</span>
+        </button>
+        <button className="foot-btn" onClick={() => setMobileOpen(true)} title="手机查看">
+          <Icon name="phone" size={15} /> <span>手机查看</span>
         </button>
         <button className="foot-btn" onClick={() => openSettings()} title="设置">
           <Icon name="settings" size={15} /> <span>设置</span>
@@ -320,6 +325,7 @@ export function Sidebar({ onOrder, onAdd }: { onOrder: () => void; onAdd: () => 
       {/* 技能中心：Modal 组件自身 portal 到 body（aside 的入场动画 fill-mode:both 会让
           fixed 后代被困在侧栏里——真实事故，Modal 层统一修掉了），这里挂哪都行 */}
       <SkillCenter open={skillCenterOpen} onClose={() => setSkillCenterOpen(false)} />
+      <MobileAccessModal open={mobileOpen} onClose={() => setMobileOpen(false)} />
 
       {/* 通知中心：不是 Modal，走不到 Modal 的 portal，必须自己 createPortal——
           本面板是 fixed 定位，直接挂在 aside 里会被侧栏入场动画的 transform 裹挟

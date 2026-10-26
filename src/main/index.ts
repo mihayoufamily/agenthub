@@ -2,6 +2,7 @@ import { app, BrowserWindow, nativeTheme, ipcMain, Menu, Tray, dialog, nativeIma
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerIpc } from './ipc'
+import { initMobile } from './mobile'
 import { Store } from './store'
 import * as approvals from './approvals'
 import * as checkpoints from './checkpoints'
@@ -603,6 +604,8 @@ function startApp() {
     checkpoints.init(join(ud, 'checkpoints'))
     ledger.init(join(ud, 'ledger.jsonl'))
     registerIpc(() => store as Store, () => mainWindow)
+    // 手机端查看服务（mobile.ts 自注册 IPC；上次开着就随应用恢复——跟随配置口径）
+    initMobile({ getStore: () => store as Store, getWin: () => mainWindow })
     // 兼容模式事实（只读）：徽章与设置页都问主进程"实际关掉了什么"，自己不留状态。
     // 为什么写在 index.ts 而不是 ipc.ts：compatState 是本模块的模块级状态，
     // 挪进 ipc.ts 就得让 ipc.ts 反向 import index.ts 拿 getter —— index.ts 已经 import 了

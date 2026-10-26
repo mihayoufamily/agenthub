@@ -4,6 +4,7 @@ import { useUi } from './stores/ui'
 import { useSettings } from './stores/settings'
 import { useAgents } from './stores/agents'
 import { useWorkflow, runBusy } from './stores/workflow'
+import { useSessions } from './stores/sessions'
 import { useNotifications } from './stores/notifications'
 import { HOTKEY_DEFAULTS, type HotkeyAction } from '@shared/types'
 import { matchKeyBinding, validateKeyBinding } from './lib/utils'
@@ -186,6 +187,36 @@ export function App() {
       })
       useWorkflow.getState().startScheduled(schedule)
     })
+  }, [])
+
+  // 手机端写操作转发（main 已过 token 与 agentId 校验，这里只做业务侧裁决）：
+  // 发消息走 sessions 的既有发送路径（与桌面输入框同一条链，技能注入/演示隔离/错误处理全复用）；
+  // 审批只认 runId 与当前运行一致的请求——手机上看到的是几秒前的快照，run 对不上就拒，绝不误批别的任务
+  useEffect(() => {
+    const offSend = bridge.mobile.onSendMessage(({ agentId, text }) => {
+      const agent = useAgents.getState().agents.find((a) => a.id === agentId)
+      useNotifications.getState().push({
+        kind: 'task',
+        title: `手机侧消息已送入：${agent?.name ?? agentId}`,
+        body: text.slice(0, 50)
+      })
+      useUi.getState().toast(`手机侧消息已送入 ${agent?.name ?? 'Agent'}`)
+      void useSessions.getState().sendMessage(agentId, text, [], undefined)
+    })
+    const offGate = bridge.mobile.onGateDecision(({ runId, action, feedback }) => {
+      const cur = useWorkflow.getState().run
+      if (!cur || cur.id !== runId) {
+        useUi.getState().toast('手机侧审批被拒绝：该任务不在当前等待状态（可能已结束或已更新）', 'error')
+        return
+      }
+      useNotifications.getState().push({
+        kind: 'task',
+        title: `手机侧审批：${action === 'deliver' ? '通过' : action === 'rework' ? '返工' : '停止'}`,
+        body: (cur.goal ?? '').slice(0, 50)
+      })
+      void useWorkflow.getState().confirmGate(action, feedback)
+    })
+    return () => { offSend(); offGate() }
   }, [])
 
   const askDownload = () => {
