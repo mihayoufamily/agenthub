@@ -42,8 +42,23 @@ let getWinRef: () => BrowserWindow | null = () => null
 
 // ---------- RFC6455 客户端（最小子集：text/close/ping/pong；客户端帧必 mask） ----------
 
+/** HTTP CONNECT 代理参数（校园网/公司网对 CF 直连被阻断时，经代理出站绕行） */
+interface ProxyConf { host: string; port: number }
+
+/** 从环境变量读代理（HTTPS_PROXY > HTTP_PROXY；多数代理软件会自动设置或用户手动设置） */
+function proxyFromEnv(): ProxyConf | undefined {
+  const raw = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.HTTP_PROXY ?? process.env.http_proxy
+  if (!raw) return undefined
+  try {
+    const u = new URL(raw)
+    if ((u.protocol === 'http:' || u.protocol === 'https:') && u.hostname) return { host: u.hostname, port: Number(u.port) || 8080 }
+  } catch { /* 格式不对当没有 */ }
+  return undefined
+}
+
 class WsClient {
-  private socket: net.Socket
+  // 异步路径赋值（直连/代理隧道/TLS 升级三态），! 断言构造后必然就位
+  private socket!: net.Socket
   private buf = Buffer.alloc(0)
   private handshakeDone = false
   alive = true
@@ -51,41 +66,69 @@ class WsClient {
   onclose: (() => void) | null = null
   onopen: (() => void) | null = null
 
-  constructor(url: string) {
+  constructor(url: string, proxy?: ProxyConf) {
     const u = new URL(url)
-    const port = Number(u.port) || (u.protocol === 'wss:' ? 443 : 80)
+    const targetPort = Number(u.port) || (u.protocol === 'wss:' ? 443 : 80)
     const secure = u.protocol === 'wss:'
-    this.socket = secure
-      ? tls.connect({ host: u.hostname, port, servername: u.hostname })
-      : net.connect({ host: u.hostname, port })
     const key = crypto.randomBytes(16).toString('base64')
     // query 必须带上（Worker 版靠 ?t=token 路由 DO；只发 pathname 会 401）
     const reqPath = (u.pathname === '/' ? '/' : u.pathname) + u.search
-    this.socket.write(
-      `GET ${reqPath} HTTP/1.1\r\n` +
-      `Host: ${u.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
-      `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
-    )
-    let handshakeBuf = Buffer.alloc(0)
-    this.socket.on('data', (d) => {
-      if (!this.handshakeDone) {
-        handshakeBuf = Buffer.concat([handshakeBuf, d])
-        const idx = handshakeBuf.indexOf('\r\n\r\n')
+
+    let wire: net.Socket | null = null // 到目标的原始字节通道（直连 socket 或 CONNECT 隧道）
+    const startWs = (raw: net.Socket) => {
+      wire = secure
+        ? tls.connect({ socket: raw, servername: u.hostname })
+        : raw
+      this.socket = wire
+      wire.on('data', (d) => {
+        if (!this.handshakeDone) {
+          this.buf = Buffer.concat([this.buf, d])
+          const idx = this.buf.indexOf('\r\n\r\n')
+          if (idx < 0) return
+          const head = this.buf.subarray(0, idx).toString('utf8')
+          const expected = crypto.createHash('sha1').update(key + WS_GUID).digest('base64')
+          if (!/HTTP\/1\.1 101/.test(head) || !head.includes(expected)) { this.#dead(); return }
+          this.handshakeDone = true
+          const rest = this.buf.subarray(idx + 4)
+          this.buf = Buffer.alloc(0)
+          if (rest.length) this.#feed(rest)
+          this.onopen?.()
+          return
+        }
+        this.#feed(d)
+      })
+      wire.on('error', () => this.#dead())
+      wire.on('close', () => this.#dead())
+      wire.write(
+        `GET ${reqPath} HTTP/1.1\r\n` +
+        `Host: ${u.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+        `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+      )
+    }
+
+    if (proxy) {
+      // 经代理：TCP 到代理 → CONNECT 建隧道 → 隧道上做（TLS +）WS 握手
+      const raw = net.connect(proxy.port, proxy.host)
+      let cbuf = Buffer.alloc(0)
+      const onConnectData = (d: Buffer) => {
+        cbuf = Buffer.concat([cbuf, d])
+        const idx = cbuf.indexOf('\r\n\r\n')
         if (idx < 0) return
-        const head = handshakeBuf.subarray(0, idx).toString('utf8')
-        const expected = crypto.createHash('sha1').update(key + WS_GUID).digest('base64')
-        if (!/HTTP\/1\.1 101/.test(head) || !head.includes(expected)) { this.#dead(); return }
-        this.handshakeDone = true
-        const rest = handshakeBuf.subarray(idx + 4)
-        handshakeBuf = Buffer.alloc(0)
-        if (rest.length) this.#feed(rest)
-        this.onopen?.()
-        return
+        raw.off('data', onConnectData)
+        const head = cbuf.subarray(0, idx).toString('utf8')
+        if (!/HTTP\/1\.1 200/.test(head)) { this.#dead(); return } // 代理拒绝（403/407 等）
+        startWs(raw) // 隧道内的剩余字节应为空（TLS 从头开始）
       }
-      this.#feed(d)
-    })
-    this.socket.on('error', () => this.#dead())
-    this.socket.on('close', () => this.#dead())
+      raw.on('connect', () => raw.write(`CONNECT ${u.hostname}:${targetPort} HTTP/1.1\r\nHost: ${u.hostname}:${targetPort}\r\n\r\n`))
+      raw.on('data', onConnectData)
+      raw.on('error', () => this.#dead())
+      raw.on('close', () => { if (!wire) this.#dead() })
+    } else {
+      const raw = net.connect(targetPort, u.hostname)
+      raw.on('connect', () => startWs(raw))
+      raw.on('error', () => this.#dead())
+      raw.on('close', () => { if (!wire) this.#dead() })
+    }
   }
   #feed(d: Buffer) {
     this.buf = Buffer.concat([this.buf, d])
@@ -204,7 +247,7 @@ async function handleReq(pack: { id: string; method?: string; path: string; quer
 
 // ---------- 连接生命周期 ----------
 
-function connect(overrideUrl?: string) {
+function connect(attempt = 0) {
   const p = readPref()
   if (!p.enabled || !p.relay || sock) return
   if (!p.token) { curError = '手机端服务尚未生成 token（先开关一次服务）'; push(); return }
@@ -212,14 +255,23 @@ function connect(overrideUrl?: string) {
   curError = undefined
   push()
 
-  const relayUrl = overrideUrl ?? p.relayUrl
+  // 三通道轮换（每次重连换一条，总有一条能活）：
+  //   代理-wss（env 代理存在时）→ 直连-wss:443 → 直连-ws:80
+  // 校园网/公司网对 CF 直连被阻断时，代理通道兜底；无代理环境自动退化为双端口轮换
+  const proxy = proxyFromEnv()
+  const seq: { url: string; proxy?: ProxyConf }[] = []
+  if (proxy) seq.push({ url: p.relayUrl, proxy })
+  seq.push({ url: p.relayUrl })
+  seq.push({ url: p.relayUrl.replace(/^wss:/, 'ws:').replace(/:443$/, '') })
+  const pick = seq[attempt % seq.length]
+
   let client: WsClient
   try {
     // URL 携带 token：Worker 版网关靠它路由 DO（Node 版在 hello 里兼容）
-    client = new WsClient(relayUrl + '/?t=' + p.token)
+    client = new WsClient(pick.url + '/?t=' + p.token, pick.proxy)
   } catch (e) {
     curError = `网关地址无效：${e instanceof Error ? e.message : String(e)}`
-    scheduleReconnect()
+    scheduleReconnect(attempt)
     return
   }
   sock = client
@@ -245,22 +297,19 @@ function connect(overrideUrl?: string) {
     sock = null
     helloOk = false
     if (closedByUs) { push(); return } // 主动关闭：不重连、不报错
-    if (!curError) curError = '无法连接中继网关（本机网络到 Cloudflare 可能受限，自动重试中；局域网入口不受影响）'
-    scheduleReconnect()
+    if (!curError) curError = '无法连接中继网关（自动在 代理/直连/备用端口 间轮换重试；局域网入口不受影响）'
+    scheduleReconnect(attempt)
   }
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(attempt: number) {
   push()
   const p = readPref()
   if (closedByUs || !p.enabled || !p.relay) return
-  const delay = Math.min(1000 * 2 ** reconnectAttempt, RECONNECT_MAX_MS)
-  reconnectAttempt++
+  const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), RECONNECT_MAX_MS)
+  reconnectAttempt = attempt + 1
   if (reconnectTimer) clearTimeout(reconnectTimer)
-  // 双端口容灾：wss:443 与 ws:80 交替尝试——运营商对 443 的间歇性阻断常放过 80（实测 2026-10-26）
-  const attemptWs = reconnectAttempt % 2 === 1 && p.relayUrl.startsWith('wss:')
-  const url = attemptWs ? p.relayUrl.replace(/^wss:/, 'ws:').replace(/:443$/, '').replace(/(:\d+)?$/, ':80') : p.relayUrl
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(url) }, delay)
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(attempt + 1) }, delay)
 }
 
 function disconnect() {

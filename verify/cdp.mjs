@@ -78,6 +78,11 @@ export function launchEnv() {
   delete env.ELECTRON_NO_ATTACH_CONSOLE
   // NODE_OPTIONS 是宿主会话注入的 shim require（打包应用不支持且与主进程启动竞态），一律剥离
   delete env.NODE_OPTIONS
+  // 代理变量同理剥离：宿主会话的代理指向本机随机端口（多半已失效），会让中继/网络类测试踩空
+  delete env.HTTPS_PROXY
+  delete env.https_proxy
+  delete env.HTTP_PROXY
+  delete env.http_proxy
   return env
 }
 
