@@ -3504,6 +3504,58 @@ console.log('\n[OM] 官方模型服务：parseOfficialModelsIndex 闸门 / offic
     oaSrcOM.error ?? 'testConnection 不读错误正文')
 }
 
+// ---------- [GM] GitHub 镜像回退（ghmirror 纯函数）+ 内置快照在场 ----------
+// 事实：raw.githubusercontent.com 国内大面积不可达（2026-10-27 实测 TLS 握手直挂），
+// api.github.com 通常可达。official-models / market 都走 raw → api 镜像 → 内置快照三级回退。
+console.log('\n[GM] GitHub 镜像回退：URL 变换 / base64 解码 / 内置快照在场 / 回退链接线')
+{
+  let gm = null
+  try {
+    gm = await import('../out/main/ghmirror.js')
+  } catch (e) {
+    ok('out/main/ghmirror.js 存在（编译产物）', false, String(e && e.message))
+  }
+  if (gm) {
+    ok('apiUrlFromRaw：标准 raw URL → api contents（含 ref）',
+      gm.apiUrlFromRaw('https://raw.githubusercontent.com/mihayoufamily/agenthub-models/main/index.json') ===
+        'https://api.github.com/repos/mihayoufamily/agenthub-models/contents/index.json?ref=main',
+      String(gm.apiUrlFromRaw('https://raw.githubusercontent.com/mihayoufamily/agenthub-models/main/index.json')))
+    ok('apiUrlFromRaw：嵌套路径（packs/xxx.zip）原样映射',
+      gm.apiUrlFromRaw('https://raw.githubusercontent.com/mihayoufamily/agenthub-skills/main/packs/code-review-1.0.0.zip')?.endsWith('/contents/packs/code-review-1.0.0.zip?ref=main') === true)
+    ok('apiUrlFromRaw：非 raw 官方域拒绝（防镜像通道被拿去拉任意 URL）',
+      gm.apiUrlFromRaw('https://evil.example.com/a/b/main/c.json') === null &&
+      gm.apiUrlFromRaw('https://raw.githubusercontent.com.evil.com/a/b/main/c') === null)
+    const sample = Buffer.from('{"endpoint":"https://x/v1","models":[1]}', 'utf-8').toString('base64')
+    ok('decodeApiContents：base64 信封 → 原文；非 base64 形态如实拒绝',
+      gm.decodeApiContents(JSON.stringify({ encoding: 'base64', content: sample })) === '{"endpoint":"https://x/v1","models":[1]}' &&
+      gm.decodeApiContents(JSON.stringify({ encoding: 'none', content: 'x' })) === null &&
+      gm.decodeApiContents('not json') === null)
+  }
+  // 内置快照随包在场（dev 在仓库根；pack-portable 会拷进 resources/app/builtin/registry）
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url))
+  let marketMod = null
+  let omMod = null
+  try { marketMod = await import('../out/main/market.js') } catch { /* 只为 parseRegistryIndex，缺席时快照断言会失败并点名 */ }
+  try { omMod = await import('../out/main/official-models.js') } catch { /* 同上 */ }
+  const omSnap = (() => { try { return readFileSync(join(repoRoot, 'builtin', 'registry', 'official-models.json'), 'utf-8') } catch { return null } })()
+  const skSnap = (() => { try { return readFileSync(join(repoRoot, 'builtin', 'registry', 'skills.json'), 'utf-8') } catch { return null } })()
+  ok('内置快照在场且为合法清单（official-models.json / skills.json）',
+    (() => {
+      if (!omSnap || !skSnap) return false
+      const omR = omMod?.parseOfficialModelsIndex?.(omSnap)
+      const mkR = marketMod?.parseRegistryIndex?.(skSnap)
+      return !!omR?.ok && !!mkR?.ok
+    })(), `om=${!!omSnap} sk=${!!skSnap}`)
+  // 回退链接线（源码绊线：official-models 与 market 都必须引 ghmirror 且带内置快照读取）
+  const omSrc = readFileSync(join(repoRoot, 'src', 'main', 'official-models.ts'), 'utf-8')
+  const mkSrc = readFileSync(join(repoRoot, 'src', 'main', 'market.ts'), 'utf-8')
+  ok('official-models/market 均接线镜像回退 + 内置快照（fetchTextWithMirror/builtin/registry）',
+    omSrc.includes("from './ghmirror'") && omSrc.includes('fromBuiltin') &&
+    mkSrc.includes("from './ghmirror'") && mkSrc.includes('fetchBufferWithMirror') &&
+    mkSrc.includes('fromBuiltin') &&
+    omSrc.includes("builtin', 'registry'") && mkSrc.includes("builtin', 'registry'"))
+}
+
 // ---------- [BM] 内置 MCP 基础组（进程内）+ 新 Agent 默认工具 ----------
 // 行为面：out/shared/default-tools.js（纯函数）+ out/main/mcp.js 的 BuiltinMcpClient
 // （进程内实现，纯 node 可连可调，注入内存 fake 做记忆往返）；接线用源码绊线钉住。

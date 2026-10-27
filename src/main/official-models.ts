@@ -5,7 +5,8 @@
 // 关键区别：这里**不下载任何东西**——清单只描述"端点 + 模型 id/名称/描述/上下文长度"，
 // 真正的调用走既有自定义模型通道（model:test / model:chat），本模块零执行面、零新增信任面。
 import { join } from 'node:path'
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { fetchTextWithMirror } from './ghmirror'
 
 /** 注册表仓库：mihayoufamily/agenthub-models（与 agenthub-skills 同一维护方；改模型/换端点提 PR 改 index.json，不用发应用版） */
 export const MODELS_REGISTRY_URL = 'https://raw.githubusercontent.com/mihayoufamily/agenthub-models/main/index.json'
@@ -32,6 +33,10 @@ export interface OfficialModelsResult {
   error?: string
   /** true = 数据来自本地缓存（304 命中或网络失败回退）——界面要如实标，不冒充实时数据 */
   fromCache?: boolean
+  /** true = raw 直连失败，数据来自 api.github.com 镜像（内容同源，只是换了通道） */
+  viaMirror?: boolean
+  /** true = 网络全不可达，数据来自随应用打包的内置快照（可能略旧，界面如实标） */
+  fromBuiltin?: boolean
   /** 被跳过的非法条目（点名 id 或位置），不整表拒绝 */
   skipped?: string[]
 }
@@ -104,10 +109,12 @@ interface OfficialModelsCache {
 }
 
 let userDataDir = ''
+let appPathDir = ''
 
-/** 主进程启动时注入 userData 路径（与 market.init 同一个调用点） */
-export function initOfficialModels(ud: string) {
+/** 主进程启动时注入 userData 与 appPath（appPath 用来定位随包内置快照；与 market.init 同一个调用点） */
+export function initOfficialModels(ud: string, appPath: string) {
   userDataDir = ud
+  appPathDir = appPath
 }
 
 function cachePath(): string {
@@ -137,12 +144,30 @@ function netFetch(url: string, init?: RequestInit): Promise<Response> {
   return net.fetch(url, init)
 }
 
+/** 内置快照（随应用打包，dev 在仓库根/builtin/registry，packaged 在 resources/app/builtin/registry） */
+function readBuiltinSnapshot(): string | null {
+  const p = join(appPathDir, 'builtin', 'registry', 'official-models.json')
+  try {
+    return existsSync(p) ? readFileSync(p, 'utf-8') : null
+  } catch {
+    return null
+  }
+}
+
 /**
- * 拉官方模型清单：ETag 缓存（If-None-Match → 304 用缓存）；网络失败有缓存则回缓存并如实标
- * fromCache；两者皆无才 ok:false + 中文原因。取回来仍要过 parseOfficialModelsIndex 同一道闸。
+ * 拉官方模型清单，三级回退：raw（ETag/304）→ api.github.com 镜像 → 内置快照。
+ * 每级来源都如实标注（fromCache / viaMirror / fromBuiltin），不冒充实时数据。
  */
 export async function fetchOfficialModels(): Promise<OfficialModelsResult> {
   const cached = readCache()
+  const accept = (text: string): OfficialModelsResult => {
+    const r = parseOfficialModelsIndex(text)
+    if (r.ok) writeCache({ body: text, fetchedAt: Date.now() })
+    // 上游格式坏了就不覆盖缓存：手里最后一份好数据比"刚拉的坏数据"值钱
+    else if (cached) return { ...parseOfficialModelsIndex(cached.body), fromCache: true, error: r.error }
+    return r
+  }
+  // ① raw 直连（唯一带 ETag/304 协商的通道）
   try {
     const headers: Record<string, string> = {
       'User-Agent': 'AgentHub-Updater',
@@ -150,22 +175,26 @@ export async function fetchOfficialModels(): Promise<OfficialModelsResult> {
     }
     if (cached?.etag) headers['If-None-Match'] = cached.etag
     const res = await netFetch(MODELS_REGISTRY_URL, { headers, signal: AbortSignal.timeout(10000) })
-    if (res.status === 304 && cached) {
-      const r = parseOfficialModelsIndex(cached.body)
-      return { ...r, fromCache: true }
-    }
+    if (res.status === 304 && cached) return { ...parseOfficialModelsIndex(cached.body), fromCache: true }
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const text = await res.text()
-    const r = parseOfficialModelsIndex(text)
-    if (r.ok) writeCache({ etag: res.headers.get('etag') ?? undefined, body: text, fetchedAt: Date.now() })
-    // 上游格式坏了就不覆盖缓存：手里最后一份好数据比"刚拉的坏数据"值钱
-    else if (cached) return { ...parseOfficialModelsIndex(cached.body), fromCache: true, error: r.error }
-    return r
-  } catch (e) {
-    if (cached) {
-      const r = parseOfficialModelsIndex(cached.body)
-      return { ...r, fromCache: true, ...(r.ok ? { error: `网络失败，已回退缓存：${(e as Error).message}` } : {}) }
-    }
-    return { ok: false, models: [], error: `无法获取官方模型清单：${(e as Error).message}（未有任何缓存）` }
+    return accept(await res.text())
+  } catch { /* raw 不可达（国内常态）→ 镜像 */ }
+  // ② api.github.com 镜像（不同基础设施，国内可达性好；内容同源）
+  const mir = await fetchTextWithMirror(MODELS_REGISTRY_URL, netFetch)
+  if (mir.ok && mir.text != null) {
+    const r = accept(mir.text)
+    if (cached && !r.ok) return { ...parseOfficialModelsIndex(cached.body), fromCache: true, viaMirror: true }
+    return r.ok ? { ...r, viaMirror: true } : r
   }
+  // ③ 内置快照（永不落空的底线；快照可能略旧，如实标注）
+  const snap = readBuiltinSnapshot()
+  if (snap != null) {
+    const r = parseOfficialModelsIndex(snap)
+    return {
+      ...r,
+      fromBuiltin: true,
+      ...(r.ok ? { error: '网络不可达，已回退应用内置清单（快照，可能略旧）' } : {})
+    }
+  }
+  return { ok: false, models: [], error: '无法获取官方模型清单：raw 与镜像均不可达，且应用未携带内置清单' }
 }

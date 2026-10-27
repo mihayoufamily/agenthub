@@ -51,6 +51,11 @@ if (existsSync(join(cwd, 'build', 'icon.ico'))) {
 if (existsSync(join(cwd, 'builtin-skills'))) {
   cpSync(join(cwd, 'builtin-skills'), join(appDir, 'builtin-skills'), { recursive: true })
 }
+// builtin/registry/：官方模型清单与技能注册表的内置快照（网络全不可达时的兜底数据源，
+// official-models.ts / market.ts 按 appPath/builtin/registry/*.json 读取）
+if (existsSync(join(cwd, 'builtin', 'registry'))) {
+  cpSync(join(cwd, 'builtin', 'registry'), join(appDir, 'builtin', 'registry'), { recursive: true })
+}
 // bin/cloudflared.exe：公网接入（手机端 quick tunnel）捆绑——放 outDir/resources/bin/（= process.resourcesPath/bin，
 // mobile-tunnel.ts 按此路径定位；缺省跳过=该包不含公网接入，应用内会如实提示）
 if (existsSync(join(cwd, 'bin', 'cloudflared.exe'))) {

@@ -314,7 +314,7 @@ function OfficialTab({ onClose }: { onClose: () => void }) {
             <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="粘贴服务提供方发给你的 key（sk-…）" />
             <span className="help">
               {reg.service ?? '官方模型服务'} · {reg.endpoint}
-              {reg.fromCache ? ' · 清单来自本地缓存' : ''}
+              {reg.fromBuiltin ? ' · 清单来自应用内置快照（网络不可达，可能略旧）' : reg.fromCache ? ' · 清单来自本地缓存' : reg.viaMirror ? ' · 清单经镜像获取' : ''}
               {reg.updatedNote ? ` · ${reg.updatedNote}` : ''}
             </span>
           </div>

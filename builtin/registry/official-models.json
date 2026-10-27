@@ -1,0 +1,31 @@
+{
+  "service": "AgentHub 官方模型服务",
+  "endpoint": "https://zdymodel.de5.net/v1",
+  "updatedNote": "新生图专用入口 flux-image（直接写画什么即可）",
+  "models": [
+    {
+      "id": "auto",
+      "name": "智能路由（聊天·代码·生图）",
+      "desc": "按内容自动分流：画图指令→FLUX 出图（约 1 分钟），代码/推理→27B，日常对话→9B",
+      "contextWindow": 32768
+    },
+    {
+      "id": "flux-image",
+      "name": "FLUX 生图",
+      "desc": "画图专用：直接写要画什么（中文自动翻译成英文提示词），1024×1024，约 1 分钟出图",
+      "contextWindow": 8192
+    },
+    {
+      "id": "qwen3.5-9b",
+      "name": "Qwen3.5-9B · 日常对话",
+      "desc": "速度快，64K 上下文，适合日常问答与长文档阅读",
+      "contextWindow": 65536
+    },
+    {
+      "id": "qwen3.8-27b",
+      "name": "Qwen3.8-27B · 代码推理",
+      "desc": "深度推理与代码，32K 上下文；回答较慢但更深",
+      "contextWindow": 32768
+    }
+  ]
+}

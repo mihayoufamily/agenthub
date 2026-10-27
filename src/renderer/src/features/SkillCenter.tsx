@@ -163,7 +163,7 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
   const [skills, setSkills] = useState<Skill[] | null>(null)
   const [builtin, setBuiltin] = useState<Skill[] | null>(null)
   const [builtinErr, setBuiltinErr] = useState<string | null>(null)
-  const [reg, setReg] = useState<{ items: RegistryItem[]; fromCache: boolean } | null>(null)
+  const [reg, setReg] = useState<{ items: RegistryItem[]; fromCache: boolean; viaMirror?: boolean; fromBuiltin?: boolean } | null>(null)
   const [regErr, setRegErr] = useState<string | null>(null)
   const [regAt, setRegAt] = useState(0)
   /** 正在安装的技能 id：按钮态"安装中…"要精确到卡片，不能整面板一起转圈 */
@@ -194,7 +194,7 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
       .registry()
       .then((r) => {
         setRegAt(Date.now())
-        if (r.ok) setReg({ items: r.items ?? [], fromCache: !!r.fromCache })
+        if (r.ok) setReg({ items: r.items ?? [], fromCache: !!r.fromCache, viaMirror: !!(r as { viaMirror?: boolean }).viaMirror, fromBuiltin: !!(r as { fromBuiltin?: boolean }).fromBuiltin })
         else setRegErr(r.error ?? '注册表拉取失败')
       })
       .catch((e) => setRegErr((e as Error).message || '注册表拉取失败'))
@@ -423,7 +423,10 @@ export function SkillCenter({ open, onClose }: { open: boolean; onClose: () => v
                 )
               })}
             </div>
-            {reg?.fromCache && (
+            {reg?.fromBuiltin && (
+              <div className="skill-center-cache">来自应用内置快照（网络不可达，可能略旧），安装技能包需要联网</div>
+            )}
+            {reg?.fromCache && !reg?.fromBuiltin && (
               // fromCache 必须标明来源与读取时间，不把缓存装成在线数据
               <div className="skill-center-cache">来自缓存（读取于 {fmtTime(regAt)}），当前离线或注册表不可达</div>
             )}

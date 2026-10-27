@@ -15,6 +15,7 @@ import { createZip, extractZip } from './zip'
 import { join, dirname, resolve, sep } from 'node:path'
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { fetchTextWithMirror, fetchBufferWithMirror } from './ghmirror'
 
 // ---------- frontmatter 解析（全仓唯一实现；ipc.ts 的 skill:import 也引用这里） ----------
 
@@ -146,6 +147,10 @@ export interface RegistryResult {
   error?: string
   /** true = 这份数据来自本地缓存（304 命中，或网络失败回退）——界面要如实标，不冒充实时数据 */
   fromCache?: boolean
+  /** true = raw 直连失败，数据来自 api.github.com 镜像（内容同源） */
+  viaMirror?: boolean
+  /** true = 网络全不可达，数据来自随应用打包的内置快照（可能略旧） */
+  fromBuiltin?: boolean
   /** 被跳过的非法条目（点名 id 或位置），不整表拒绝 */
   skipped?: string[]
 }
@@ -238,11 +243,19 @@ function netFetch(url: string, init?: RequestInit): Promise<Response> {
 }
 
 /**
- * 拉注册表：ETag 缓存（If-None-Match → 304 用缓存）；网络失败有缓存则回缓存并如实标 fromCache；
- * 两者皆无才返回 ok:false + 中文原因。取回来仍要过 parseRegistryIndex 同一道闸。
+ * 拉注册表，三级回退：raw（ETag/304）→ api.github.com 镜像 → 内置快照。
+ * 每级来源如实标注（fromCache / viaMirror / fromBuiltin）。取回来仍过 parseRegistryIndex 同一道闸。
  */
 export async function fetchRegistry(): Promise<RegistryResult> {
   const cached = readCache()
+  const accept = (text: string): RegistryResult => {
+    const r = parseRegistryIndex(text)
+    if (r.ok) writeCache({ body: text, fetchedAt: Date.now() })
+    // 上游格式坏了就不覆盖缓存：手里最后一份好数据比"刚拉的坏数据"值钱
+    else if (cached) return { ...parseRegistryIndex(cached.body), fromCache: true, error: r.error }
+    return r
+  }
+  // ① raw 直连（唯一带 ETag/304 协商的通道）
   try {
     const headers: Record<string, string> = {
       'User-Agent': 'AgentHub-Updater',
@@ -255,19 +268,28 @@ export async function fetchRegistry(): Promise<RegistryResult> {
       return { ...r, fromCache: true }
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const text = await res.text()
-    const r = parseRegistryIndex(text)
-    if (r.ok) writeCache({ etag: res.headers.get('etag') ?? undefined, body: text, fetchedAt: Date.now() })
-    // 上游格式坏了就不覆盖缓存：手里最后一份好数据比"刚拉的坏数据"值钱
-    else if (cached) return { ...parseRegistryIndex(cached.body), fromCache: true, error: r.error }
-    return r
-  } catch (e) {
-    if (cached) {
-      const r = parseRegistryIndex(cached.body)
-      return { ...r, fromCache: true, ...(r.ok ? { error: `网络失败，已回退缓存：${(e as Error).message}` } : {}) }
-    }
-    return { ok: false, items: [], error: `无法获取注册表：${(e as Error).message}（未有任何缓存）` }
+    return accept(await res.text())
+  } catch { /* raw 不可达（国内常态）→ 镜像 */ }
+  // ② api.github.com 镜像
+  const mir = await fetchTextWithMirror(REGISTRY_URL, netFetch)
+  if (mir.ok && mir.text != null) {
+    const r = accept(mir.text)
+    if (cached && !r.ok) return { ...parseRegistryIndex(cached.body), fromCache: true, viaMirror: true }
+    return r.ok ? { ...r, viaMirror: true } : r
   }
+  // ③ 内置快照（永不落空的底线）
+  const snapPath = join(dirname(builtinDir), 'builtin', 'registry', 'skills.json')
+  try {
+    if (existsSync(snapPath)) {
+      const r = parseRegistryIndex(readFileSync(snapPath, 'utf-8'))
+      return {
+        ...r,
+        fromBuiltin: true,
+        ...(r.ok ? { error: '网络不可达，已回退应用内置清单（快照，可能略旧）' } : {})
+      }
+    }
+  } catch { /* 快照读不了就走最后的失败返回 */ }
+  return { ok: false, items: [], error: '无法获取注册表：raw 与镜像均不可达，且应用未携带内置清单' }
 }
 
 // ---------- 安装 ----------
@@ -296,17 +318,19 @@ export async function installFromMarket(item: RegistryItem): Promise<InstallResu
   if (typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.sha256)) return { ok: false, message: '条目 sha256 不合法' }
   if (!storeAccess) return { ok: false, message: '技能中心尚未初始化' }
 
-  // 流式下载并增量算哈希，超 2MB 即刻中止：不先落盘再算，坏包一个字节都不给它留地方
+  // 下载（raw 失败自动换 api.github.com 镜像）→ 哈希校验 + 2MB 上限：
+  // 不先落盘再算，坏包一个字节都不给它留地方。镜像只是换读字节的通道，sha256 校验照过。
   let got = 0
   const hash = createHash('sha256')
   const chunks: Buffer[] = []
   try {
-    const res = await netFetch(item.url, { headers: { 'User-Agent': 'AgentHub-Updater' }, signal: AbortSignal.timeout(30000) })
-    if (!res.ok || !res.body) return { ok: false, message: `下载失败：HTTP ${res.status}` }
-    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-      got += chunk.byteLength
+    const dl = await fetchBufferWithMirror(item.url, netFetch)
+    if (!dl.ok || !dl.buf) return { ok: false, message: `下载失败：${dl.message ?? '未知原因'}` }
+    // 128KB 分块喂哈希与缓冲：逻辑与旧的流式口径一致（超限即刻中止）
+    for (let off = 0; off < dl.buf.byteLength; off += 128 * 1024) {
+      const b = dl.buf.subarray(off, Math.min(off + 128 * 1024, dl.buf.byteLength))
+      got += b.byteLength
       if (got > MAX_PACK_BYTES) return { ok: false, message: `包超过 ${Math.round(MAX_PACK_BYTES / 1024 / 1024)}MB 上限，已中止下载` }
-      const b = Buffer.from(chunk)
       hash.update(b)
       chunks.push(b)
     }

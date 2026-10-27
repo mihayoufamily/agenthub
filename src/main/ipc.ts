@@ -163,7 +163,7 @@ export function registerIpc(getStore: () => Store, getWin: () => BrowserWindow |
   // builtinDir 由 app.getAppPath() 推：packaged 时是 <便携根>/resources/app/builtin-skills，
   // dev 时是仓库根/builtin-skills，两种形态都对。存储访问收窄成两个动作注入，见 market.ts。
   market.init(join(app.getAppPath(), 'builtin-skills'), app.getPath('userData'))
-  officialModels.initOfficialModels(app.getPath('userData'))
+  officialModels.initOfficialModels(app.getPath('userData'), app.getAppPath())
   // 内置 MCP 基础组的记忆工具绑定到既有长期记忆存储（memory.json，与 memory:get/set 同一份）
   mcp.bindBuiltinMemory({
     get: () => getStore().getMemory(),
