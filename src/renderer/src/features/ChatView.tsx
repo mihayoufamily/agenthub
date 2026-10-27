@@ -76,6 +76,15 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
   const [mgmtOpen, setMgmtOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [dirOpen, setDirOpen] = useState(false)
+  // 未创建账号（右上角提示）：账号是手机端登录与云端同步的身份载体——
+  // 只有"机主"空档案时引导创建；设置关回来时重查（可能刚在里面建了账号）
+  const settingsOpen = useUi((s) => s.settingsOpen)
+  const openSettings = useUi((s) => s.openSettings)
+  const [noAccount, setNoAccount] = useState(false)
+  useEffect(() => {
+    if (settingsOpen) return
+    void bridge.auth.state().then((s) => setNoAccount(!s.hasAccounts)).catch(() => setNoAccount(false))
+  }, [settingsOpen])
   const [sesOpen, setSesOpen] = useState(false)
   const [skillOpen, setSkillOpen] = useState(false)
   const skillBtnRef = useRef<HTMLButtonElement>(null)
@@ -233,6 +242,15 @@ export function ChatView({ onHandoff }: { onHandoff: () => void }) {
         </div>
         {/* 兼容模式徽章不在这里挂：它单挂在 Shell（工作站/工作流两种模式共用一个挂载点），见 Shell.tsx */}
         <div className="spacer" />
+        {noAccount && (
+          <button
+            className="auth-hint"
+            onClick={() => openSettings('account')}
+            title="账号用于手机端登录与多设备云端同步——创建后可在侧栏一键切换"
+          >
+            未创建账号 · 点击设置
+          </button>
+        )}
         <Button variant="ghost" onClick={() => void exportSession(agent.id)} title="导出当前 Agent 的聊天记录为 Markdown">
           <Icon name="download" size={14} /> 导出会话
         </Button>

@@ -966,3 +966,31 @@
 
 @keyframes fp-in { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: translateX(0); } }
 :root[data-anim='off'] .fp-panel, :root[data-motion='reduced'] .fp-panel { animation: none; }
+
+/* ---- 未创建账号提示（顶栏右上角；琥珀色弱提示，点击直达 设置→账号） ---- */
+.auth-hint {
+  border: 1px solid color-mix(in srgb, #f5a623 45%, transparent);
+  background: color-mix(in srgb, #f5a623 12%, transparent);
+  color: #f7b955;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s;
+}
+.auth-hint:hover { background: color-mix(in srgb, #f5a623 22%, transparent); }
+
+/* ---- 未创建账号提示（顶栏右上角；琥珀色弱提示，点击直达 设置→账号） ---- */
+.auth-hint {
+  border: 1px solid color-mix(in srgb, #f5a623 45%, transparent);
+  background: color-mix(in srgb, #f5a623 12%, transparent);
+  color: #f7b955;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s;
+}
+.auth-hint:hover { background: color-mix(in srgb, #f5a623 22%, transparent); }

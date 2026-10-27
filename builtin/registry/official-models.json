@@ -1,7 +1,7 @@
 {
   "service": "AgentHub 官方模型服务",
-  "endpoint": "https://zdymodel.de5.net/v1",
-  "updatedNote": "新生图专用入口 flux-image（直接写画什么即可）",
+  "endpoint": "https://api.zdymodel.de5.net:8443/v1",
+  "updatedNote": "国内直连入口（api.zdymodel.de5.net:8443，绕开 Cloudflare 干扰）；生图用 flux-image",
   "models": [
     {
       "id": "auto",

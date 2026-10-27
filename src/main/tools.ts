@@ -880,13 +880,31 @@ async function dispatch(
         if (!grant.allowWeb) return { ok: false, output: '拒绝：该 Agent 未授权联网' }
         const query = typeof args.query === 'string' ? args.query.trim() : ''
         if (!query) return { ok: false, output: '拒绝：搜索词为空' }
-        const r = await webGet('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), signal, 'text/html,*/*')
-        if (!r.ok) return { ok: false, output: `搜索失败：${r.output}` }
+        // 双引擎回退：DuckDuckGo（境外质量好）在境内被墙——失败自动切 Bing 国内版
+        // （cn.bing.com 境内可达）。先 DDG 后 Bing，两边的解析各自独立，输出标注引擎来源。
+        let engine = 'DuckDuckGo'
+        let r = await webGet('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), signal, 'text/html,*/*').catch(() => ({ ok: false as const, output: 'DuckDuckGo 不可达' }))
+        if (!r.ok) {
+          engine = 'Bing'
+          r = await webGet('https://cn.bing.com/search?q=' + encodeURIComponent(query) + '&mkt=zh-CN', signal, 'text/html,*/*').catch(() => ({ ok: false as const, output: 'Bing 也不可达' }))
+        }
+        if (!r.ok) return { ok: false, output: `搜索失败（两个引擎都不可达，当前网络可能限制联网）：${r.output}` }
         const html = r.text
+        const results: string[] = []
+        if (engine === 'Bing') {
+          // Bing 国内版结果解析：<li class="b_algo"> 块内 <h2><a href> 标题/链接 + <p> 摘要
+          const blocks = html.split(/(?=<li class="b_algo")/i).filter((b) => b.startsWith('<li'))
+          for (const block of blocks) {
+            if (results.length >= 8) break
+            const head = block.match(/^<li[^>]*>[\s\S]*?<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+            if (!head) continue
+            const snip = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
+            results.push(`${results.length + 1}. ${htmlToText(head[2])}\n   ${head[1]}\n   ${htmlToText(snip?.[1] ?? '').slice(0, 160)}`)
+          }
+        } else {
         // DuckDuckGo HTML 版结果解析（非官方接口，稳定性一般——如实标注）。
         // 按结果块切分：标题/链接/摘要取自同一块。旧实现把摘要按出现顺序与结果按位置配对，
         // 页面里插入广告（有链接无摘要）就会整体错位，把 A 的摘要挂到 B 上喂给模型
-        const results: string[] = []
         const blocks = html.split(/(?=<a[^>]+class="[^"]*result__a)/i).filter((b) => b.startsWith('<a'))
         for (const block of blocks) {
           if (results.length >= 8) break
@@ -901,11 +919,12 @@ async function dispatch(
           const snip = block.match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/i)
           results.push(`${results.length + 1}. ${htmlToText(head[2])}\n   ${target}\n   ${htmlToText(snip?.[1] ?? '').slice(0, 160)}`)
         }
+        }
         return {
           ok: true,
           output: results.length
-            ? `搜索「${query}」前 ${results.length} 条结果（DuckDuckGo）：\n\n${results.join('\n\n')}`
-            : `搜索「${query}」无结果或页面结构变化（DuckDuckGo 非官方接口，可换 web_fetch 直接抓取）`
+            ? `搜索「${query}」前 ${results.length} 条结果（${engine}）：\n\n${results.join('\n\n')}`
+            : `搜索「${query}」无结果或页面结构变化（${engine} 非官方接口，可换 web_fetch 直接抓取）`
         }
       }
       case 'run_command': {
