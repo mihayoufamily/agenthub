@@ -581,6 +581,13 @@ function startApp() {
   })
 
   app.whenReady().then(() => {
+    // Happy Eyeballs（RFC 8305）：双栈域名（如 Cloudflare 的 A+AAAA）下，IPv6 不通时自动快速回退
+    // IPv4。国内"IPv6 开着但不通"的家庭网络极常见——不开这个，fetch 会先撞死在 v6 上报笼统的
+    // fetch failed。Node 20+ 支持；老 Node 上函数不存在就跳过（能力探测，不赌版本）。
+    {
+      const net = require('node:net') as typeof import('node:net') & { setDefaultAutoSelectFamily?: (v: boolean) => void }
+      try { net.setDefaultAutoSelectFamily?.(true) } catch { /* 老运行时没有就保持默认 */ }
+    }
     store = new Store()
     // 真机上主进程的 stdout 是看不见的（打包后没有控制台），而排查"CLI 到底在哪个目录、带了哪些参数"
     // 这件事已经卡过两次。把 console 同时镜像进 logs/main.log（store.log 自带 2MB 上限、失败不阻塞）。

@@ -146,9 +146,12 @@ export async function testConnection(cfg: CustomModelConfig, apiKey: string): Pr
     const models = (data.data ?? []).map((m) => m.id ?? '').filter(Boolean)
     return { ok: true, message: `连接成功，发现 ${models.length} 个模型`, models }
   } catch (e) {
-    const err = e as Error
+    const err = e as Error & { cause?: Error & { code?: string } }
     if (err.name === 'AbortError') return { ok: false, message: '连接超时（8 秒）' }
-    return { ok: false, message: `连接失败：${err.message}` }
+    // fetch failed 本身不携带原因（DNS/TCP/TLS 哪一环断了全在 err.cause 里）——不挖出来用户只能看到一句废话
+    const cause = err.cause
+    const why = cause ? `${cause.code ?? cause.message}` : err.message
+    return { ok: false, message: `连接失败：${why}${/ENOTFOUND/.test(why) ? '（域名解析失败：换 DNS 为 223.5.5.5 再试）' : ''}${/ETIMEDOUT|ECONNRESET|EHOSTUNREACH/.test(why) ? '（网络到服务器不通：该网络可能屏蔽了服务地址，换手机热点对照测试）' : ''}` }
   }
 }
 
